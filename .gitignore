@@ -10,3 +10,6 @@ xcuserdata/
 Vendor/librashader/*.dylib
 Vendor/librashader/librashader.h
 Vendor/librashader/librashader_ld.h
+
+# Wrapped .app output (regenerable via scripts/wrap-app.sh)
+build/

@@ -46,16 +46,35 @@ swift build --product crt-app
 
 ## Run the SwiftUI app
 
+Two options.
+
+### Bare CLI (quick iteration)
+
 ```sh
 ./.build/debug/crt-app
 ```
 
-The app finds `librashader.dylib` and the `slang-shaders/` submodule via these locations, in order:
+The window may open behind other windows because SPM-built executables aren't proper `.app` bundles, so macOS treats them as background processes. Click Cmd-Tab to focus.
 
-1. The `CRT_LIBRASHADER` and `CRT_PRESETS` env vars
-2. Walking up from the executable's directory looking for `Vendor/librashader/librashader.dylib` and `Vendor/slang-shaders/`
+**Don't `open` the bare executable or double-click it in Finder** — Launch Services may hand it to Xcode for "editing".
 
-The default search resolves correctly when running from the repo root after `swift build`.
+### As a proper Mac app (recommended)
+
+```sh
+./scripts/wrap-app.sh
+open build/CrtApp.app
+```
+
+The script wraps the SPM-built binary in `build/CrtApp.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any rebuild.
+
+### How it finds external assets
+
+In order:
+
+1. `CRT_LIBRASHADER` and `CRT_PRESETS` env vars
+2. Walking up from the executable looking for `Vendor/librashader/librashader.dylib` and `Vendor/slang-shaders/`
+
+The bare CLI relies on (2). The wrapped `.app` baked-in `LSEnvironment` makes (1) work regardless of cwd.
 
 ## CLI usage
 
