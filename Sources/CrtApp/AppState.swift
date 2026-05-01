@@ -68,6 +68,36 @@ final class AppState {
     var downscaleHeight: Int = 224    { didSet { renderTick &+= 1 } }
     var downscaleMethod: DownscaleMethod = .area { didSet { renderTick &+= 1 } }
 
+    // MARK: - view (preview-only display state)
+
+    /// Master shader on/off toggle. When false, the preview shows the source
+    /// (or downscaled source) without any CRT shader applied.
+    var shaderEnabled: Bool = true { didSet { renderTick &+= 1 } }
+
+    /// Compare mode: split the preview with a draggable vertical line —
+    /// shader-on on one side, shader-off on the other.
+    var compareEnabled: Bool = false { didSet { renderTick &+= 1 } }
+    /// Normalised x-position of the compare line, 0..1.
+    var compareLineX: Float = 0.5 { didSet { renderTick &+= 1 } }
+
+    /// Preview zoom factor (1.0 = fit, up to 12.0 = 1200%).
+    var zoom: Float = 1.0 {
+        didSet {
+            if zoom <= 1.0 { panX = 0; panY = 0 }
+            renderTick &+= 1
+        }
+    }
+    /// Pan offset in normalised image space (clamped so panning can't expose
+    /// beyond the source bounds at the current zoom).
+    var panX: Float = 0.0 { didSet { renderTick &+= 1 } }
+    var panY: Float = 0.0 { didSet { renderTick &+= 1 } }
+
+    func resetView() {
+        zoom = 1.0
+        panX = 0
+        panY = 0
+    }
+
     // MARK: - shader
 
     var selectedPreset: PresetEntry = Presets.all[0] {

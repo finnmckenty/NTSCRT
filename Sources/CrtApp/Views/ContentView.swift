@@ -33,6 +33,8 @@ private struct Sidebar: View {
                 Divider()
                 ShaderPanel()
                 Divider()
+                ViewPanel()
+                Divider()
                 ExportPanel()
             }
             .padding(16)

@@ -8,8 +8,26 @@ struct ShaderPanel: View {
     var body: some View {
         @Bindable var state = state
         VStack(alignment: .leading, spacing: 8) {
-            Text("Shader").font(.headline)
+            HStack {
+                Text("Shader").font(.headline)
+                Spacer()
+                Toggle("", isOn: $state.shaderEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .help("Enable/disable the CRT shader. Off shows the (optionally-downscaled) source.")
+            }
 
+            shaderConfig
+                .opacity(state.shaderEnabled ? 1 : 0.4)
+                .allowsHitTesting(state.shaderEnabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var shaderConfig: some View {
+        @Bindable var state = state
+        VStack(alignment: .leading, spacing: 8) {
             Picker("Preset", selection: $state.selectedPreset) {
                 ForEach(Presets.all) { preset in
                     Text(preset.displayName).tag(preset)
@@ -34,7 +52,6 @@ struct ShaderPanel: View {
                 ParamControl(param: param)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func resetAll() {
