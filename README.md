@@ -2,14 +2,20 @@
 
 A native macOS tool that runs RetroArch CRT shaders on still images and (eventually) video, with a normal mouse/keyboard UI instead of RetroArch's gamepad menus. Built around [librashader](https://github.com/SnowflakePowered/librashader), so output matches RetroArch frame-for-frame.
 
-Status: **Phase 1 (librashader bridge) + downscale pre-pass: working via CLI.** SwiftUI app shell and video pipeline still to come.
+Status:
+- **Phase 1** — librashader bridge: working, all 6 shaders verified.
+- **Phase 1+** — downscale pre-pass: working, all 5 sampling methods verified.
+- **Phase 2** — SwiftUI app shell with sidebar (source / downscale / shader / export panels) and live MTKView preview: builds and launches. Visual verification of the window UI is pending (waiting on full Xcode for proper iteration).
+- **Phase 3** — video pipeline: not yet built.
 
 ## Layout
 
 ```
 Sources/
   CrtAppBridge/    Objective-C wrapper around librashader's Metal C API
+  CrtCore/         Shared Swift: Downscaler, Pipeline, ImageIO, presets list
   CrtSmoke/        CLI verifier: input image → optional downscale → shader → PNG
+  CrtApp/          SwiftUI app: sidebar UI + MTKView preview + PNG export
 Vendor/
   librashader/     librashader.dylib + headers (built locally; not in git)
   slang-shaders/   submodule of libretro/slang-shaders (preset .slangp files)
@@ -33,9 +39,23 @@ git clone --depth 1 https://github.com/SnowflakePowered/librashader.git /tmp/lib
 cp /tmp/librashader-src/target/release/liblibrashader_capi.dylib Vendor/librashader/librashader.dylib
 install_name_tool -id @rpath/librashader.dylib Vendor/librashader/librashader.dylib
 
-# Build the CLI verifier.
+# Build the CLI verifier and the SwiftUI app.
 swift build --product crt-smoke
+swift build --product crt-app
 ```
+
+## Run the SwiftUI app
+
+```sh
+./.build/debug/crt-app
+```
+
+The app finds `librashader.dylib` and the `slang-shaders/` submodule via these locations, in order:
+
+1. The `CRT_LIBRASHADER` and `CRT_PRESETS` env vars
+2. Walking up from the executable's directory looking for `Vendor/librashader/librashader.dylib` and `Vendor/slang-shaders/`
+
+The default search resolves correctly when running from the repo root after `swift build`.
 
 ## CLI usage
 

@@ -1,7 +1,7 @@
 import Foundation
 import Metal
 
-enum DownscaleMethod: String, CaseIterable {
+public enum DownscaleMethod: String, CaseIterable, Sendable {
     case nearest, bilinear, bicubic, lanczos, area
 }
 
@@ -9,12 +9,12 @@ enum DownscaleMethod: String, CaseIterable {
 /// sampling kernel. The MSL source is compiled once at init time.
 ///
 /// Runs as a Metal compute dispatch — destination must have `.shaderWrite`.
-final class Downscaler {
+public final class Downscaler {
 
     private let device: MTLDevice
     private var pipelines: [DownscaleMethod: MTLComputePipelineState] = [:]
 
-    init(device: MTLDevice) throws {
+    public init(device: MTLDevice) throws {
         self.device = device
         let library = try device.makeLibrary(source: Self.metalSource, options: nil)
         for method in DownscaleMethod.allCases {
@@ -27,10 +27,10 @@ final class Downscaler {
         }
     }
 
-    func encode(into commandBuffer: MTLCommandBuffer,
-                source: MTLTexture,
-                destination: MTLTexture,
-                method: DownscaleMethod) {
+    public func encode(into commandBuffer: MTLCommandBuffer,
+                       source: MTLTexture,
+                       destination: MTLTexture,
+                       method: DownscaleMethod) {
         guard let pipe = pipelines[method] else { return }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pipe)

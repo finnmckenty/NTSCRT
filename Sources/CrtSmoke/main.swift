@@ -17,6 +17,7 @@ import MetalKit
 import CoreGraphics
 import ImageIO
 import CrtAppBridge
+import CrtCore
 #if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
 #endif

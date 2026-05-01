@@ -8,7 +8,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "crt-smoke", targets: ["CrtSmoke"]),
-        // crt-app SwiftUI executable added in Phase 2.
+        .executable(name: "crt-app",   targets: ["CrtApp"]),
     ],
     targets: [
         .target(
@@ -23,9 +23,20 @@ let package = Package(
                 .linkedFramework("Foundation"),
             ]
         ),
+        .target(
+            name: "CrtCore",
+            dependencies: ["CrtAppBridge"],
+            path: "Sources/CrtCore",
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("ImageIO"),
+            ]
+        ),
         .executableTarget(
             name: "CrtSmoke",
-            dependencies: ["CrtAppBridge"],
+            dependencies: ["CrtAppBridge", "CrtCore"],
             path: "Sources/CrtSmoke",
             linkerSettings: [
                 .linkedFramework("Metal"),
@@ -33,6 +44,22 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("CoreServices"),
+            ]
+        ),
+        .executableTarget(
+            name: "CrtApp",
+            dependencies: ["CrtAppBridge", "CrtCore"],
+            path: "Sources/CrtApp",
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("CoreImage"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("ImageIO"),
             ]
         ),
     ]
