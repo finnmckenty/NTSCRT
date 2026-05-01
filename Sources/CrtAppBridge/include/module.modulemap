@@ -1,0 +1,4 @@
+module CrtAppBridge {
+    umbrella header "LibrashaderBridge.h"
+    export *
+}

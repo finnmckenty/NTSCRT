@@ -1,0 +1,218 @@
+// crt-smoke: Phase 1 + downscale verifier.
+//
+// Loads an input image, optionally downscales it, runs the result through a
+// single .slangp preset via librashader, writes a PNG.
+//
+// Usage:
+//   crt-smoke <input> <preset.slangp> <output.png> <librashader.dylib> \
+//             [outW outH] [downW downH method]
+//
+// outW/outH default to 1920x1080 (also the viewport for the shader chain).
+// If downW/downH/method are given, the input is downscaled to (downW, downH)
+// using `method` (nearest|bilinear|bicubic|lanczos|area) before the chain.
+
+import Foundation
+import Metal
+import MetalKit
+import CoreGraphics
+import ImageIO
+import CrtAppBridge
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
+
+// MARK: - args
+
+let args = CommandLine.arguments
+guard args.count >= 5 else {
+    fputs("usage: crt-smoke <input.png> <preset.slangp> <output.png> <librashader.dylib> [outW outH]\n", stderr)
+    exit(2)
+}
+let inputPath  = args[1]
+let presetPath = args[2]
+let outputPath = args[3]
+let dylibPath  = args[4]
+let outW = args.count > 5 ? Int(args[5]) ?? 1920 : 1920
+let outH = args.count > 6 ? Int(args[6]) ?? 1080 : 1080
+let downW: Int? = args.count > 7 ? Int(args[7]) : nil
+let downH: Int? = args.count > 8 ? Int(args[8]) : nil
+let downMethod: DownscaleMethod? = args.count > 9 ? DownscaleMethod(rawValue: args[9]) : nil
+
+// MARK: - load librashader
+
+do {
+    try LRShaderChain.loadLibrary(dylibPath)
+} catch {
+    fputs("loadLibrary failed: \(error.localizedDescription)\n", stderr)
+    exit(3)
+}
+
+// MARK: - Metal setup
+
+guard let device = MTLCreateSystemDefaultDevice() else {
+    fputs("no Metal device\n", stderr); exit(4)
+}
+guard let queue = device.makeCommandQueue() else {
+    fputs("no command queue\n", stderr); exit(5)
+}
+
+// MARK: - load input PNG -> MTLTexture
+
+func loadTexture(_ path: String, device: MTLDevice) throws -> MTLTexture {
+    let url = URL(fileURLWithPath: path)
+    let loader = MTKTextureLoader(device: device)
+    let opts: [MTKTextureLoader.Option: Any] = [
+        .textureUsage:        NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+        .textureStorageMode:  NSNumber(value: MTLStorageMode.private.rawValue),
+        .SRGB:                NSNumber(value: false),
+        .origin:              MTKTextureLoader.Origin.topLeft.rawValue,
+    ]
+    return try loader.newTexture(URL: url, options: opts)
+}
+
+let inputTex: MTLTexture
+do {
+    inputTex = try loadTexture(inputPath, device: device)
+    print("input texture: \(inputTex.width)x\(inputTex.height) format=\(inputTex.pixelFormat.rawValue)")
+} catch {
+    fputs("loadTexture failed: \(error)\n", stderr); exit(6)
+}
+
+// MARK: - allocate output MTLTexture
+
+let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+    pixelFormat: .bgra8Unorm,
+    width: outW, height: outH, mipmapped: false
+)
+outDesc.usage = [.renderTarget, .shaderRead, .shaderWrite]
+outDesc.storageMode = .private
+guard let outputTex = device.makeTexture(descriptor: outDesc) else {
+    fputs("makeTexture(output) failed\n", stderr); exit(7)
+}
+
+// MARK: - create chain + render
+
+let chain: LRShaderChain
+do {
+    chain = try LRShaderChain(presetPath: presetPath, commandQueue: queue)
+} catch {
+    fputs("chain init failed: \(error.localizedDescription)\n", stderr); exit(8)
+}
+
+print("preset loaded; runtime params: \(chain.parameters().count)")
+for p in chain.parameters() {
+    print("  - \(p.name) [\(p.minimum)..\(p.maximum) step \(p.step), default \(p.initial)]: \(p.desc)")
+}
+
+// Phase 1 verification step 4: exercise the parameter setter on the first param.
+if let firstParam = chain.parameters().first {
+    let testValue = (firstParam.minimum + firstParam.maximum) / 2
+    do {
+        try chain.setParameter(firstParam.name, value: testValue)
+        let readback = chain.parameterValue(firstParam.name)
+        print("set/get \(firstParam.name): wrote \(testValue), read back \(readback)")
+    } catch {
+        fputs("setParameter failed: \(error.localizedDescription)\n", stderr); exit(11)
+    }
+}
+
+guard let cb = queue.makeCommandBuffer() else {
+    fputs("commandBuffer failed\n", stderr); exit(9)
+}
+
+// Optional downscale pre-pass.
+let chainInput: MTLTexture
+if let dw = downW, let dh = downH, let method = downMethod {
+    let downDesc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: inputTex.pixelFormat,
+        width: dw, height: dh, mipmapped: false
+    )
+    downDesc.usage = [.shaderRead, .shaderWrite]
+    downDesc.storageMode = .private
+    guard let downTex = device.makeTexture(descriptor: downDesc) else {
+        fputs("makeTexture(downscale) failed\n", stderr); exit(18)
+    }
+    do {
+        let ds = try Downscaler(device: device)
+        ds.encode(into: cb, source: inputTex, destination: downTex, method: method)
+        print("downscaled \(inputTex.width)x\(inputTex.height) -> \(dw)x\(dh) via \(method.rawValue)")
+        chainInput = downTex
+    } catch {
+        fputs("downscaler init failed: \(error.localizedDescription)\n", stderr); exit(19)
+    }
+} else {
+    chainInput = inputTex
+}
+
+let viewport = MTLViewport(originX: 0, originY: 0, width: Double(outW), height: Double(outH), znear: 0, zfar: 1)
+do {
+    try chain.renderInputTexture(chainInput, outputTexture: outputTex, viewport: viewport, frameCount: 1, commandBuffer: cb)
+} catch {
+    fputs("render failed: \(error.localizedDescription)\n", stderr); exit(10)
+}
+
+// Blit output to a shared-storage staging texture so we can read it back.
+let stagingDesc = MTLTextureDescriptor.texture2DDescriptor(
+    pixelFormat: .bgra8Unorm, width: outW, height: outH, mipmapped: false
+)
+stagingDesc.usage = [.shaderRead]
+stagingDesc.storageMode = .shared
+guard let staging = device.makeTexture(descriptor: stagingDesc) else {
+    fputs("makeTexture(staging) failed\n", stderr); exit(11)
+}
+guard let blit = cb.makeBlitCommandEncoder() else {
+    fputs("blit encoder failed\n", stderr); exit(12)
+}
+blit.copy(from: outputTex,
+          sourceSlice: 0, sourceLevel: 0,
+          sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+          sourceSize: MTLSize(width: outW, height: outH, depth: 1),
+          to: staging,
+          destinationSlice: 0, destinationLevel: 0,
+          destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+blit.endEncoding()
+cb.commit()
+cb.waitUntilCompleted()
+if let err = cb.error {
+    fputs("command buffer error: \(err)\n", stderr); exit(13)
+}
+
+// MARK: - read back -> PNG
+
+let bytesPerRow = outW * 4
+let region = MTLRegionMake2D(0, 0, outW, outH)
+var pixels = [UInt8](repeating: 0, count: outH * bytesPerRow)
+pixels.withUnsafeMutableBytes { raw in
+    staging.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
+}
+
+let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+let bmInfo: UInt32 = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+guard let provider = CGDataProvider(data: Data(pixels) as CFData) else {
+    fputs("CGDataProvider failed\n", stderr); exit(14)
+}
+guard let cgImage = CGImage(
+    width: outW, height: outH,
+    bitsPerComponent: 8, bitsPerPixel: 32,
+    bytesPerRow: bytesPerRow,
+    space: cs, bitmapInfo: CGBitmapInfo(rawValue: bmInfo),
+    provider: provider, decode: nil, shouldInterpolate: false,
+    intent: .defaultIntent
+) else {
+    fputs("CGImage failed\n", stderr); exit(15)
+}
+
+let outURL = URL(fileURLWithPath: outputPath) as CFURL
+let pngType: CFString = {
+    if #available(macOS 11.0, *) { return UTType.png.identifier as CFString }
+    return "public.png" as CFString
+}()
+guard let dest = CGImageDestinationCreateWithURL(outURL, pngType, 1, nil) else {
+    fputs("CGImageDestination failed\n", stderr); exit(16)
+}
+CGImageDestinationAddImage(dest, cgImage, nil)
+if !CGImageDestinationFinalize(dest) {
+    fputs("CGImageDestination finalize failed\n", stderr); exit(17)
+}
+
+print("wrote \(outputPath) (\(outW)x\(outH))")

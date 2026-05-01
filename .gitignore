@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+Package.resolved
+.DS_Store
+*.xcodeproj
+xcuserdata/
+*.xcuserstate
+
+# librashader dylib + headers are built locally per-machine, not checked in.
+Vendor/librashader/*.dylib
+Vendor/librashader/librashader.h
+Vendor/librashader/librashader_ld.h
