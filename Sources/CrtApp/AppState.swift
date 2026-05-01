@@ -72,13 +72,27 @@ final class AppState {
 
     var selectedPreset: PresetEntry = Presets.all[0] {
         didSet {
-            if selectedPreset != oldValue { reloadChain() }
+            if selectedPreset != oldValue {
+                // Stash the outgoing preset's slider values so we can restore
+                // them if the user comes back to it.
+                savedParamValues[oldValue.id] = paramValues
+                reloadChain()
+            }
         }
     }
     private(set) var chain: LRShaderChain?
     private(set) var chainError: String?
     private(set) var paramDescriptors: [LRShaderParam] = []
     var paramValues: [String: Float] = [:] { didSet { applyParams(); renderTick &+= 1 } }
+
+    /// Compiled chains kept around so flipping back to a preset is instant.
+    /// librashader's Metal runtime does not use the on-disk shader cache, so
+    /// each `mtl_filter_chain_create` recompiles every pass — for crt-royale
+    /// that's >1 second. Holding the chains in memory turns preset switching
+    /// into a no-op after the first visit.
+    private var chainCache: [String: LRShaderChain] = [:]
+    /// Per-preset parameter values, so each preset remembers its own slider state.
+    private var savedParamValues: [String: [String: Float]] = [:]
 
     // MARK: - render trigger
 
@@ -165,16 +179,33 @@ final class AppState {
         chain = nil
         paramDescriptors = []
         paramValues = [:]
+
+        // Cache hit: reuse the already-compiled chain. Restore the user's
+        // previous slider values for this preset (or fall back to defaults).
+        if let cached = chainCache[selectedPreset.id] {
+            chain = cached
+            let params = cached.parameters()
+            paramDescriptors = params
+            var values = savedParamValues[selectedPreset.id] ?? [:]
+            for p in params where values[p.name] == nil { values[p.name] = p.initial }
+            paramValues = values
+            chainError = nil
+            renderTick &+= 1
+            return
+        }
+
+        // Cache miss: compile the chain (slow for crt-royale).
         let presetURL = presetsRoot.appendingPathComponent(selectedPreset.relativePath)
         do {
             let c = try LRShaderChain(presetPath: presetURL.path,
                                       commandQueue: context.queue)
+            chainCache[selectedPreset.id] = c
             chain = c
             let params = c.parameters()
             paramDescriptors = params
             var initial: [String: Float] = [:]
             for p in params { initial[p.name] = p.initial }
-            paramValues = initial   // didSet runs applyParams() with chain already set above
+            paramValues = initial
             chainError = nil
         } catch {
             chainError = error.localizedDescription
