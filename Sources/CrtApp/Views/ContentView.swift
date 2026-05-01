@@ -9,8 +9,15 @@ struct ContentView: View {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 400)
         } detail: {
-            PreviewView()
-                .frame(minWidth: 480, minHeight: 360)
+            // Preserve source aspect ratio: PreviewView gets a frame matching
+            // the source's aspect, centred in the available space.
+            ZStack {
+                Color(white: 0.04)
+                PreviewView()
+                    .aspectRatio(state.sourceAspect, contentMode: .fit)
+                    .padding(8)
+            }
+            .frame(minWidth: 480, minHeight: 360)
         }
         .frame(minWidth: 1000, minHeight: 640)
     }

@@ -48,6 +48,19 @@ final class AppState {
         return nil
     }
 
+    /// Aspect ratio (width / height) of the loaded source. Used by the preview
+    /// to letterbox/pillarbox the MTKView so the source isn't stretched, and
+    /// by the exporter to derive height from a chosen long edge.
+    var sourceAspect: CGFloat {
+        if let tex = sourceTexture, tex.height > 0 {
+            return CGFloat(tex.width) / CGFloat(tex.height)
+        }
+        if let vs = videoSource, vs.pixelSize.height > 0 {
+            return vs.pixelSize.width / vs.pixelSize.height
+        }
+        return 16.0 / 9.0
+    }
+
     // MARK: - downscale
 
     var downscaleEnabled: Bool = true { didSet { renderTick &+= 1 } }

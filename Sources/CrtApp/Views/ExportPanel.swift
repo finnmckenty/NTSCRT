@@ -7,23 +7,40 @@ import CrtCore
 struct ExportPanel: View {
     @Environment(AppState.self) private var state
 
-    @State private var exportWidth: Int = 1920
-    @State private var exportHeight: Int = 1080
+    @State private var longEdge: Int = 1920
     @State private var status: String = ""
     @State private var working: Bool = false
     @State private var progress: Double = 0
 
     private var isVideo: Bool { state.videoSource != nil }
 
+    /// Output size derived from the requested long edge and the source aspect.
+    /// Even values are required by H.264; the rounding clamps that.
+    private var outputSize: (width: Int, height: Int) {
+        let aspect = state.sourceAspect
+        let w: Int, h: Int
+        if aspect >= 1 {
+            w = longEdge
+            h = max(64, Int((Double(longEdge) / Double(aspect)).rounded()))
+        } else {
+            h = longEdge
+            w = max(64, Int((Double(longEdge) * Double(aspect)).rounded()))
+        }
+        return (w & ~1, h & ~1)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Export").font(.headline)
 
             HStack {
-                Stepper("W \(exportWidth)", value: $exportWidth, in: 64...8192, step: 64)
-                Stepper("H \(exportHeight)", value: $exportHeight, in: 64...8192, step: 64)
+                Stepper("Long edge \(longEdge) px", value: $longEdge, in: 64...8192, step: 64)
             }
             .font(.caption)
+
+            let size = outputSize
+            Text("Output: \(size.width) × \(size.height) px (matches source aspect)")
+                .font(.caption).foregroundStyle(.secondary)
 
             Button(buttonLabel) {
                 if isVideo { exportMP4() } else { exportPNG() }
@@ -57,13 +74,14 @@ struct ExportPanel: View {
         panel.nameFieldStringValue = "crt-output.png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
+        let size = outputSize
         working = true
         status = "Rendering…"
 
         let device = state.context.device
         let queue = state.context.queue
-        guard let target = makeRenderTarget(device: device, width: exportWidth, height: exportHeight),
-              let staging = makeStagingTexture(device: device, width: exportWidth, height: exportHeight),
+        guard let target = makeRenderTarget(device: device, width: size.width, height: size.height),
+              let staging = makeStagingTexture(device: device, width: size.width, height: size.height),
               let cb = queue.makeCommandBuffer() else {
             status = "Failed to allocate textures"
             working = false
@@ -89,7 +107,7 @@ struct ExportPanel: View {
         blit.copy(from: target,
                   sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                  sourceSize: MTLSize(width: exportWidth, height: exportHeight, depth: 1),
+                  sourceSize: MTLSize(width: size.width, height: size.height, depth: 1),
                   to: staging,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
@@ -100,7 +118,7 @@ struct ExportPanel: View {
                 do {
                     let cg = try makeCGImage(from: staging)
                     try writePNG(cg, to: url)
-                    status = "Wrote \(url.lastPathComponent) (\(exportWidth) × \(exportHeight))"
+                    status = "Wrote \(url.lastPathComponent) (\(size.width) × \(size.height))"
                 } catch {
                     status = "Write failed: \(error.localizedDescription)"
                 }
@@ -121,6 +139,7 @@ struct ExportPanel: View {
         panel.nameFieldStringValue = "crt-output.mp4"
         guard panel.runModal() == .OK, let outURL = panel.url else { return }
 
+        let size = outputSize
         working = true
         progress = 0
         status = "Encoding…"
@@ -128,8 +147,8 @@ struct ExportPanel: View {
         let exporter = Mp4Exporter(context: state.context)
         let settings = Mp4Exporter.Settings(
             outputURL: outURL,
-            outputWidth: exportWidth,
-            outputHeight: exportHeight,
+            outputWidth: size.width,
+            outputHeight: size.height,
             downscale: state.downscaleSpec,
             presetPath: preset.path
         )
@@ -141,7 +160,7 @@ struct ExportPanel: View {
                     Task { @MainActor in self.progress = p }
                 }
                 await MainActor.run {
-                    self.status = "Wrote \(outURL.lastPathComponent) (\(self.exportWidth) × \(self.exportHeight))"
+                    self.status = "Wrote \(outURL.lastPathComponent) (\(size.width) × \(size.height))"
                     self.working = false
                     self.progress = 1
                 }
