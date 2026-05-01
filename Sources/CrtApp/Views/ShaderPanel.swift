@@ -54,6 +54,19 @@ private struct ParamSlider: View {
             set: { state.paramValues[param.name] = Float($0) }
         )
 
+        // Sanitise the bounds for SwiftUI's Slider, which preconditions on
+        // `step > 0 && step <= (upperBound - lowerBound)` and
+        // `lowerBound < upperBound`. Some preset params declare degenerate
+        // ranges (min==max, or step larger than the range).
+        let lo = Double(param.minimum)
+        let hiRaw = Double(param.maximum)
+        let hi = hiRaw > lo ? hiRaw : lo + 1.0      // ensure non-zero range
+        let range = hi - lo
+        let stepRaw = Double(param.step)
+        let step = stepRaw > 0 && stepRaw <= range
+            ? stepRaw
+            : max(range / 100, 1e-4)                // safe fallback step
+
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(param.desc.isEmpty ? param.name : param.desc)
@@ -64,9 +77,7 @@ private struct ParamSlider: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            Slider(value: value,
-                   in: Double(param.minimum)...Double(param.maximum),
-                   step: max(Double(param.step), 0.0001))
+            Slider(value: value, in: lo...hi, step: step)
         }
     }
 }
