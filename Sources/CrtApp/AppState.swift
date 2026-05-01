@@ -1,8 +1,14 @@
 import Foundation
 import Metal
 import Observation
+import UniformTypeIdentifiers
 import CrtAppBridge
 import CrtCore
+
+enum SourceKind {
+    case image
+    case video(VideoSource)
+}
 
 /// Single source of truth for the running app.
 ///
@@ -21,12 +27,26 @@ final class AppState {
     var sourceURL: URL? {
         didSet {
             if sourceURL != oldValue {
-                reloadSource()
+                Task { await reloadSource() }
             }
         }
     }
+    private(set) var sourceKind: SourceKind?
     private(set) var sourceTexture: MTLTexture?
     private(set) var sourceError: String?
+
+    /// For video sources only: 0..<videoSource.totalFrames.
+    var currentFrameIndex: Int = 0 {
+        didSet {
+            if currentFrameIndex != oldValue {
+                Task { await reloadVideoFrame() }
+            }
+        }
+    }
+    var videoSource: VideoSource? {
+        if case .video(let v) = sourceKind { return v }
+        return nil
+    }
 
     // MARK: - downscale
 
@@ -76,18 +96,56 @@ final class AppState {
 
     // MARK: - mutations
 
-    private func reloadSource() {
+    @MainActor
+    private func reloadSource() async {
+        sourceTexture = nil
+        sourceKind = nil
+        sourceError = nil
+        currentFrameIndex = 0
+
         guard let url = sourceURL else {
-            sourceTexture = nil; sourceError = nil; renderTick &+= 1; return
+            renderTick &+= 1; return
         }
-        do {
-            sourceTexture = try loadTexture(url: url, device: context.device)
-            sourceError = nil
-        } catch {
-            sourceTexture = nil
-            sourceError = error.localizedDescription
+
+        if isVideoURL(url) {
+            do {
+                let vs = try await VideoSource(url: url, device: context.device)
+                sourceKind = .video(vs)
+                let tex = try await vs.frame(atIndex: 0)
+                sourceTexture = tex
+            } catch {
+                sourceError = error.localizedDescription
+            }
+        } else {
+            do {
+                let tex = try loadTexture(url: url, device: context.device)
+                sourceTexture = tex
+                sourceKind = .image
+            } catch {
+                sourceError = error.localizedDescription
+            }
         }
         renderTick &+= 1
+    }
+
+    @MainActor
+    private func reloadVideoFrame() async {
+        guard let vs = videoSource else { return }
+        do {
+            let tex = try await vs.frame(atIndex: currentFrameIndex)
+            sourceTexture = tex
+            renderTick &+= 1
+        } catch {
+            sourceError = error.localizedDescription
+        }
+    }
+
+    private func isVideoURL(_ url: URL) -> Bool {
+        if let type = UTType(filenameExtension: url.pathExtension) {
+            return type.conforms(to: .movie) || type.conforms(to: .audiovisualContent)
+        }
+        let ext = url.pathExtension.lowercased()
+        return ["mp4", "mov", "m4v", "avi", "mkv"].contains(ext)
     }
 
     private func reloadChain() {

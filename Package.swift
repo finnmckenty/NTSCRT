@@ -7,8 +7,9 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
-        .executable(name: "crt-smoke", targets: ["CrtSmoke"]),
-        .executable(name: "crt-app",   targets: ["CrtApp"]),
+        .executable(name: "crt-smoke",       targets: ["CrtSmoke"]),
+        .executable(name: "crt-video-smoke", targets: ["CrtVideoSmoke"]),
+        .executable(name: "crt-app",         targets: ["CrtApp"]),
     ],
     targets: [
         .target(
@@ -44,6 +45,16 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("CoreServices"),
+            ]
+        ),
+        .executableTarget(
+            name: "CrtVideoSmoke",
+            dependencies: ["CrtAppBridge", "CrtCore"],
+            path: "Sources/CrtVideoSmoke",
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreVideo"),
             ]
         ),
         .executableTarget(

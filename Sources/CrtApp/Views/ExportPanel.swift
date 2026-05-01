@@ -11,6 +11,9 @@ struct ExportPanel: View {
     @State private var exportHeight: Int = 1080
     @State private var status: String = ""
     @State private var working: Bool = false
+    @State private var progress: Double = 0
+
+    private var isVideo: Bool { state.videoSource != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -22,10 +25,15 @@ struct ExportPanel: View {
             }
             .font(.caption)
 
-            Button(working ? "Exporting…" : "Export PNG…") {
-                exportPNG()
+            Button(buttonLabel) {
+                if isVideo { exportMP4() } else { exportPNG() }
             }
             .disabled(state.sourceTexture == nil || state.chain == nil || working)
+
+            if working && isVideo {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+            }
 
             if !status.isEmpty {
                 Text(status).font(.caption).foregroundStyle(.secondary)
@@ -33,6 +41,13 @@ struct ExportPanel: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private var buttonLabel: String {
+        if working { return isVideo ? "Exporting MP4…" : "Exporting PNG…" }
+        return isVideo ? "Export MP4…" : "Export PNG…"
+    }
+
+    // MARK: - PNG (image source)
 
     private func exportPNG() {
         guard let source = state.sourceTexture, let chain = state.chain else { return }
@@ -93,5 +108,49 @@ struct ExportPanel: View {
             }
         }
         cb.commit()
+    }
+
+    // MARK: - MP4 (video source)
+
+    private func exportMP4() {
+        guard let vs = state.videoSource else { return }
+        let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.nameFieldStringValue = "crt-output.mp4"
+        guard panel.runModal() == .OK, let outURL = panel.url else { return }
+
+        working = true
+        progress = 0
+        status = "Encoding…"
+
+        let exporter = Mp4Exporter(context: state.context)
+        let settings = Mp4Exporter.Settings(
+            outputURL: outURL,
+            outputWidth: exportWidth,
+            outputHeight: exportHeight,
+            downscale: state.downscaleSpec,
+            presetPath: preset.path
+        )
+        let params = state.paramValues
+
+        Task {
+            do {
+                try await exporter.export(source: vs, paramValues: params, settings: settings) { p in
+                    Task { @MainActor in self.progress = p }
+                }
+                await MainActor.run {
+                    self.status = "Wrote \(outURL.lastPathComponent) (\(self.exportWidth) × \(self.exportHeight))"
+                    self.working = false
+                    self.progress = 1
+                }
+            } catch {
+                await MainActor.run {
+                    self.status = "Export failed: \(error.localizedDescription)"
+                    self.working = false
+                }
+            }
+        }
     }
 }
