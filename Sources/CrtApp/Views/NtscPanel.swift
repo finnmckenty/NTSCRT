@@ -134,11 +134,20 @@ private struct NtscControl: View {
             HStack {
                 Text(setting.label).font(.callout).lineLimit(1)
                 Spacer()
-                Text(percent
-                     ? String(format: "%.1f%%", binding.wrappedValue * 100)
-                     : String(format: "%.4g", binding.wrappedValue))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                if percent {
+                    // Edited in percent units ("15.3" = 0.153).
+                    NumericField(
+                        value: Binding(
+                            get: { binding.wrappedValue * 100 },
+                            set: { binding.wrappedValue = $0 / 100 }
+                        ),
+                        range: (min * 100)...(max * 100),
+                        width: 56
+                    )
+                    Text("%").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    NumericField(value: binding, range: min...max)
+                }
             }
             Slider(value: binding, in: min...max)
         }
@@ -165,9 +174,7 @@ private struct NtscControl: View {
                 HStack {
                     Text(setting.label).font(.callout).lineLimit(1)
                     Spacer()
-                    Text("\(Int(state.ntscNumber(setting.name)))")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                    IntField(value: intBinding, range: min...max, width: 48)
                 }
                 Slider(
                     value: Binding(

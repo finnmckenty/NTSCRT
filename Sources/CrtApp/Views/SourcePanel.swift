@@ -35,7 +35,16 @@ struct SourcePanel: View {
                         get: { Double(state.currentFrameIndex) },
                         set: { state.currentFrameIndex = Int($0.rounded()) }
                     )
-                    Slider(value: idx, in: 0...Double(max(1, total - 1)), step: 1)
+                    HStack(spacing: 8) {
+                        Button {
+                            state.togglePlayback()
+                        } label: {
+                            Image(systemName: state.videoPlaying ? "pause.fill" : "play.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .help(state.videoPlaying ? "Pause" : "Play the video in the preview (with all effects applied)")
+                        Slider(value: idx, in: 0...Double(max(1, total - 1)), step: 1)
+                    }
                     Text("frame \(state.currentFrameIndex + 1) / \(total)  ·  \(String(format: "%.2fs", Double(state.currentFrameIndex) / Double(vs.frameRate)))  ·  \(String(format: "%.0f", vs.frameRate)) fps")
                         .font(.caption).foregroundStyle(.secondary)
                 }

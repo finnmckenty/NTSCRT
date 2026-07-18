@@ -41,10 +41,55 @@ final class AppState {
     /// For video sources only: 0..<videoSource.totalFrames.
     var currentFrameIndex: Int = 0 {
         didSet {
-            if currentFrameIndex != oldValue {
+            if currentFrameIndex != oldValue && !suppressFrameReload {
                 Task { await reloadVideoFrame() }
             }
         }
+    }
+
+    // MARK: - video playback
+
+    private(set) var videoPlaying: Bool = false
+    private var playbackTask: Task<Void, Never>?
+    /// Set while the playback loop advances the index itself (it fetches
+    /// frames directly, so the didSet reload would double-fetch).
+    private var suppressFrameReload = false
+
+    func togglePlayback() {
+        if videoPlaying { stopPlayback(); return }
+        guard videoSource != nil, !exportInProgress else { return }
+        videoPlaying = true
+        playbackTask = Task { @MainActor [weak self] in
+            while let self, self.videoPlaying, !Task.isCancelled {
+                guard let vs = self.videoSource, !self.exportInProgress else {
+                    self.stopPlayback(); return
+                }
+                let start = ContinuousClock.now
+                let next = (self.currentFrameIndex + 1) % vs.totalFrames
+                self.suppressFrameReload = true
+                self.currentFrameIndex = next
+                self.suppressFrameReload = false
+                do {
+                    let tex = try await vs.frame(atIndex: next)
+                    self.sourceTexture = tex
+                    self.tickFrame()          // VHS noise/interlace advance with the video
+                    self.markChainDirty()
+                } catch {
+                    self.stopPlayback(); return
+                }
+                let frameDuration = Duration.seconds(1.0 / Double(max(1, vs.frameRate)))
+                let elapsed = start.duration(to: .now)
+                if elapsed < frameDuration {
+                    try? await Task.sleep(for: frameDuration - elapsed)
+                }
+            }
+        }
+    }
+
+    func stopPlayback() {
+        videoPlaying = false
+        playbackTask?.cancel()
+        playbackTask = nil
     }
     var videoSource: VideoSource? {
         if case .video(let v) = sourceKind { return v }
@@ -67,9 +112,9 @@ final class AppState {
     // MARK: - downscale
 
     var downscaleEnabled: Bool = true { didSet { markChainDirty() } }
-    var downscaleWidth: Int = 256     { didSet { markChainDirty() } }
-    var downscaleHeight: Int = 224    { didSet { markChainDirty() } }
-    var downscaleMethod: DownscaleMethod = .area { didSet { markChainDirty() } }
+    var downscaleWidth: Int = 320     { didSet { markChainDirty() } }
+    var downscaleHeight: Int = 240    { didSet { markChainDirty() } }
+    var downscaleMethod: DownscaleMethod = .nearest { didSet { markChainDirty() } }
 
     // MARK: - view (preview-only display state)
 
@@ -80,7 +125,7 @@ final class AppState {
     /// Compare mode: split the preview with a draggable vertical line —
     /// shader-on on one side, shader-off on the other.
     /// Chain-dirty: toggling on must populate the secondary target.
-    var compareEnabled: Bool = false { didSet { markChainDirty() } }
+    var compareEnabled: Bool = true { didSet { markChainDirty() } }
     /// Normalised x-position of the compare line, 0..1.
     var compareLineX: Float = 0.5 { didSet { markViewDirty() } }
 
@@ -88,7 +133,7 @@ final class AppState {
     /// the chain input (RetroArch's "Integer Scale"), letterboxed in the
     /// preview. Gives uniform scanline/mask structure — non-integer scales
     /// visually dilute beam-shape and scanline params.
-    var integerScale: Bool = false { didSet { markChainDirty() } }
+    var integerScale: Bool = true { didSet { markChainDirty() } }
 
     /// Preview zoom factor (1.0 = fit, up to 12.0 = 1200%).
     var zoom: Float = 1.0 {
@@ -116,7 +161,7 @@ final class AppState {
     private(set) var ntscDefaults: [String: Any] = [:]
     /// Flat values in ntsc-rs preset-JSON form (includes "version").
     private(set) var ntscValues: [String: Any] = [:]
-    var ntscEnabled: Bool = false { didSet { markChainDirty() } }
+    var ntscEnabled: Bool = true { didSet { markChainDirty() } }
     private(set) var ntscError: String?
 
     var ntscAvailable: Bool { ntscStage != nil }
@@ -153,6 +198,42 @@ final class AppState {
         }
     }
 
+    /// The app's house VHS look, overlaid on ntsc-rs library defaults —
+    /// Finn's dialed-in settings (2026-07-18). Reset returns here.
+    private static let appNtscDefaults: [String: Any] = [
+        "filter_type": 0,                       // Constant K (blurry)
+        "composite_preemphasis": 1.106,
+        "composite_noise_intensity": 0.204,
+        "composite_noise_frequency": 0.8576,
+        "composite_noise_detail": 2,
+        "snow_intensity": 0,
+        "video_scanline_phase_shift_offset": 3,
+        "luma_smear": 0.6692,
+        "head_switching_height": 6,
+        "head_switching_offset": 18,
+        "head_switching_horizontal_shift": 41.57,
+        "head_switching_mid_line_jitter": 0.181,
+        "tracking_noise_height": 63,
+        "ringing_power": 5.674,
+        "ringing_scale": 4.935,
+        "luma_noise_intensity": 0.153,
+        "chroma_noise_intensity": 0.201,
+        "chroma_noise_frequency": 0.0777,
+        "chroma_phase_error": 0.016,
+        "chroma_phase_noise_intensity": 0.029,
+        "chroma_delay_horizontal": 2.667,
+        "chroma_delay_vertical": 2,
+        "vhs_chroma_loss": 0.124,
+        "bandwidth_scale": 0.985,
+        "vertical_scale": 0.9884,
+    ]
+
+    /// House shader tweaks per preset (vs the shaders' declared defaults).
+    static let appShaderDefaults: [String: [String: Float]] = [
+        "glow_gauss": ["BOOST": 1.1, "GLOW_ROLLOFF": 2.4, "BLOOM_STRENGTH": 0.1],
+        "glow_lanczos": ["BOOST": 1.1, "GLOW_ROLLOFF": 2.4, "BLOOM_STRENGTH": 0.1],
+    ]
+
     private func setUpNtsc() {
         guard let stage = NtscStage() else { return }
         ntscStage = stage
@@ -161,15 +242,18 @@ final class AppState {
         }
         if let json = stage.settingsJSON(),
            let data = json.data(using: .utf8),
-           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+           var dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            dict.merge(Self.appNtscDefaults) { _, ours in ours }
             ntscDefaults = dict
             ntscValues = dict
+            pushNtscSettings()
         }
     }
 
     // MARK: - shader
 
-    var selectedPreset: PresetEntry = Presets.all[0] {
+    var selectedPreset: PresetEntry =
+        Presets.all.first { $0.id == "glow_gauss" } ?? Presets.all[0] {
         didSet {
             if selectedPreset != oldValue {
                 // Stash the outgoing preset's slider values so we can restore
@@ -210,7 +294,7 @@ final class AppState {
     /// Run the preview continuously, advancing the frame counter each draw,
     /// so frame-count-dependent parameters (interlacing, animated NTSC
     /// artifacts) are visible. Off = on-demand rendering, zero idle GPU cost.
-    var animatePreview: Bool = false { didSet { markChainDirty() } }
+    var animatePreview: Bool = true { didSet { markChainDirty() } }
 
     /// True while an MP4 export is running. The exporter drives its own frame
     /// loop against the shared Metal queue, and librashader's Metal runtime is
@@ -250,6 +334,7 @@ final class AppState {
 
     @MainActor
     private func reloadSource() async {
+        stopPlayback()
         sourceTexture = nil
         sourceKind = nil
         sourceError = nil
@@ -316,7 +401,9 @@ final class AppState {
             let params = dedupeByName(cached.parameters())
             paramDescriptors = params
             var values = savedParamValues[selectedPreset.id] ?? [:]
-            for p in params where values[p.name] == nil { values[p.name] = p.initial }
+            for p in params where values[p.name] == nil {
+                values[p.name] = Self.appShaderDefaults[selectedPreset.id]?[p.name] ?? p.initial
+            }
             setAllParams(values)
             chainError = nil
             return
@@ -333,6 +420,13 @@ final class AppState {
             paramDescriptors = params
             var initial: [String: Float] = [:]
             for p in params { initial[p.name] = p.initial }
+            // House defaults, then any values remembered for this preset.
+            if let house = Self.appShaderDefaults[selectedPreset.id] {
+                initial.merge(house) { _, h in h }
+            }
+            if let saved = savedParamValues[selectedPreset.id] {
+                initial.merge(saved) { _, s in s }
+            }
             setAllParams(initial)
             chainError = nil
         } catch {
@@ -374,6 +468,86 @@ final class AppState {
     /// instead of on every slider tick.
     private var loggedParamErrors: Set<String> = []
     private static let log = Logger(subsystem: "local.crt-app", category: "params")
+
+    // MARK: - look files (save/load the whole visual configuration)
+
+    enum LookError: Swift.Error, LocalizedError {
+        case badFile
+        var errorDescription: String? { "not a crt-app look file" }
+    }
+
+    func lookDictionary() -> [String: Any] {
+        [
+            "version": 1,
+            "downscale": [
+                "enabled": downscaleEnabled,
+                "width": downscaleWidth,
+                "height": downscaleHeight,
+                "method": downscaleMethod.rawValue,
+            ],
+            "ntsc": [
+                "enabled": ntscEnabled,
+                "settings": ntscValues,
+            ],
+            "shader": [
+                "enabled": shaderEnabled,
+                "preset": selectedPreset.id,
+                "params": paramValues.mapValues { Double($0) },
+            ],
+            "view": [
+                "integerScale": integerScale,
+                "animate": animatePreview,
+                "compare": compareEnabled,
+            ],
+        ]
+    }
+
+    func saveLook(to url: URL) throws {
+        let data = try JSONSerialization.data(withJSONObject: lookDictionary(),
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url)
+    }
+
+    func loadLook(from url: URL) throws {
+        let data = try Data(contentsOf: url)
+        guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LookError.badFile
+        }
+        if let d = dict["downscale"] as? [String: Any] {
+            if let v = d["enabled"] as? Bool { downscaleEnabled = v }
+            if let v = d["width"] as? Int { downscaleWidth = v }
+            if let v = d["height"] as? Int { downscaleHeight = v }
+            if let v = d["method"] as? String, let m = DownscaleMethod(rawValue: v) {
+                downscaleMethod = m
+            }
+        }
+        if let n = dict["ntsc"] as? [String: Any] {
+            if let settings = n["settings"] as? [String: Any], ntscStage != nil {
+                ntscValues = settings
+                pushNtscSettings()
+            }
+            if let v = n["enabled"] as? Bool { ntscEnabled = v }
+        }
+        if let s = dict["shader"] as? [String: Any] {
+            let params = (s["params"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
+            if let presetID = s["preset"] as? String,
+               let preset = Presets.all.first(where: { $0.id == presetID }) {
+                savedParamValues[presetID] = params
+                if preset != selectedPreset {
+                    selectedPreset = preset       // reloadChain restores params
+                } else if !params.isEmpty {
+                    setAllParams(paramValues.merging(params) { _, new in new })
+                }
+            }
+            if let v = s["enabled"] as? Bool { shaderEnabled = v }
+        }
+        if let v = dict["view"] as? [String: Any] {
+            if let b = v["integerScale"] as? Bool { integerScale = b }
+            if let b = v["animate"] as? Bool { animatePreview = b }
+            if let b = v["compare"] as? Bool { compareEnabled = b }
+        }
+        markChainDirty()
+    }
 
     private func applyOne(_ name: String, _ value: Float) {
         guard let chain else { return }

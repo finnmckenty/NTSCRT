@@ -56,7 +56,9 @@ struct ShaderPanel: View {
 
     private func resetAll() {
         var values: [String: Float] = [:]
-        for p in state.paramDescriptors { values[p.name] = p.initial }
+        for p in state.paramDescriptors {
+            values[p.name] = AppState.appShaderDefaults[state.selectedPreset.id]?[p.name] ?? p.initial
+        }
         state.setAllParams(values)
     }
 }
@@ -298,9 +300,9 @@ private struct ParamControl: View {
             Stepper(value: intBinding,
                     in: Int(param.minimum)...Int(param.maximum),
                     step: max(1, intStep)) {
-                Text("\(intBinding.wrappedValue)")
-                    .font(.system(.callout, design: .monospaced))
-                    .frame(minWidth: 28, alignment: .trailing)
+                IntField(value: intBinding,
+                         range: Int(param.minimum)...Int(param.maximum),
+                         width: 40)
             }
         }
     }
@@ -323,9 +325,7 @@ private struct ParamControl: View {
             HStack {
                 Text(title).font(.callout).lineLimit(1)
                 Spacer()
-                Text(String(format: "%.3g", dBinding.wrappedValue))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                NumericField(value: dBinding, range: lo...hi)
             }
             Slider(value: dBinding, in: lo...hi, step: step)
         }

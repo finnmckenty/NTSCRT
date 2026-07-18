@@ -38,6 +38,8 @@ private struct Sidebar: View {
                 ViewPanel()
                 Divider()
                 ExportPanel()
+                Divider()
+                LookPanel()
             }
             .padding(16)
         }

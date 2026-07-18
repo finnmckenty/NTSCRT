@@ -158,9 +158,10 @@ struct ExportPanel: View {
         working = true
         progress = 0
         status = "Encoding…"
-        // Suspend preview animation for the duration: the exporter drives the
-        // same Metal queue from its own loop and librashader's Metal runtime
-        // is not thread-safe.
+        // Suspend preview animation and playback for the duration: the
+        // exporter drives the same Metal queue from its own loop and
+        // librashader's Metal runtime is not thread-safe.
+        state.stopPlayback()
         state.exportInProgress = true
 
         let exporter = Mp4Exporter(context: state.context)
