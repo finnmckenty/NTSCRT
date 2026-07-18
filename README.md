@@ -1,6 +1,14 @@
-# crt-app
+# NTSCRT
 
-A native macOS tool that runs RetroArch CRT shaders on still images and (eventually) video, with a normal mouse/keyboard UI instead of RetroArch's gamepad menus. Built around [librashader](https://github.com/SnowflakePowered/librashader), so output matches RetroArch frame-for-frame.
+A native macOS app for recreating vintage analog TV and VHS images: [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) emulates the analog signal path (composite artifacts, tape noise, head switching), and RetroArch's CRT shaders — run through [librashader](https://github.com/SnowflakePowered/librashader), so output matches RetroArch frame-for-frame — draw the display. Pipeline: **NTSC (full res) → downscale → CRT shader**, on stills or video, with a normal mouse/keyboard UI.
+
+To be clear about what this is: **I basically hacked two much better projects together.** All of the actual image magic is ntsc-rs and the RetroArch shader ecosystem; this repo is the SwiftUI/Metal glue between them.
+
+## Credits
+
+- [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) — the NTSC/VHS signal emulation (MIT/ISC/Apache-2.0). The VHS panel is generated from its own settings schema, and its preset JSON works in both apps.
+- [librashader](https://github.com/SnowflakePowered/librashader) by SnowflakePowered — the RetroArch-compatible shader runtime (MPL-2.0).
+- [libretro/slang-shaders](https://github.com/libretro/slang-shaders) and the RetroArch community — the CRT shader presets themselves (crt-royale by TroggleMonkey, crt-easymode/crt-aperture by EasyMode, crt-hyllian by Hyllian, crtsim, crtglow — various licenses, largely GPL).
 
 Status:
 - **Phase 1** — librashader bridge: working, all 6 shaders verified.
@@ -78,10 +86,10 @@ The window may open behind other windows because SPM-built executables aren't pr
 
 ```sh
 ./scripts/wrap-app.sh
-open build/CrtApp.app
+open build/NTSCRT.app
 ```
 
-The script wraps the SPM-built binary in `build/CrtApp.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any rebuild. It bundles the release binary by default; pass `debug` to wrap a debug build instead.
+The script wraps the SPM-built binary in `build/NTSCRT.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any rebuild. It bundles the release binary by default; pass `debug` to wrap a debug build instead.
 
 ### How it finds external assets
 

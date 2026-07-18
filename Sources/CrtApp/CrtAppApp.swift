@@ -10,7 +10,7 @@ struct CrtAppApp: App {
     @State private var appState: AppState?
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("NTSCRT") {
             Group {
                 if let appState {
                     ContentView()

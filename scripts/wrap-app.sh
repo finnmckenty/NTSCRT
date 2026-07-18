@@ -5,7 +5,7 @@
 #
 # Usage: wrap-app.sh [release|debug]   (default: release)
 #
-# Output: build/CrtApp.app — drag to /Applications or `open` it directly.
+# Output: build/NTSCRT.app — drag to /Applications or `open` it directly.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,11 +17,11 @@ if [[ ! -x ".build/$CONFIG/crt-app" ]]; then
   exit 1
 fi
 
-APP=build/CrtApp.app
+APP=build/NTSCRT.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
-cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/CrtApp"
+cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/NTSCRT"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/librashader.dylib"
 # Optional VHS stage dylib (the app runs without it).
 if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
@@ -29,7 +29,7 @@ if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
 fi
 
 # Set the rpath so the embedded dylib is found.
-install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/CrtApp" 2>/dev/null || true
+install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/NTSCRT" 2>/dev/null || true
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -37,11 +37,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>      <string>en</string>
-    <key>CFBundleExecutable</key>             <string>CrtApp</string>
-    <key>CFBundleIdentifier</key>             <string>local.crt-app</string>
+    <key>CFBundleExecutable</key>             <string>NTSCRT</string>
+    <key>CFBundleIdentifier</key>             <string>local.ntscrt</string>
     <key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
-    <key>CFBundleName</key>                   <string>CRT App</string>
-    <key>CFBundleDisplayName</key>            <string>CRT App</string>
+    <key>CFBundleName</key>                   <string>NTSCRT</string>
+    <key>CFBundleDisplayName</key>            <string>NTSCRT</string>
     <key>CFBundlePackageType</key>            <string>APPL</string>
     <key>CFBundleShortVersionString</key>     <string>0.1</string>
     <key>CFBundleVersion</key>                <string>1</string>

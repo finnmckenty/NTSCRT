@@ -5,7 +5,7 @@ import SwiftUI
 struct NumericField: View {
     let value: Binding<Double>
     let range: ClosedRange<Double>
-    var width: CGFloat = 64
+    var width: CGFloat = 72
 
     var body: some View {
         TextField(
@@ -16,9 +16,8 @@ struct NumericField: View {
             ),
             format: .number.precision(.significantDigits(1...5))
         )
-        .textFieldStyle(.plain)
+        .textFieldStyle(.roundedBorder)
         .font(.system(.caption, design: .monospaced))
-        .foregroundStyle(.secondary)
         .multilineTextAlignment(.trailing)
         .frame(width: width)
     }
@@ -39,9 +38,8 @@ struct IntField: View {
             ),
             format: .number
         )
-        .textFieldStyle(.plain)
+        .textFieldStyle(.roundedBorder)
         .font(.system(.caption, design: .monospaced))
-        .foregroundStyle(.secondary)
         .multilineTextAlignment(.trailing)
         .frame(width: width)
     }
