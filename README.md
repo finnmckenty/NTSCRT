@@ -68,6 +68,26 @@ The "VHS (ntsc-rs)" panel appears enabled-able in the sidebar when the dylib is 
 
 Env overrides: `CRT_NTSCRS=<dylib path>`, `CRT_NTSC=1` (start with the stage enabled).
 
+## Releasing (signed + notarized DMG)
+
+One-time setup (requires an Apple Developer Program membership):
+
+1. Create a **Developer ID Application** certificate: developer.apple.com → Account → Certificates → "+" → Developer ID Application. Create the CSR with Keychain Access (Certificate Assistant → Request a Certificate From a Certificate Authority), upload it, download the .cer and double-click to install.
+2. Store notarization credentials (uses an app-specific password from appleid.apple.com → Sign-In and Security):
+
+   ```sh
+   xcrun notarytool store-credentials ntscrt-notary --apple-id YOU@EXAMPLE.COM --team-id YOURTEAMID
+   ```
+
+Then every release is:
+
+```sh
+./scripts/make-release.sh 0.1.0
+gh release create v0.1.0 dist/NTSCRT-0.1.0.dmg --title "NTSCRT 0.1.0"
+```
+
+The script builds everything, assembles a fully self-contained bundle (shaders in Resources/, both dylibs in Frameworks/), signs with hardened runtime, notarizes, staples, and produces a drag-to-Applications DMG. `--adhoc` skips signing/notarization for local testing.
+
 ## Run the SwiftUI app
 
 Two options.
