@@ -47,6 +47,19 @@ swift build -c release --product crt-smoke
 swift build -c release --product crt-app
 ```
 
+## Optional: the VHS stage (ntsc-rs)
+
+The app can run [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) as a CPU signal-degradation stage between the downscaler and the CRT shader — composite artifacts, tape noise, head switching, chroma bleed. Build it once:
+
+```sh
+git submodule update --init --recursive   # brings in Vendor/ntsc-rs
+./scripts/build-ntscrs.sh                 # cargo-builds Vendor/ntscrs-capi/ntscrs_capi.dylib
+```
+
+The "VHS (ntsc-rs)" panel appears enabled-able in the sidebar when the dylib is present (the app runs fine without it). Its controls are generated from ntsc-rs's own settings schema, and settings use ntsc-rs's preset JSON format — presets copy/paste both ways with the ntsc-rs desktop app. Turn on **Animate** in the View panel to see noise, jitter, and tracking move; frame-seeded randomness means exports are deterministic.
+
+Env overrides: `CRT_NTSCRS=<dylib path>`, `CRT_NTSC=1` (start with the stage enabled).
+
 ## Run the SwiftUI app
 
 Two options.

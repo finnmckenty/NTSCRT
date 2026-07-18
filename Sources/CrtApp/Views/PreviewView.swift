@@ -124,9 +124,26 @@ struct PreviewView: NSViewRepresentable {
 
                 var allRendered = true
 
+                // ntsc-rs stage: synchronously produce the degraded chain
+                // input (downscale + CPU effect); both compare sides then
+                // consume it with no further downscaling.
+                var chainSource = source
+                var spec = state.downscaleSpec
+                if state.ntscEnabled, let stage = state.ntscStage {
+                    do {
+                        chainSource = try state.pipeline.prepareChainInput(
+                            source: source, downscale: spec,
+                            ntsc: stage, frameCount: state.frameCounter)
+                        spec = nil
+                    } catch {
+                        // Fall back to the clean path this frame.
+                    }
+                }
+
                 // Render the primary target (matches current shaderEnabled state).
                 do {
-                    try renderState(state.shaderEnabled, source: source, into: primary, cb: cb)
+                    try renderState(state.shaderEnabled, source: chainSource,
+                                    downscale: spec, into: primary, cb: cb)
                 } catch {
                     lastRenderedChainTick = nil
                     clearAndPresent(drawable: drawable, cb: cb); return
@@ -135,7 +152,8 @@ struct PreviewView: NSViewRepresentable {
                 // Render secondary only when compare is on — that's the OTHER state.
                 if state.compareEnabled, let secondary = secondaryTarget {
                     do {
-                        try renderState(!state.shaderEnabled, source: source, into: secondary, cb: cb)
+                        try renderState(!state.shaderEnabled, source: chainSource,
+                                        downscale: spec, into: secondary, cb: cb)
                     } catch {
                         // Non-fatal: skip compare for this frame, retry next draw.
                         allRendered = false
@@ -203,6 +221,7 @@ struct PreviewView: NSViewRepresentable {
 
         private func renderState(_ shaderOn: Bool,
                                  source: MTLTexture,
+                                 downscale: DownscaleSpec?,
                                  into target: MTLTexture,
                                  cb: MTLCommandBuffer) throws {
             if shaderOn, let chain = state.chain {
@@ -210,14 +229,14 @@ struct PreviewView: NSViewRepresentable {
                                           chain: chain,
                                           inputTexture: source,
                                           outputTexture: target,
-                                          downscale: state.downscaleSpec,
+                                          downscale: downscale,
                                           frameCount: state.frameCounter)
                 return
             }
 
             // Shader off: optionally downscale, then upscale into target.
             let intermediate: MTLTexture
-            if let spec = state.downscaleSpec {
+            if let spec = downscale {
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: source.pixelFormat,
                     width: spec.width, height: spec.height, mipmapped: false

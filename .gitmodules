@@ -1,3 +1,6 @@
 [submodule "Vendor/slang-shaders"]
 	path = Vendor/slang-shaders
 	url = https://github.com/libretro/slang-shaders.git
+[submodule "Vendor/ntsc-rs"]
+	path = Vendor/ntsc-rs
+	url = https://github.com/ntsc-rs/ntsc-rs.git

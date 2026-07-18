@@ -28,6 +28,9 @@ import UniformTypeIdentifiers
 // after chain creation; everything before them is positional as documented.
 var positional: [String] = []
 var paramOverrides: [(String, Float)] = []
+var ntscSettings: String? = nil   // "default" or a settings-JSON path
+var ntscDylib: String? = nil
+var frameIndex: Int = 1
 var argRest = Array(CommandLine.arguments.dropFirst())
 while !argRest.isEmpty {
     let a = argRest.removeFirst()
@@ -38,6 +41,17 @@ while !argRest.isEmpty {
             fputs("--set needs name=value\n", stderr); exit(2)
         }
         paramOverrides.append((String(pair[0]), v))
+    } else if a == "--ntsc" {
+        guard !argRest.isEmpty else { fputs("--ntsc needs 'default' or a settings.json path\n", stderr); exit(2) }
+        ntscSettings = argRest.removeFirst()
+    } else if a == "--ntsc-dylib" {
+        guard !argRest.isEmpty else { fputs("--ntsc-dylib needs a path\n", stderr); exit(2) }
+        ntscDylib = argRest.removeFirst()
+    } else if a == "--frame" {
+        guard !argRest.isEmpty, let f = Int(argRest.removeFirst()) else {
+            fputs("--frame needs an integer\n", stderr); exit(2)
+        }
+        frameIndex = f
     } else {
         positional.append(a)
     }
@@ -172,9 +186,78 @@ if let dw = downW, let dh = downH, let method = downMethod {
     chainInput = inputTex
 }
 
+// Optional ntsc-rs stage: CPU-process the chain input before the shaders.
+var finalChainInput = chainInput
+var chainCb = cb
+if let ntscSettings {
+    // Load the capi dylib (explicit flag, else sibling of librashader's Vendor dir).
+    let capiPath = ntscDylib
+        ?? URL(fileURLWithPath: dylibPath).deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ntscrs-capi/ntscrs_capi.dylib").path
+    do {
+        try NTSCFilter.loadLibrary(capiPath)
+    } catch {
+        fputs("ntsc loadLibrary failed (\(capiPath)): \(error.localizedDescription)\n", stderr); exit(21)
+    }
+    guard let filter = NTSCFilter() else {
+        fputs("NTSCFilter init failed\n", stderr); exit(21)
+    }
+    if ntscSettings != "default" {
+        guard let json = try? String(contentsOfFile: ntscSettings, encoding: .utf8) else {
+            fputs("cannot read ntsc settings: \(ntscSettings)\n", stderr); exit(22)
+        }
+        do {
+            try filter.setSettingsJSON(json)
+        } catch {
+            fputs("ntsc settings parse failed: \(error.localizedDescription)\n", stderr); exit(22)
+        }
+    }
+
+    // CPU-visible copy of the chain input.
+    let w = chainInput.width, h = chainInput.height
+    let sharedDesc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: chainInput.pixelFormat, width: w, height: h, mipmapped: false)
+    sharedDesc.usage = [.shaderRead]
+    sharedDesc.storageMode = .shared
+    guard let sharedTex = device.makeTexture(descriptor: sharedDesc),
+          let copyBlit = cb.makeBlitCommandEncoder() else {
+        fputs("ntsc staging alloc failed\n", stderr); exit(23)
+    }
+    copyBlit.copy(from: chainInput,
+                  sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: w, height: h, depth: 1),
+                  to: sharedTex,
+                  destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+    copyBlit.endEncoding()
+    cb.commit()
+    cb.waitUntilCompleted()
+
+    let rowBytes = w * 4
+    var bytes = [UInt8](repeating: 0, count: rowBytes * h)
+    let fullRegion = MTLRegionMake2D(0, 0, w, h)
+    bytes.withUnsafeMutableBytes { raw in
+        sharedTex.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: fullRegion, mipmapLevel: 0)
+        guard filter.processBGRA8(raw.baseAddress!, width: UInt(w), height: UInt(h),
+                                  rowBytes: UInt(rowBytes), frameIndex: frameIndex) else {
+            fputs("ntsc process failed\n", stderr); exit(24)
+        }
+    }
+    sharedTex.replace(region: fullRegion, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
+    print("ntsc stage applied (\(w)x\(h), frame \(frameIndex), settings: \(ntscSettings))")
+
+    finalChainInput = sharedTex
+    guard let newCb = queue.makeCommandBuffer() else {
+        fputs("commandBuffer failed\n", stderr); exit(9)
+    }
+    chainCb = newCb
+}
+
 let viewport = MTLViewport(originX: 0, originY: 0, width: Double(outW), height: Double(outH), znear: 0, zfar: 1)
 do {
-    try chain.renderInputTexture(chainInput, outputTexture: outputTex, viewport: viewport, frameCount: 1, commandBuffer: cb)
+    try chain.renderInputTexture(finalChainInput, outputTexture: outputTex, viewport: viewport, frameCount: UInt(max(0, frameIndex)), commandBuffer: chainCb)
 } catch {
     fputs("render failed: \(error.localizedDescription)\n", stderr); exit(10)
 }
@@ -188,7 +271,7 @@ stagingDesc.storageMode = .shared
 guard let staging = device.makeTexture(descriptor: stagingDesc) else {
     fputs("makeTexture(staging) failed\n", stderr); exit(11)
 }
-guard let blit = cb.makeBlitCommandEncoder() else {
+guard let blit = chainCb.makeBlitCommandEncoder() else {
     fputs("blit encoder failed\n", stderr); exit(12)
 }
 blit.copy(from: outputTex,
@@ -199,9 +282,9 @@ blit.copy(from: outputTex,
           destinationSlice: 0, destinationLevel: 0,
           destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
 blit.endEncoding()
-cb.commit()
-cb.waitUntilCompleted()
-if let err = cb.error {
+chainCb.commit()
+chainCb.waitUntilCompleted()
+if let err = chainCb.error {
     fputs("command buffer error: \(err)\n", stderr); exit(13)
 }
 

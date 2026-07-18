@@ -66,6 +66,30 @@ public final class Pipeline {
         return outputTexture
     }
 
+    /// Synchronously produce the chain input for a frame that needs the
+    /// ntsc-rs stage: optional downscale (own command buffer, waited on),
+    /// then the CPU effect. The result replaces both `inputTexture` and
+    /// `downscale` in a subsequent `encode` call (pass downscale: nil).
+    public func prepareChainInput(source: MTLTexture,
+                                  downscale: DownscaleSpec?,
+                                  ntsc: NtscStage,
+                                  frameCount: Int) throws -> MTLTexture {
+        var input = source
+        if let spec = downscale {
+            guard let cb = context.queue.makeCommandBuffer() else {
+                throw NtscStage.Error.commandBuffer
+            }
+            let scratch = obtainDownscaleTexture(for: spec, sourceFormat: source.pixelFormat)
+            context.downscaler.encode(into: cb, source: source,
+                                      destination: scratch, method: spec.method)
+            cb.commit()
+            cb.waitUntilCompleted()
+            input = scratch
+        }
+        return try ntsc.process(input: input, frameIndex: frameCount,
+                                device: context.device, queue: context.queue)
+    }
+
     private func obtainDownscaleTexture(for spec: DownscaleSpec,
                                         sourceFormat: MTLPixelFormat) -> MTLTexture {
         if let cached = downscaleCache, cached.spec == spec,

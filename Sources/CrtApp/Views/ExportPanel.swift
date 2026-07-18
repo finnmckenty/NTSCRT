@@ -89,11 +89,19 @@ struct ExportPanel: View {
         }
 
         do {
+            var input = source
+            var spec = state.downscaleSpec
+            if state.ntscEnabled, let stage = state.ntscStage {
+                input = try state.pipeline.prepareChainInput(
+                    source: source, downscale: spec,
+                    ntsc: stage, frameCount: state.frameCounter)
+                spec = nil
+            }
             try state.pipeline.encode(into: cb,
                                       chain: chain,
-                                      inputTexture: source,
+                                      inputTexture: input,
                                       outputTexture: target,
-                                      downscale: state.downscaleSpec,
+                                      downscale: spec,
                                       frameCount: state.frameCounter)
         } catch {
             status = "Render failed: \(error.localizedDescription)"
@@ -157,10 +165,15 @@ struct ExportPanel: View {
             presetPath: preset.path
         )
         let params = state.paramValues
+        let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
+            ? state.ntscStage?.settingsJSON()
+            : nil
 
         Task {
             do {
-                try await exporter.export(source: vs, paramValues: params, settings: settings) { p in
+                try await exporter.export(source: vs, paramValues: params,
+                                          settings: settings,
+                                          ntscSettingsJSON: ntscJSON) { p in
                     Task { @MainActor in self.progress = p }
                 }
                 await MainActor.run {

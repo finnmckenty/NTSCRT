@@ -45,10 +45,23 @@ public final class Mp4Exporter {
     }
 
     /// Run the export. Calls `progress(0...1)` as it goes. Async, throws.
+    /// `ntscSettingsJSON` non-nil enables the ntsc-rs stage per frame (the
+    /// exporter builds its own NtscStage so the preview's instance is never
+    /// touched off the main thread).
     public func export(source: VideoSource,
                        paramValues: [String: Float],
                        settings: Settings,
+                       ntscSettingsJSON: String? = nil,
                        progress: @escaping @Sendable (Double) -> Void) async throws {
+
+        var ntscStage: NtscStage? = nil
+        if let json = ntscSettingsJSON {
+            guard let stage = NtscStage() else {
+                throw Error.encodeFailed("ntsc-rs stage unavailable (dylib not loaded)")
+            }
+            try stage.setSettingsJSON(json)
+            ntscStage = stage
+        }
 
         // Fresh chain just for this export, on the same queue.
         let chain = try LRShaderChain(presetPath: settings.presetPath,
@@ -166,10 +179,18 @@ public final class Mp4Exporter {
                 guard let cb = self.context.queue.makeCommandBuffer() else {
                     throw Error.encodeFailed("commandBuffer")
                 }
+                var frameInput = frame.texture
+                var frameDownscale = settings.downscale
+                if let stage = ntscStage {
+                    frameInput = try self.pipeline.prepareChainInput(
+                        source: frame.texture, downscale: frameDownscale,
+                        ntsc: stage, frameCount: frameIndex + 1)
+                    frameDownscale = nil
+                }
                 try self.pipeline.encode(into: cb, chain: chain,
-                                         inputTexture: frame.texture,
+                                         inputTexture: frameInput,
                                          outputTexture: target,
-                                         downscale: settings.downscale,
+                                         downscale: frameDownscale,
                                          frameCount: frameIndex + 1)
 
                 var pb: CVPixelBuffer?

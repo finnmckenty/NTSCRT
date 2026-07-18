@@ -31,6 +31,10 @@ struct CrtAppApp: App {
         do {
             let dylib = try Paths.librashaderDylib()
             try LRShaderChain.loadLibrary(dylib.path)
+            // Optional VHS stage — the app runs fine without the dylib.
+            if let ntscDylib = Paths.ntscrsDylib() {
+                try? NTSCFilter.loadLibrary(ntscDylib.path)
+            }
             let context = try MetalContext()
             let presetsRoot = try Paths.slangShadersRoot()
             if ProcessInfo.processInfo.environment["CRT_DUMP_CONTROLS"] != nil {
@@ -45,6 +49,9 @@ struct CrtAppApp: App {
             if let presetID = ProcessInfo.processInfo.environment["CRT_PRESET"],
                let preset = Presets.all.first(where: { $0.id == presetID }) {
                 state.selectedPreset = preset
+            }
+            if ProcessInfo.processInfo.environment["CRT_NTSC"] != nil {
+                state.ntscEnabled = true
             }
             appState = state
         } catch {

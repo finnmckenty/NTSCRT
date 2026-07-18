@@ -27,6 +27,18 @@ enum Paths {
         throw Error.notFound("librashader.dylib (set CRT_LIBRASHADER or place at Vendor/librashader/librashader.dylib)")
     }
 
+    /// The ntscrs-capi dylib (VHS stage). Optional — the app runs without it.
+    static func ntscrsDylib() -> URL? {
+        if let env = ProcessInfo.processInfo.environment["CRT_NTSCRS"] {
+            let url = URL(fileURLWithPath: env)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        for candidate in candidates(suffix: "Vendor/ntscrs-capi/ntscrs_capi.dylib") {
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+
     static func slangShadersRoot() throws -> URL {
         if let env = ProcessInfo.processInfo.environment["CRT_PRESETS"] {
             let url = URL(fileURLWithPath: env)

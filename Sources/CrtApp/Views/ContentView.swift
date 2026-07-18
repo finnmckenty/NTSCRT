@@ -31,6 +31,8 @@ private struct Sidebar: View {
                 Divider()
                 DownscalePanel()
                 Divider()
+                NtscPanel()
+                Divider()
                 ShaderPanel()
                 Divider()
                 ViewPanel()

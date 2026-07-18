@@ -23,6 +23,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 
 cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/CrtApp"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/librashader.dylib"
+# Optional VHS stage dylib (the app runs without it).
+if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
+  cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/ntscrs_capi.dylib"
+fi
 
 # Set the rpath so the embedded dylib is found.
 install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/CrtApp" 2>/dev/null || true

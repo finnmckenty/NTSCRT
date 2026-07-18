@@ -108,6 +108,65 @@ final class AppState {
         panY = 0
     }
 
+    // MARK: - VHS / ntsc-rs stage
+
+    /// nil when the ntscrs-capi dylib wasn't found/loaded.
+    private(set) var ntscStage: NtscStage?
+    private(set) var ntscDescriptors: [NtscSetting] = []
+    private(set) var ntscDefaults: [String: Any] = [:]
+    /// Flat values in ntsc-rs preset-JSON form (includes "version").
+    private(set) var ntscValues: [String: Any] = [:]
+    var ntscEnabled: Bool = false { didSet { markChainDirty() } }
+    private(set) var ntscError: String?
+
+    var ntscAvailable: Bool { ntscStage != nil }
+
+    func setNtscValue(_ name: String, _ value: Any) {
+        ntscValues[name] = value
+        pushNtscSettings()
+        markChainDirty()
+    }
+
+    func ntscBool(_ name: String) -> Bool {
+        (ntscValues[name] as? Bool) ?? ((ntscValues[name] as? NSNumber)?.boolValue ?? false)
+    }
+
+    func ntscNumber(_ name: String) -> Double {
+        (ntscValues[name] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    func resetNtsc() {
+        ntscValues = ntscDefaults
+        pushNtscSettings()
+        markChainDirty()
+    }
+
+    private func pushNtscSettings() {
+        guard let stage = ntscStage,
+              let data = try? JSONSerialization.data(withJSONObject: ntscValues),
+              let json = String(data: data, encoding: .utf8) else { return }
+        do {
+            try stage.setSettingsJSON(json)
+            ntscError = nil
+        } catch {
+            ntscError = error.localizedDescription
+        }
+    }
+
+    private func setUpNtsc() {
+        guard let stage = NtscStage() else { return }
+        ntscStage = stage
+        if let descJSON = NtscStage.descriptorsJSON() {
+            ntscDescriptors = NtscSetting.parse(descriptorsJSON: descJSON)
+        }
+        if let json = stage.settingsJSON(),
+           let data = json.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            ntscDefaults = dict
+            ntscValues = dict
+        }
+    }
+
     // MARK: - shader
 
     var selectedPreset: PresetEntry = Presets.all[0] {
@@ -167,6 +226,7 @@ final class AppState {
         self.context = context
         self.pipeline = Pipeline(context: context)
         self.presetsRoot = presetsRoot
+        setUpNtsc()
         reloadChain()
     }
 

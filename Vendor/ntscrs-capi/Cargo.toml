@@ -1,0 +1,19 @@
+[package]
+name = "ntscrs-capi"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal C ABI around the ntsc-rs core library for crt-app"
+license = "MIT OR ISC OR Apache-2.0"
+
+[lib]
+name = "ntscrs_capi"
+crate-type = ["cdylib"]
+
+[dependencies]
+ntsc-rs = { path = "../ntsc-rs/crates/ntscrs" }
+
+[profile.release]
+lto = true
+
+# Standalone crate — do not join any enclosing workspace.
+[workspace]

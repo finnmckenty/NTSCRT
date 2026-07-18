@@ -13,3 +13,5 @@ Vendor/librashader/librashader_ld.h
 
 # Wrapped .app output (regenerable via scripts/wrap-app.sh)
 build/
+Vendor/ntscrs-capi/ntscrs_capi.dylib
+Vendor/ntscrs-capi/target/
