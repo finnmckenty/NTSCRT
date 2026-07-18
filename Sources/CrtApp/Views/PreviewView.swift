@@ -149,11 +149,13 @@ struct PreviewView: NSViewRepresentable {
                     clearAndPresent(drawable: drawable, cb: cb); return
                 }
 
-                // Render secondary only when compare is on — that's the OTHER state.
+                // Render secondary only when compare is on. The compare side
+                // is the ORIGINAL image — no downscale, no NTSC, no shader —
+                // so the split reads as "full pipeline vs untouched source".
                 if state.compareEnabled, let secondary = secondaryTarget {
                     do {
-                        try renderState(!state.shaderEnabled, source: chainSource,
-                                        downscale: spec, into: secondary, cb: cb)
+                        try renderState(false, source: source,
+                                        downscale: nil, into: secondary, cb: cb)
                     } catch {
                         // Non-fatal: skip compare for this frame, retry next draw.
                         allRendered = false
@@ -273,12 +275,18 @@ struct PreviewView: NSViewRepresentable {
             return o;
         }
 
-        // Upscale blit for the shader-off view (tiny downscaled src -> 1080p
-        // target). Nearest, so the preview shows the raw downscaled pixels
-        // instead of bilinearly smearing them.
+        // Blit for the shader-off/original view. Nearest for magnification
+        // (shows raw pixels of a small source instead of smearing them);
+        // the linear variant is used when minifying a full-res original.
         fragment float4 bv_blit_fs(VOut in [[stage_in]],
                                    texture2d<float> src [[texture(0)]]) {
             constexpr sampler s(filter::nearest, address::clamp_to_edge);
+            return src.sample(s, in.uv);
+        }
+
+        fragment float4 bv_blit_linear_fs(VOut in [[stage_in]],
+                                          texture2d<float> src [[texture(0)]]) {
+            constexpr sampler s(filter::linear, address::clamp_to_edge);
             return src.sample(s, in.uv);
         }
 
@@ -332,8 +340,9 @@ struct PreviewView: NSViewRepresentable {
         }
         """
 
-        private var blitPipeline: MTLRenderPipelineState?       // bv_blit_fs
-        private var compositePipeline: MTLRenderPipelineState?  // bv_composite_fs
+        private var blitPipeline: MTLRenderPipelineState?        // bv_blit_fs (nearest)
+        private var blitLinearPipeline: MTLRenderPipelineState?  // bv_blit_linear_fs
+        private var compositePipeline: MTLRenderPipelineState?   // bv_composite_fs
         private var msl: MTLLibrary?
 
         private func library() -> MTLLibrary? {
@@ -342,15 +351,17 @@ struct PreviewView: NSViewRepresentable {
             return msl
         }
 
-        private func obtainBlit(for fmt: MTLPixelFormat) -> MTLRenderPipelineState? {
-            if let p = blitPipeline { return p }
+        private func obtainBlit(for fmt: MTLPixelFormat, linear: Bool) -> MTLRenderPipelineState? {
+            if linear, let p = blitLinearPipeline { return p }
+            if !linear, let p = blitPipeline { return p }
             guard let lib = library() else { return nil }
             let d = MTLRenderPipelineDescriptor()
             d.vertexFunction = lib.makeFunction(name: "bv_vs")
-            d.fragmentFunction = lib.makeFunction(name: "bv_blit_fs")
+            d.fragmentFunction = lib.makeFunction(name: linear ? "bv_blit_linear_fs" : "bv_blit_fs")
             d.colorAttachments[0].pixelFormat = fmt
-            blitPipeline = try? state.context.device.makeRenderPipelineState(descriptor: d)
-            return blitPipeline
+            let p = try? state.context.device.makeRenderPipelineState(descriptor: d)
+            if linear { blitLinearPipeline = p } else { blitPipeline = p }
+            return p
         }
 
         private func obtainComposite(for fmt: MTLPixelFormat) -> MTLRenderPipelineState? {
@@ -365,7 +376,11 @@ struct PreviewView: NSViewRepresentable {
         }
 
         private func blitScale(source: MTLTexture, into dst: MTLTexture, cb: MTLCommandBuffer) {
-            guard let pipe = obtainBlit(for: dst.pixelFormat) else { return }
+            // Magnifying a small (downscaled) source → nearest, to show its
+            // raw pixels. Minifying a full-res original → linear, to avoid
+            // single-tap aliasing.
+            let minifying = source.width > dst.width
+            guard let pipe = obtainBlit(for: dst.pixelFormat, linear: minifying) else { return }
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = dst
             pass.colorAttachments[0].loadAction = .clear

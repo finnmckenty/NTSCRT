@@ -14,7 +14,7 @@ struct ViewPanel: View {
 
             Toggle("Compare (split before/after)", isOn: $state.compareEnabled)
                 .toggleStyle(.checkbox)
-                .help("Drag the vertical line in the preview to compare the shader's effect.")
+                .help("Split the preview: full pipeline (downscale + VHS + shader) on the left of the line, the untouched original on the right. Drag the line to move the split.")
 
             Toggle("Integer scale", isOn: $state.integerScale)
                 .toggleStyle(.checkbox)

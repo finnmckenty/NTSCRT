@@ -59,6 +59,13 @@ struct ExportPanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// "18-07-26 17.42.09" — date + time so repeated exports don't collide.
+    private var exportTimestamp: String {
+        let f = DateFormatter()
+        f.dateFormat = "dd-MM-yy HH.mm.ss"
+        return f.string(from: Date())
+    }
+
     private var buttonLabel: String {
         if working { return isVideo ? "Exporting MP4…" : "Exporting PNG…" }
         return isVideo ? "Export MP4…" : "Export PNG…"
@@ -71,7 +78,7 @@ struct ExportPanel: View {
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
-        panel.nameFieldStringValue = "crt-output.png"
+        panel.nameFieldStringValue = "crt export \(exportTimestamp).png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let size = outputSize
@@ -144,7 +151,7 @@ struct ExportPanel: View {
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.mpeg4Movie]
-        panel.nameFieldStringValue = "crt-output.mp4"
+        panel.nameFieldStringValue = "crt export \(exportTimestamp).mp4"
         guard panel.runModal() == .OK, let outURL = panel.url else { return }
 
         let size = outputSize
