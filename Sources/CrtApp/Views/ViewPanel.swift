@@ -16,6 +16,15 @@ struct ViewPanel: View {
                 .toggleStyle(.checkbox)
                 .help("Drag the vertical line in the preview to compare the shader's effect.")
 
+            Toggle("Integer scale", isOn: $state.integerScale)
+                .toggleStyle(.checkbox)
+                .help("Render at a whole-number multiple of the chain input (letterboxed), like RetroArch's Integer Scale. Scanline and beam-shape parameters read much more clearly when every source line maps to the same number of screen pixels.")
+
+            Toggle("Animate", isOn: $state.animatePreview)
+                .toggleStyle(.checkbox)
+                .disabled(state.exportInProgress)
+                .help("Advance the shader frame counter continuously (60 fps). Needed to see frame-based effects like interlacing (CRT Royale) or animated NTSC artifacts (CRT Sim). Off = preview renders only when something changes. PNG export captures the current animation frame.")
+
             HStack {
                 Text("Zoom").font(.subheadline).foregroundStyle(.secondary)
                 Spacer()

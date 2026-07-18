@@ -57,7 +57,7 @@ struct ShaderPanel: View {
     private func resetAll() {
         var values: [String: Float] = [:]
         for p in state.paramDescriptors { values[p.name] = p.initial }
-        state.paramValues = values
+        state.setAllParams(values)
     }
 }
 
@@ -65,46 +65,112 @@ struct ShaderPanel: View {
 
 /// What kind of UI control fits this declared parameter best.
 enum ParamControlKind {
-    /// Boolean (min=0, max=1, step=1). Render a Toggle.
+    /// Non-interactive label row. Shaders declare params with min == max as
+    /// section headers / comments (e.g. Hyllian's "COLOR SETTINGS:").
+    case header
+    /// Boolean (min=0, max=1, step=1) with no named choices. Render a Toggle.
     case toggle
     /// Small fixed enumeration. Render a segmented Picker (≤4) or menu Picker.
-    case picker(values: [Float], segmented: Bool)
+    /// `labels` names the choices when the description carried a matching
+    /// "[A, B, C]" legend.
+    case picker(values: [Float], labels: [String]?, segmented: Bool)
     /// Integer-stepped value with a moderate range. Render a Stepper.
     case stepper(intStep: Int)
     /// Continuous floating-point. Render a Slider.
     case slider
 }
 
-func classifyParam(_ p: LRShaderParam) -> ParamControlKind {
+/// How a parameter should be presented: the control kind, the display title
+/// (description with any consumed "[...]" legend stripped), and an optional
+/// caption — a legend that names ranges rather than individual choices, e.g.
+/// PHOSPHOR_LAYOUT's "[1-6 APERT, 7-10 DOT, 11-14 SLOT, 15-17 LOTTES]".
+struct ParamPresentation {
+    var kind: ParamControlKind
+    var title: String
+    var caption: String?
+}
+
+func presentation(for p: LRShaderParam) -> ParamPresentation {
     let lo = Double(p.minimum)
     let hi = Double(p.maximum)
     let step = Double(p.step)
     let range = hi - lo
 
-    // Degenerate ranges fall back to slider (which we'll sanitise downstream).
-    guard step > 0, range > 0 else { return .slider }
+    let desc = p.desc.trimmingCharacters(in: .whitespaces)
+    let fallbackTitle = desc.isEmpty ? p.name : desc
 
-    // Floating-point step → continuous slider.
+    // Label pseudo-params: nothing to adjust, the description is the point.
+    if range <= 0 {
+        return ParamPresentation(kind: .header, title: desc, caption: nil)
+    }
+
+    guard step > 0 else {
+        return ParamPresentation(kind: .slider, title: fallbackTitle, caption: nil)
+    }
+
+    let (strippedDesc, legend) = extractLegend(desc)
+    let title = strippedDesc.isEmpty ? p.name : strippedDesc
+
+    // Discrete iff the step divides the range into a whole number of
+    // intervals — this also catches fractional-step enums like crt-royale's
+    // subpixel offsets (-0.333…0.333, step 0.333 → three choices).
+    let steps = range / step
+    let isDiscrete = abs(steps - steps.rounded()) < 1e-3
+    let count = Int(steps.rounded()) + 1
     let isIntStep = step == step.rounded() && lo == lo.rounded() && hi == hi.rounded()
-    if !isIntStep {
-        return .slider
+
+    if isDiscrete && count >= 2 && count <= 8 {
+        // A comma-separated legend naming exactly one choice per value
+        // becomes the picker labels ("[SPHERE, CYLINDER]" etc.).
+        var labels: [String]? = nil
+        if let legend {
+            let tokens = legend.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            if tokens.count == count && tokens.allSatisfy({ !$0.isEmpty }) {
+                labels = tokens
+            }
+        }
+
+        // Plain unnamed on/off → toggle.
+        if count == 2 && lo == 0 && hi == 1 && isIntStep && labels == nil {
+            return ParamPresentation(kind: .toggle, title: title, caption: legend)
+        }
+
+        let values = enumerate(lo: lo, step: step, count: count)
+        // Segments need room: only for few choices with short labels.
+        let combinedLabelLength = labels?.reduce(0) { $0 + $1.count } ?? 0
+        let segmented = count <= 4 && combinedLabelLength <= 24
+        return ParamPresentation(
+            kind: .picker(values: values, labels: labels, segmented: segmented),
+            title: title,
+            caption: labels == nil ? legend : nil
+        )
     }
 
-    let count = Int((range / step).rounded()) + 1
-    if count == 2 && lo == 0 && hi == 1 {
-        return .toggle
+    // Not a small enum: any legend stays visible as a caption under the control.
+    if isIntStep && isDiscrete && count <= 32 {
+        return ParamPresentation(kind: .stepper(intStep: Int(step)), title: title, caption: legend)
     }
-    if count >= 2 && count <= 4 {
-        return .picker(values: enumerate(lo: lo, step: step, count: count), segmented: true)
+    return ParamPresentation(kind: .slider, title: title, caption: legend)
+}
+
+/// Splits the first "[...]" group out of a description.
+/// "Curvature Shape [SPHERE, CYLINDER]" → ("Curvature Shape", "SPHERE, CYLINDER").
+private func extractLegend(_ desc: String) -> (title: String, legend: String?) {
+    guard let open = desc.firstIndex(of: "["),
+          let close = desc[open...].firstIndex(of: "]"),
+          open < close else {
+        return (desc, nil)
     }
-    if count >= 5 && count <= 8 {
-        return .picker(values: enumerate(lo: lo, step: step, count: count), segmented: false)
+    let legend = String(desc[desc.index(after: open)..<close])
+    var title = String(desc[..<open]) + String(desc[desc.index(after: close)...])
+    title = title.replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespaces)
+    guard !legend.trimmingCharacters(in: .whitespaces).isEmpty else {
+        return (desc, nil)
     }
-    if count <= 32 {
-        return .stepper(intStep: Int(step))
-    }
-    // Many discrete int values → just use a slider.
-    return .slider
+    return (title, legend)
 }
 
 private func enumerate(lo: Double, step: Double, count: Int) -> [Float] {
@@ -120,37 +186,82 @@ private struct ParamControl: View {
     private var binding: Binding<Float> {
         Binding(
             get: { state.paramValues[param.name] ?? param.initial },
-            set: { state.paramValues[param.name] = $0 }
+            set: { state.setParam(param.name, $0) }
         )
     }
 
-    private var label: String {
-        param.desc.isEmpty ? param.name : param.desc
-    }
-
     var body: some View {
-        switch classifyParam(param) {
-        case .toggle:                          toggleView
-        case .picker(let values, let seg):     pickerView(values: values, segmented: seg)
-        case .stepper(let intStep):            stepperView(intStep: intStep)
-        case .slider:                          sliderView
+        let pres = presentation(for: param)
+        let gate: ParamGate? = {
+            if case .header = pres.kind { return nil }
+            return ParamGates.gate(presetID: state.selectedPreset.id,
+                                   paramName: param.name, desc: param.desc)
+        }()
+        let gateOpen: Bool = {
+            guard let condition = gate?.condition else { return true }
+            return ParamGates.isSatisfied(condition,
+                                          paramValues: state.paramValues,
+                                          inputHeight: state.chainInputHeight)
+        }()
+
+        VStack(alignment: .leading, spacing: 2) {
+            Group {
+                switch pres.kind {
+                case .header:
+                    headerView(title: pres.title)
+                case .toggle:
+                    toggleView(title: pres.title)
+                case .picker(let values, let labels, let seg):
+                    pickerView(title: pres.title, values: values, labels: labels, segmented: seg)
+                case .stepper(let intStep):
+                    stepperView(title: pres.title, intStep: intStep)
+                case .slider:
+                    sliderView(title: pres.title)
+                }
+            }
+            .disabled(!gateOpen)
+            .opacity(gateOpen ? 1 : 0.45)
+
+            if let caption = pres.caption {
+                Text(caption)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let gate, !gateOpen || gate.condition == nil {
+                Text(gate.hint)
+                    .font(.caption2)
+                    .foregroundStyle(gateOpen ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
     // MARK: widgets
 
-    private var toggleView: some View {
+    @ViewBuilder
+    private func headerView(title: String) -> some View {
+        if !title.isEmpty {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func toggleView(title: String) -> some View {
         Toggle(isOn: Binding(
             get: { binding.wrappedValue >= 0.5 },
             set: { binding.wrappedValue = $0 ? 1 : 0 }
         )) {
-            Text(label).font(.callout).lineLimit(1)
+            Text(title).font(.callout).lineLimit(1)
         }
         .toggleStyle(.switch)
     }
 
     @ViewBuilder
-    private func pickerView(values: [Float], segmented: Bool) -> some View {
+    private func pickerView(title: String, values: [Float], labels: [String]?, segmented: Bool) -> some View {
         let selection = Binding<Float>(
             get: {
                 // Snap to the nearest declared value.
@@ -159,35 +270,30 @@ private struct ParamControl: View {
             },
             set: { binding.wrappedValue = $0 }
         )
+        let choices = Picker("", selection: selection) {
+            ForEach(Array(values.enumerated()), id: \.element) { i, v in
+                Text(labels?[i] ?? formatChoice(v)).tag(v)
+            }
+        }
+        .labelsHidden()
+
         VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.callout).lineLimit(1)
+            Text(title).font(.callout).lineLimit(1)
             if segmented {
-                Picker("", selection: selection) {
-                    ForEach(values, id: \.self) { v in
-                        Text(formatChoice(v)).tag(v)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
+                choices.pickerStyle(.segmented)
             } else {
-                Picker("", selection: selection) {
-                    ForEach(values, id: \.self) { v in
-                        Text(formatChoice(v)).tag(v)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
+                choices.pickerStyle(.menu)
             }
         }
     }
 
-    private func stepperView(intStep: Int) -> some View {
+    private func stepperView(title: String, intStep: Int) -> some View {
         let intBinding = Binding<Int>(
             get: { Int(binding.wrappedValue.rounded()) },
             set: { binding.wrappedValue = Float($0) }
         )
         return HStack {
-            Text(label).font(.callout).lineLimit(1)
+            Text(title).font(.callout).lineLimit(1)
             Spacer()
             Stepper(value: intBinding,
                     in: Int(param.minimum)...Int(param.maximum),
@@ -199,7 +305,7 @@ private struct ParamControl: View {
         }
     }
 
-    private var sliderView: some View {
+    private func sliderView(title: String) -> some View {
         // Sanitise bounds for SwiftUI's Slider preconditions.
         let lo = Double(param.minimum)
         let hiRaw = Double(param.maximum)
@@ -215,7 +321,7 @@ private struct ParamControl: View {
 
         return VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(label).font(.callout).lineLimit(1)
+                Text(title).font(.callout).lineLimit(1)
                 Spacer()
                 Text(String(format: "%.3g", dBinding.wrappedValue))
                     .font(.system(.caption, design: .monospaced))

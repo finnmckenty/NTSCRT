@@ -8,22 +8,37 @@ public enum DownscaleMethod: String, CaseIterable, Sendable {
 /// Downscales an input MTLTexture into a destination MTLTexture using a chosen
 /// sampling kernel. The MSL source is compiled once at init time.
 ///
-/// Runs as a Metal compute dispatch — destination must have `.shaderWrite`.
+/// nearest and area run as a single compute dispatch. bilinear, bicubic and
+/// lanczos are proper decimation filters: their kernel support scales with the
+/// downscale ratio (a fixed-footprint interpolator skips source pixels when
+/// minifying and aliases badly — the classic "bilinear downscale looks like
+/// nearest" bug), and they run as two separable passes (horizontal into a
+/// cached scratch texture, then vertical) so large ratios stay cheap.
+///
+/// Runs as Metal compute dispatches — destination must have `.shaderWrite`.
 public final class Downscaler {
 
     private let device: MTLDevice
-    private var pipelines: [DownscaleMethod: MTLComputePipelineState] = [:]
+    private var pipelines: [String: MTLComputePipelineState] = [:]
+
+    /// Intermediate (dstW × srcH) texture for the separable filters, reused
+    /// while dimensions match. Guarded because the exporter and the preview
+    /// can both reach the shared Downscaler.
+    private var scratch: MTLTexture?
+    private let scratchLock = NSLock()
 
     public init(device: MTLDevice) throws {
         self.device = device
         let library = try device.makeLibrary(source: Self.metalSource, options: nil)
-        for method in DownscaleMethod.allCases {
-            let fname = "downscale_\(method.rawValue)"
+        for fname in ["downscale_nearest", "downscale_area",
+                      "downscale_bilinear_h", "downscale_bilinear_v",
+                      "downscale_bicubic_h", "downscale_bicubic_v",
+                      "downscale_lanczos_h", "downscale_lanczos_v"] {
             guard let fn = library.makeFunction(name: fname) else {
                 throw NSError(domain: "Downscaler", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "missing kernel \(fname)"])
             }
-            pipelines[method] = try device.makeComputePipelineState(function: fn)
+            pipelines[fname] = try device.makeComputePipelineState(function: fn)
         }
     }
 
@@ -31,23 +46,60 @@ public final class Downscaler {
                        source: MTLTexture,
                        destination: MTLTexture,
                        method: DownscaleMethod) {
-        guard let pipe = pipelines[method] else { return }
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        switch method {
+        case .nearest, .area:
+            dispatch(name: "downscale_\(method.rawValue)",
+                     into: commandBuffer, src: source, dst: destination,
+                     dims: (source.width, source.height, destination.width, destination.height),
+                     gridW: destination.width, gridH: destination.height)
+
+        case .bilinear, .bicubic, .lanczos:
+            guard let mid = scratchTexture(width: destination.width,
+                                           height: source.height,
+                                           format: destination.pixelFormat) else { return }
+            // Horizontal: (srcW × srcH) → (dstW × srcH)
+            dispatch(name: "downscale_\(method.rawValue)_h",
+                     into: commandBuffer, src: source, dst: mid,
+                     dims: (source.width, source.height, destination.width, destination.height),
+                     gridW: destination.width, gridH: source.height)
+            // Vertical: (dstW × srcH) → (dstW × dstH)
+            dispatch(name: "downscale_\(method.rawValue)_v",
+                     into: commandBuffer, src: mid, dst: destination,
+                     dims: (source.width, source.height, destination.width, destination.height),
+                     gridW: destination.width, gridH: destination.height)
+        }
+    }
+
+    private func dispatch(name: String,
+                          into commandBuffer: MTLCommandBuffer,
+                          src: MTLTexture, dst: MTLTexture,
+                          dims: (Int, Int, Int, Int),
+                          gridW: Int, gridH: Int) {
+        guard let pipe = pipelines[name],
+              let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pipe)
-        enc.setTexture(source, index: 0)
-        enc.setTexture(destination, index: 1)
-
-        // Source/destination dimensions as a 4xUint constant buffer.
-        var dims = SIMD4<UInt32>(UInt32(source.width), UInt32(source.height),
-                                  UInt32(destination.width), UInt32(destination.height))
-        enc.setBytes(&dims, length: MemoryLayout<SIMD4<UInt32>>.size, index: 0)
-
+        enc.setTexture(src, index: 0)
+        enc.setTexture(dst, index: 1)
+        var d = SIMD4<UInt32>(UInt32(dims.0), UInt32(dims.1), UInt32(dims.2), UInt32(dims.3))
+        enc.setBytes(&d, length: MemoryLayout<SIMD4<UInt32>>.size, index: 0)
         let tg = MTLSize(width: 8, height: 8, depth: 1)
-        let groups = MTLSize(width: (destination.width + 7) / 8,
-                             height: (destination.height + 7) / 8,
-                             depth: 1)
+        let groups = MTLSize(width: (gridW + 7) / 8, height: (gridH + 7) / 8, depth: 1)
         enc.dispatchThreadgroups(groups, threadsPerThreadgroup: tg)
         enc.endEncoding()
+    }
+
+    private func scratchTexture(width: Int, height: Int, format: MTLPixelFormat) -> MTLTexture? {
+        scratchLock.lock()
+        defer { scratchLock.unlock() }
+        if let s = scratch, s.width == width, s.height == height, s.pixelFormat == format {
+            return s
+        }
+        let d = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format, width: width, height: height, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .private
+        scratch = device.makeTexture(descriptor: d)
+        return scratch
     }
 
     // MARK: - MSL source
@@ -58,12 +110,6 @@ public final class Downscaler {
 
     struct Dims { uint sw, sh, dw, dh; };
 
-    inline float2 dst_to_src_uv(uint2 gid, constant Dims& d) {
-        // sample at the centre of the destination pixel
-        float2 dst = float2(gid) + 0.5;
-        return float2(dst.x / float(d.dw), dst.y / float(d.dh));
-    }
-
     // ---------- nearest ----------
     kernel void downscale_nearest(
         texture2d<float, access::sample> src [[texture(0)]],
@@ -72,31 +118,22 @@ public final class Downscaler {
         uint2 gid [[thread_position_in_grid]])
     {
         if (gid.x >= d.dw || gid.y >= d.dh) return;
-        float2 uv = dst_to_src_uv(gid, d);
+        float2 uv = (float2(gid) + 0.5) / float2(d.dw, d.dh);
         constexpr sampler s(filter::nearest, address::clamp_to_edge,
                             coord::normalized);
-        float4 c = src.sample(s, uv);
-        dst.write(c, gid);
+        dst.write(src.sample(s, uv), gid);
     }
 
-    // ---------- bilinear ----------
-    kernel void downscale_bilinear(
-        texture2d<float, access::sample> src [[texture(0)]],
-        texture2d<float, access::write>  dst [[texture(1)]],
-        constant Dims& d [[buffer(0)]],
-        uint2 gid [[thread_position_in_grid]])
-    {
-        if (gid.x >= d.dw || gid.y >= d.dh) return;
-        float2 uv = dst_to_src_uv(gid, d);
-        constexpr sampler s(filter::linear, address::clamp_to_edge,
-                            coord::normalized);
-        float4 c = src.sample(s, uv);
-        dst.write(c, gid);
+    // ---------- weight functions ----------
+    // t is in filter-space (source distance divided by the downscale ratio),
+    // so each filter keeps its natural support: tent ±1, Mitchell ±2,
+    // lanczos3 ±3 — scaled back up by the ratio in the passes below.
+    inline float w_bilinear(float t) {
+        return max(0.0, 1.0 - fabs(t));
     }
 
-    // ---------- bicubic (Mitchell-Netravali B=1/3 C=1/3) ----------
-    inline float mitchell(float x) {
-        x = fabs(x);
+    inline float w_bicubic(float t) {   // Mitchell-Netravali B=C=1/3
+        float x = fabs(t);
         const float B = 1.0/3.0, C = 1.0/3.0;
         float x2 = x*x, x3 = x2*x;
         if (x < 1.0)
@@ -105,77 +142,70 @@ public final class Downscaler {
             return ((-B - 6.0*C) * x3 + (6.0*B + 30.0*C) * x2 + (-12.0*B - 48.0*C) * x + (8.0*B + 24.0*C)) * (1.0/6.0);
         return 0.0;
     }
-    kernel void downscale_bicubic(
-        texture2d<float, access::sample> src [[texture(0)]],
-        texture2d<float, access::write>  dst [[texture(1)]],
-        constant Dims& d [[buffer(0)]],
-        uint2 gid [[thread_position_in_grid]])
-    {
-        if (gid.x >= d.dw || gid.y >= d.dh) return;
-        constexpr sampler s(filter::nearest, address::clamp_to_edge,
-                            coord::pixel);
-        float fx = (float(gid.x) + 0.5) * float(d.sw) / float(d.dw) - 0.5;
-        float fy = (float(gid.y) + 0.5) * float(d.sh) / float(d.dh) - 0.5;
-        int ix = int(floor(fx));
-        int iy = int(floor(fy));
-        float dx = fx - float(ix);
-        float dy = fy - float(iy);
-        float4 acc = float4(0.0);
-        float wsum = 0.0;
-        for (int j = -1; j <= 2; j++) {
-            float wy = mitchell(float(j) - dy);
-            for (int i = -1; i <= 2; i++) {
-                float wx = mitchell(float(i) - dx);
-                int sx = clamp(ix + i, 0, int(d.sw) - 1);
-                int sy = clamp(iy + j, 0, int(d.sh) - 1);
-                float4 c = src.read(uint2(sx, sy));
-                float w = wx * wy;
-                acc += c * w;
-                wsum += w;
-            }
-        }
-        dst.write(acc / max(wsum, 1e-6), gid);
-    }
 
-    // ---------- lanczos3 ----------
     inline float sinc(float x) {
         if (fabs(x) < 1e-6) return 1.0;
         float xp = x * M_PI_F;
         return sin(xp) / xp;
     }
-    inline float lanczos3(float x) {
-        if (fabs(x) >= 3.0) return 0.0;
-        return sinc(x) * sinc(x / 3.0);
+    inline float w_lanczos(float t) {
+        if (fabs(t) >= 3.0) return 0.0;
+        return sinc(t) * sinc(t / 3.0);
     }
-    kernel void downscale_lanczos(
-        texture2d<float, access::sample> src [[texture(0)]],
-        texture2d<float, access::write>  dst [[texture(1)]],
-        constant Dims& d [[buffer(0)]],
-        uint2 gid [[thread_position_in_grid]])
-    {
-        if (gid.x >= d.dw || gid.y >= d.dh) return;
-        float fx = (float(gid.x) + 0.5) * float(d.sw) / float(d.dw) - 0.5;
-        float fy = (float(gid.y) + 0.5) * float(d.sh) / float(d.dh) - 0.5;
-        int ix = int(floor(fx));
-        int iy = int(floor(fy));
-        float dx = fx - float(ix);
-        float dy = fy - float(iy);
-        float4 acc = float4(0.0);
-        float wsum = 0.0;
-        for (int j = -2; j <= 3; j++) {
-            float wy = lanczos3(float(j) - dy);
-            for (int i = -2; i <= 3; i++) {
-                float wx = lanczos3(float(i) - dx);
-                int sx = clamp(ix + i, 0, int(d.sw) - 1);
-                int sy = clamp(iy + j, 0, int(d.sh) - 1);
-                float4 c = src.read(uint2(sx, sy));
-                float w = wx * wy;
-                acc += c * w;
-                wsum += w;
-            }
-        }
-        dst.write(acc / max(wsum, 1e-6), gid);
+
+    // ---------- separable ratio-scaled passes ----------
+    // Horizontal: (sw × sh) -> (dw × sh). Vertical: (dw × sh) -> (dw × dh).
+    // scale = src/dst ratio (clamped >= 1 so magnification degrades to plain
+    // interpolation); support = filter radius × scale.
+    #define DEF_DOWNSCALE_1D(NAME, WFN, RADIUS) \\
+    kernel void NAME##_h( \\
+        texture2d<float, access::read>  src [[texture(0)]], \\
+        texture2d<float, access::write> dst [[texture(1)]], \\
+        constant Dims& d [[buffer(0)]], \\
+        uint2 gid [[thread_position_in_grid]]) \\
+    { \\
+        if (gid.x >= d.dw || gid.y >= d.sh) return; \\
+        float scale = max(1.0, float(d.sw) / float(d.dw)); \\
+        float center = (float(gid.x) + 0.5) * float(d.sw) / float(d.dw) - 0.5; \\
+        float support = float(RADIUS) * scale; \\
+        int lo = int(ceil(center - support)); \\
+        int hi = int(floor(center + support)); \\
+        float4 acc = float4(0.0); \\
+        float wsum = 0.0; \\
+        for (int x = lo; x <= hi; x++) { \\
+            float w = WFN((float(x) - center) / scale); \\
+            int cx = clamp(x, 0, int(d.sw) - 1); \\
+            acc += src.read(uint2(cx, gid.y)) * w; \\
+            wsum += w; \\
+        } \\
+        dst.write(acc / max(wsum, 1e-6), gid); \\
+    } \\
+    kernel void NAME##_v( \\
+        texture2d<float, access::read>  src [[texture(0)]], \\
+        texture2d<float, access::write> dst [[texture(1)]], \\
+        constant Dims& d [[buffer(0)]], \\
+        uint2 gid [[thread_position_in_grid]]) \\
+    { \\
+        if (gid.x >= d.dw || gid.y >= d.dh) return; \\
+        float scale = max(1.0, float(d.sh) / float(d.dh)); \\
+        float center = (float(gid.y) + 0.5) * float(d.sh) / float(d.dh) - 0.5; \\
+        float support = float(RADIUS) * scale; \\
+        int lo = int(ceil(center - support)); \\
+        int hi = int(floor(center + support)); \\
+        float4 acc = float4(0.0); \\
+        float wsum = 0.0; \\
+        for (int y = lo; y <= hi; y++) { \\
+            float w = WFN((float(y) - center) / scale); \\
+            int cy = clamp(y, 0, int(d.sh) - 1); \\
+            acc += src.read(uint2(gid.x, cy)) * w; \\
+            wsum += w; \\
+        } \\
+        dst.write(acc / max(wsum, 1e-6), gid); \\
     }
+
+    DEF_DOWNSCALE_1D(downscale_bilinear, w_bilinear, 1)
+    DEF_DOWNSCALE_1D(downscale_bicubic,  w_bicubic,  2)
+    DEF_DOWNSCALE_1D(downscale_lanczos,  w_lanczos,  3)
 
     // ---------- area (box average) ----------
     // Averages all source pixels covered by each destination pixel. The right

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # Wrap the SPM-built crt-app executable in a minimal .app bundle so it
 # launches as a proper foreground macOS app (window gets focus, dock entry,
-# Cmd-Q quits). Run after `swift build --product crt-app`.
+# Cmd-Q quits). Run after `swift build -c release --product crt-app`.
+#
+# Usage: wrap-app.sh [release|debug]   (default: release)
 #
 # Output: build/CrtApp.app — drag to /Applications or `open` it directly.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [[ ! -x .build/debug/crt-app ]]; then
-  echo "build first: swift build --product crt-app" >&2
+CONFIG="${1:-release}"
+
+if [[ ! -x ".build/$CONFIG/crt-app" ]]; then
+  echo "build first: swift build -c $CONFIG --product crt-app" >&2
   exit 1
 fi
 
@@ -17,7 +21,7 @@ APP=build/CrtApp.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
-cp .build/debug/crt-app "$APP/Contents/MacOS/CrtApp"
+cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/CrtApp"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/librashader.dylib"
 
 # Set the rpath so the embedded dylib is found.

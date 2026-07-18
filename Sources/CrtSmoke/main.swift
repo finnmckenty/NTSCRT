@@ -24,20 +24,38 @@ import UniformTypeIdentifiers
 
 // MARK: - args
 
-let args = CommandLine.arguments
-guard args.count >= 5 else {
-    fputs("usage: crt-smoke <input.png> <preset.slangp> <output.png> <librashader.dylib> [outW outH]\n", stderr)
+// Trailing "--set NAME=VALUE" args (repeatable) override shader parameters
+// after chain creation; everything before them is positional as documented.
+var positional: [String] = []
+var paramOverrides: [(String, Float)] = []
+var argRest = Array(CommandLine.arguments.dropFirst())
+while !argRest.isEmpty {
+    let a = argRest.removeFirst()
+    if a == "--set" {
+        guard !argRest.isEmpty else { fputs("--set needs name=value\n", stderr); exit(2) }
+        let pair = argRest.removeFirst().split(separator: "=", maxSplits: 1)
+        guard pair.count == 2, let v = Float(pair[1]) else {
+            fputs("--set needs name=value\n", stderr); exit(2)
+        }
+        paramOverrides.append((String(pair[0]), v))
+    } else {
+        positional.append(a)
+    }
+}
+
+guard positional.count >= 4 else {
+    fputs("usage: crt-smoke <input.png> <preset.slangp> <output.png> <librashader.dylib> [outW outH] [downW downH method] [--set NAME=VALUE ...]\n", stderr)
     exit(2)
 }
-let inputPath  = args[1]
-let presetPath = args[2]
-let outputPath = args[3]
-let dylibPath  = args[4]
-let outW = args.count > 5 ? Int(args[5]) ?? 1920 : 1920
-let outH = args.count > 6 ? Int(args[6]) ?? 1080 : 1080
-let downW: Int? = args.count > 7 ? Int(args[7]) : nil
-let downH: Int? = args.count > 8 ? Int(args[8]) : nil
-let downMethod: DownscaleMethod? = args.count > 9 ? DownscaleMethod(rawValue: args[9]) : nil
+let inputPath  = positional[0]
+let presetPath = positional[1]
+let outputPath = positional[2]
+let dylibPath  = positional[3]
+let outW = positional.count > 4 ? Int(positional[4]) ?? 1920 : 1920
+let outH = positional.count > 5 ? Int(positional[5]) ?? 1080 : 1080
+let downW: Int? = positional.count > 6 ? Int(positional[6]) : nil
+let downH: Int? = positional.count > 7 ? Int(positional[7]) : nil
+let downMethod: DownscaleMethod? = positional.count > 8 ? DownscaleMethod(rawValue: positional[8]) : nil
 
 // MARK: - load librashader
 
@@ -114,6 +132,15 @@ if let firstParam = chain.parameters().first {
         print("set/get \(firstParam.name): wrote \(testValue), read back \(readback)")
     } catch {
         fputs("setParameter failed: \(error.localizedDescription)\n", stderr); exit(11)
+    }
+}
+
+for (name, value) in paramOverrides {
+    do {
+        try chain.setParameter(name, value: value)
+        print("override \(name) = \(value)")
+    } catch {
+        fputs("override \(name) failed: \(error.localizedDescription)\n", stderr); exit(20)
     }
 }
 

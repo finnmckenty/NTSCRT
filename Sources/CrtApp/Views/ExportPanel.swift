@@ -143,6 +143,10 @@ struct ExportPanel: View {
         working = true
         progress = 0
         status = "Encoding…"
+        // Suspend preview animation for the duration: the exporter drives the
+        // same Metal queue from its own loop and librashader's Metal runtime
+        // is not thread-safe.
+        state.exportInProgress = true
 
         let exporter = Mp4Exporter(context: state.context)
         let settings = Mp4Exporter.Settings(
@@ -163,11 +167,13 @@ struct ExportPanel: View {
                     self.status = "Wrote \(outURL.lastPathComponent) (\(size.width) × \(size.height))"
                     self.working = false
                     self.progress = 1
+                    state.exportInProgress = false
                 }
             } catch {
                 await MainActor.run {
                     self.status = "Export failed: \(error.localizedDescription)"
                     self.working = false
+                    state.exportInProgress = false
                 }
             }
         }

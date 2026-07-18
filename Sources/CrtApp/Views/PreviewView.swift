@@ -5,7 +5,7 @@ import MetalKit
 import CrtCore
 
 /// SwiftUI wrapper for an MTKView that re-renders the pipeline whenever
-/// `state.renderTick` changes. Adds:
+/// `state.chainTick` changes and re-composites on `state.viewTick`. Adds:
 ///   - capped offscreen render (perf)
 ///   - shader on/off
 ///   - compare-line split (drag the line in the preview)
@@ -30,15 +30,21 @@ struct PreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PreviewMTKView, context: Context) {
-        _ = state.renderTick
+        _ = state.chainTick
+        _ = state.viewTick
+        // Animation runs the MTKView's display link; otherwise draw on demand.
+        let animating = state.animatePreview && !state.exportInProgress
+        nsView.isPaused = !animating
+        nsView.enableSetNeedsDisplay = !animating
+        nsView.preferredFramesPerSecond = 60
         context.coordinator.requestRedraw()
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
 
-        /// Live preview is rendered into offscreen targets at this max long
-        /// edge. Keeps perf bounded vs. full-Retina drawable size.
-        private static let previewMaxLongEdge = 1080
+        /// Safety cap on the offscreen render target's long edge (the target
+        /// normally matches the drawable size).
+        private static let maxTargetLongEdge = 4096
 
         private weak var view: MTKView?
         private let state: AppState
@@ -51,6 +57,15 @@ struct PreviewView: NSViewRepresentable {
         private var secondaryTarget: MTLTexture?
         private var lastTargetWidth: Int = 0
         private var lastTargetHeight: Int = 0
+
+        /// chainTick value the targets currently hold. nil = targets invalid
+        /// (never rendered, reallocated, or last render threw) — forces a
+        /// chain render on the next draw. View-only redraws (zoom, pan,
+        /// compare line) find this equal to the current tick and skip
+        /// straight to the composite pass.
+        private var lastRenderedChainTick: Int? = nil
+
+        private static let perfLog = ProcessInfo.processInfo.environment["CRT_PERF_LOG"] != nil
 
         init(state: AppState) {
             self.state = state
@@ -75,36 +90,61 @@ struct PreviewView: NSViewRepresentable {
             guard let drawable = view.currentDrawable,
                   let cb = state.context.queue.makeCommandBuffer() else { return }
 
+            let animating = state.animatePreview && !state.exportInProgress
+            if animating { state.tickFrame() }
+
             guard let source = state.sourceTexture else {
+                lastRenderedChainTick = nil
                 clearAndPresent(drawable: drawable, cb: cb); return
             }
 
-            // (Re)allocate render targets if size changed.
-            let (tw, th) = renderTargetSize()
+            // (Re)allocate render targets if size changed. Fresh textures hold
+            // garbage, so the chain must re-render into them.
+            let inputW = state.downscaleSpec?.width ?? source.width
+            let inputH = state.downscaleSpec?.height ?? source.height
+            let (tw, th) = renderTargetSize(inputW: inputW, inputH: inputH)
             if tw != lastTargetWidth || th != lastTargetHeight {
                 primaryTarget = makeTarget(width: tw, height: th)
                 secondaryTarget = makeTarget(width: tw, height: th)
                 lastTargetWidth = tw
                 lastTargetHeight = th
+                lastRenderedChainTick = nil
             }
             guard let primary = primaryTarget else {
+                lastRenderedChainTick = nil
                 clearAndPresent(drawable: drawable, cb: cb); return
             }
 
-            // Render the primary target (matches current shaderEnabled state).
-            do {
-                try renderState(state.shaderEnabled, source: source, into: primary, cb: cb)
-            } catch {
-                clearAndPresent(drawable: drawable, cb: cb); return
-            }
+            // Run the filter chain only when shaded pixels changed (or every
+            // frame while animating). View-only redraws — zoom, pan, compare
+            // line — reuse the cached targets and just re-composite.
+            let tick = state.chainTick
+            if animating || lastRenderedChainTick != tick {
+                if Self.perfLog { fputs("[perf] chain render (tick \(tick))\n", stderr) }
 
-            // Render secondary only when compare is on — that's the OTHER state.
-            if state.compareEnabled, let secondary = secondaryTarget {
+                var allRendered = true
+
+                // Render the primary target (matches current shaderEnabled state).
                 do {
-                    try renderState(!state.shaderEnabled, source: source, into: secondary, cb: cb)
+                    try renderState(state.shaderEnabled, source: source, into: primary, cb: cb)
                 } catch {
-                    // Non-fatal: just skip compare for this frame.
+                    lastRenderedChainTick = nil
+                    clearAndPresent(drawable: drawable, cb: cb); return
                 }
+
+                // Render secondary only when compare is on — that's the OTHER state.
+                if state.compareEnabled, let secondary = secondaryTarget {
+                    do {
+                        try renderState(!state.shaderEnabled, source: source, into: secondary, cb: cb)
+                    } catch {
+                        // Non-fatal: skip compare for this frame, retry next draw.
+                        allRendered = false
+                    }
+                }
+
+                lastRenderedChainTick = allRendered ? tick : nil
+            } else if Self.perfLog {
+                fputs("[perf] composite only (tick \(tick))\n", stderr)
             }
 
             // Final composite into the drawable (compare line + zoom + pan).
@@ -118,9 +158,28 @@ struct PreviewView: NSViewRepresentable {
 
         // MARK: - target sizing
 
-        private func renderTargetSize() -> (Int, Int) {
+        private func renderTargetSize(inputW: Int, inputH: Int) -> (Int, Int) {
+            // Render the chain at the drawable's resolution — RetroArch
+            // renders at the viewport size, and mask/scanline structure only
+            // reads correctly when target pixels map 1:1 to screen pixels.
+            // (The MTKView is aspect-fitted to the source, so the drawable
+            // already carries the source aspect.) Capped for safety.
+            if let size = view?.drawableSize, size.width >= 1, size.height >= 1 {
+                if state.integerScale, inputW > 0, inputH > 0 {
+                    // Largest whole multiple of the chain input that fits the
+                    // drawable; the composite letterboxes it at 1:1.
+                    let k = max(1, min(Int(size.width) / inputW,
+                                       Int(size.height) / inputH))
+                    return (inputW * k, inputH * k)
+                }
+                let cap = Double(Self.maxTargetLongEdge)
+                let scale = min(1.0, cap / Double(max(size.width, size.height)))
+                return (max(64, Int(Double(size.width) * scale)),
+                        max(64, Int(Double(size.height) * scale)))
+            }
+            // Before first layout: source aspect at 1080 long edge.
             let aspect = state.sourceAspect
-            let cap = Self.previewMaxLongEdge
+            let cap = 1080
             if aspect >= 1 {
                 let h = max(64, Int((Double(cap) / Double(aspect)).rounded()))
                 return (cap, h)
@@ -195,10 +254,12 @@ struct PreviewView: NSViewRepresentable {
             return o;
         }
 
-        // Plain 1:1 blit (for offscreen src -> offscreen dst).
+        // Upscale blit for the shader-off view (tiny downscaled src -> 1080p
+        // target). Nearest, so the preview shows the raw downscaled pixels
+        // instead of bilinearly smearing them.
         fragment float4 bv_blit_fs(VOut in [[stage_in]],
                                    texture2d<float> src [[texture(0)]]) {
-            constexpr sampler s(filter::linear, address::clamp_to_edge);
+            constexpr sampler s(filter::nearest, address::clamp_to_edge);
             return src.sample(s, in.uv);
         }
 
@@ -209,6 +270,9 @@ struct PreviewView: NSViewRepresentable {
             float zoom;             // >= 1.0
             float panX;
             float panY;
+            int   useNearest;       // 1 when zoomed in (pixel inspection)
+            float fitX;             // target/drawable fraction (1 = fill)
+            float fitY;
         };
 
         fragment float4 bv_composite_fs(VOut in [[stage_in]],
@@ -216,10 +280,11 @@ struct PreviewView: NSViewRepresentable {
                                         texture2d<float> secondary [[texture(1)]],
                                         constant CompositeU& u [[buffer(0)]])
         {
-            constexpr sampler samp(filter::linear, address::clamp_to_edge);
+            constexpr sampler sampL(filter::linear, address::clamp_to_edge);
+            constexpr sampler sampN(filter::nearest, address::clamp_to_edge);
 
-            // Apply zoom + pan around the centre.
-            float2 uv = in.uv - 0.5;
+            // Letterbox (integer scale), then zoom + pan around the centre.
+            float2 uv = (in.uv - 0.5) / float2(u.fitX, u.fitY);
             uv = uv / u.zoom;
             uv = uv + 0.5 - float2(u.panX, u.panY);
 
@@ -228,8 +293,10 @@ struct PreviewView: NSViewRepresentable {
                 return float4(0.05, 0.05, 0.06, 1.0);
             }
 
-            float4 a = primary.sample(samp, uv);
-            float4 b = secondary.sample(samp, uv);
+            float4 a = u.useNearest != 0 ? primary.sample(sampN, uv)
+                                         : primary.sample(sampL, uv);
+            float4 b = u.useNearest != 0 ? secondary.sample(sampN, uv)
+                                         : secondary.sample(sampL, uv);
 
             float4 colour;
             if (u.compareEnabled != 0) {
@@ -298,6 +365,9 @@ struct PreviewView: NSViewRepresentable {
             var zoom: Float
             var panX: Float
             var panY: Float
+            var useNearest: Int32
+            var fitX: Float
+            var fitY: Float
         }
 
         private func composite(primary: MTLTexture,
@@ -314,12 +384,23 @@ struct PreviewView: NSViewRepresentable {
             enc.setRenderPipelineState(pipe)
             enc.setFragmentTexture(primary, index: 0)
             enc.setFragmentTexture(secondary, index: 1)
+            // Integer scale letterboxes the (smaller) target at 1:1 in the
+            // drawable; otherwise the target fills it (they normally match).
+            let fitX = state.integerScale ? Float(primary.width) / Float(dst.width) : 1
+            let fitY = state.integerScale ? Float(primary.height) / Float(dst.height) : 1
             var u = CompositeU(
                 compareLineX: state.compareLineX,
                 compareEnabled: state.compareEnabled ? 1 : 0,
                 zoom: max(1, state.zoom),
                 panX: state.panX,
-                panY: state.panY
+                panY: state.panY,
+                // Zoomed in = pixel inspection: sample the render targets
+                // nearest so magnification doesn't blur them. At fit, linear
+                // gives the smoother final-image resample. Integer scale is
+                // exact multiples, so nearest is always right there.
+                useNearest: (state.zoom > 1.001 || state.integerScale) ? 1 : 0,
+                fitX: min(1, fitX),
+                fitY: min(1, fitY)
             )
             enc.setFragmentBytes(&u, length: MemoryLayout<CompositeU>.size, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 3)

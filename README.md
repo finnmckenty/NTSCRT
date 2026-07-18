@@ -40,8 +40,11 @@ cp /tmp/librashader-src/target/release/liblibrashader_capi.dylib Vendor/librasha
 install_name_tool -id @rpath/librashader.dylib Vendor/librashader/librashader.dylib
 
 # Build the CLI verifier and the SwiftUI app.
-swift build --product crt-smoke
-swift build --product crt-app
+# Use release — the app encodes GPU work on every preview draw, and debug
+# (-Onone) Swift/SwiftUI glue is noticeably slower. Plain `swift build`
+# (debug) still works for iteration.
+swift build -c release --product crt-smoke
+swift build -c release --product crt-app
 ```
 
 ## Run the SwiftUI app
@@ -51,7 +54,7 @@ Two options.
 ### Bare CLI (quick iteration)
 
 ```sh
-./.build/debug/crt-app
+./.build/release/crt-app
 ```
 
 The window may open behind other windows because SPM-built executables aren't proper `.app` bundles, so macOS treats them as background processes. Click Cmd-Tab to focus.
@@ -65,7 +68,7 @@ The window may open behind other windows because SPM-built executables aren't pr
 open build/CrtApp.app
 ```
 
-The script wraps the SPM-built binary in `build/CrtApp.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any rebuild.
+The script wraps the SPM-built binary in `build/CrtApp.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any rebuild. It bundles the release binary by default; pass `debug` to wrap a debug build instead.
 
 ### How it finds external assets
 
@@ -79,8 +82,8 @@ The bare CLI relies on (2). The wrapped `.app` baked-in `LSEnvironment` makes (1
 ## CLI usage
 
 ```sh
-.build/debug/crt-smoke <input> <preset.slangp> <output.png> <librashader.dylib> \
-                       [outW outH] [downW downH method]
+.build/release/crt-smoke <input> <preset.slangp> <output.png> <librashader.dylib> \
+                         [outW outH] [downW downH method]
 ```
 
 - `outW outH` — final output / shader viewport size (default 1920×1080)
@@ -90,12 +93,23 @@ The bare CLI relies on (2). The wrapped `.app` baked-in `LSEnvironment` makes (1
 Example: 4K image → 256×224 (lanczos) → crt-royale → 1080p PNG:
 
 ```sh
-.build/debug/crt-smoke ~/Pictures/source.png \
+.build/release/crt-smoke ~/Pictures/source.png \
   Vendor/slang-shaders/crt/crt-royale.slangp ~/Desktop/out.png \
   Vendor/librashader/librashader.dylib 1920 1080 256 224 lanczos
 ```
 
 The smoke binary prints all runtime parameters declared by the preset (the things the eventual UI will turn into sliders).
+
+### crt-sweep: measuring parameter effects
+
+`crt-sweep` renders every runtime parameter of each preset at its min and max and reports the mean pixel difference vs the default render — the tool used to verify which params are dead, weak, or gated behind another parameter (the app's gray-out rules in `Sources/CrtApp/ParamGates.swift` were derived and verified with it).
+
+```sh
+.build/release/crt-sweep <input.png> Vendor/slang-shaders Vendor/librashader/librashader.dylib \
+    [--out W H] [--down W H method | --no-down] [--presets id1,id2] [--set NAME=VALUE]
+```
+
+`--set` pins a parameter for the whole sweep — use it to open a gate, e.g. `--set CURVATURE=1` to measure the warp params that only apply with curvature on. Params dead on a static frame are retried at frameCount 37 and reported `ANIM-ONLY` if they respond.
 
 ## The 6 target shaders
 
