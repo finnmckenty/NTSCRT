@@ -161,34 +161,12 @@ for (name, value) in paramOverrides {
 guard let cb = queue.makeCommandBuffer() else {
     fputs("commandBuffer failed\n", stderr); exit(9)
 }
-
-// Optional downscale pre-pass.
-let chainInput: MTLTexture
-if let dw = downW, let dh = downH, let method = downMethod {
-    let downDesc = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: inputTex.pixelFormat,
-        width: dw, height: dh, mipmapped: false
-    )
-    downDesc.usage = [.shaderRead, .shaderWrite]
-    downDesc.storageMode = .private
-    guard let downTex = device.makeTexture(descriptor: downDesc) else {
-        fputs("makeTexture(downscale) failed\n", stderr); exit(18)
-    }
-    do {
-        let ds = try Downscaler(device: device)
-        ds.encode(into: cb, source: inputTex, destination: downTex, method: method)
-        print("downscaled \(inputTex.width)x\(inputTex.height) -> \(dw)x\(dh) via \(method.rawValue)")
-        chainInput = downTex
-    } catch {
-        fputs("downscaler init failed: \(error.localizedDescription)\n", stderr); exit(19)
-    }
-} else {
-    chainInput = inputTex
-}
-
-// Optional ntsc-rs stage: CPU-process the chain input before the shaders.
-var finalChainInput = chainInput
 var chainCb = cb
+
+// Optional ntsc-rs stage: CPU-process the FULL-RESOLUTION input, then the
+// downscale below crunches the degraded signal for the shader
+// (NTSC full res -> downscale -> CRT).
+var ntscSource = inputTex
 if let ntscSettings {
     // Load the capi dylib (explicit flag, else sibling of librashader's Vendor dir).
     let capiPath = ntscDylib
@@ -214,17 +192,17 @@ if let ntscSettings {
         }
     }
 
-    // CPU-visible copy of the chain input.
-    let w = chainInput.width, h = chainInput.height
+    // CPU-visible copy of the full-res input.
+    let w = inputTex.width, h = inputTex.height
     let sharedDesc = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: chainInput.pixelFormat, width: w, height: h, mipmapped: false)
+        pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
     sharedDesc.usage = [.shaderRead]
     sharedDesc.storageMode = .shared
     guard let sharedTex = device.makeTexture(descriptor: sharedDesc),
           let copyBlit = cb.makeBlitCommandEncoder() else {
         fputs("ntsc staging alloc failed\n", stderr); exit(23)
     }
-    copyBlit.copy(from: chainInput,
+    copyBlit.copy(from: inputTex,
                   sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: w, height: h, depth: 1),
@@ -246,13 +224,37 @@ if let ntscSettings {
         }
     }
     sharedTex.replace(region: fullRegion, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
-    print("ntsc stage applied (\(w)x\(h), frame \(frameIndex), settings: \(ntscSettings))")
+    print("ntsc stage applied at full res (\(w)x\(h), frame \(frameIndex), settings: \(ntscSettings))")
 
-    finalChainInput = sharedTex
+    ntscSource = sharedTex
     guard let newCb = queue.makeCommandBuffer() else {
         fputs("commandBuffer failed\n", stderr); exit(9)
     }
     chainCb = newCb
+}
+
+// Optional downscale pre-pass (after the NTSC stage, if any).
+let finalChainInput: MTLTexture
+if let dw = downW, let dh = downH, let method = downMethod {
+    let downDesc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: ntscSource.pixelFormat,
+        width: dw, height: dh, mipmapped: false
+    )
+    downDesc.usage = [.shaderRead, .shaderWrite]
+    downDesc.storageMode = .private
+    guard let downTex = device.makeTexture(descriptor: downDesc) else {
+        fputs("makeTexture(downscale) failed\n", stderr); exit(18)
+    }
+    do {
+        let ds = try Downscaler(device: device)
+        ds.encode(into: chainCb, source: ntscSource, destination: downTex, method: method)
+        print("downscaled \(ntscSource.width)x\(ntscSource.height) -> \(dw)x\(dh) via \(method.rawValue)")
+        finalChainInput = downTex
+    } catch {
+        fputs("downscaler init failed: \(error.localizedDescription)\n", stderr); exit(19)
+    }
+} else {
+    finalChainInput = ntscSource
 }
 
 let viewport = MTLViewport(originX: 0, originY: 0, width: Double(outW), height: Double(outH), znear: 0, zfar: 1)

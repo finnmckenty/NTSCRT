@@ -67,27 +67,28 @@ public final class Pipeline {
     }
 
     /// Synchronously produce the chain input for a frame that needs the
-    /// ntsc-rs stage: optional downscale (own command buffer, waited on),
-    /// then the CPU effect. The result replaces both `inputTexture` and
-    /// `downscale` in a subsequent `encode` call (pass downscale: nil).
+    /// ntsc-rs stage: the CPU effect runs at the source's full resolution
+    /// (matching how ntsc-rs is used standalone; its scale_settings can
+    /// scale artifacts with video size), then the degraded signal is
+    /// downscaled for the shader. The result replaces both `inputTexture`
+    /// and `downscale` in a subsequent `encode` call (pass downscale: nil).
     public func prepareChainInput(source: MTLTexture,
                                   downscale: DownscaleSpec?,
                                   ntsc: NtscStage,
                                   frameCount: Int) throws -> MTLTexture {
-        var input = source
-        if let spec = downscale {
-            guard let cb = context.queue.makeCommandBuffer() else {
-                throw NtscStage.Error.commandBuffer
-            }
-            let scratch = obtainDownscaleTexture(for: spec, sourceFormat: source.pixelFormat)
-            context.downscaler.encode(into: cb, source: source,
-                                      destination: scratch, method: spec.method)
-            cb.commit()
-            cb.waitUntilCompleted()
-            input = scratch
+        let processed = try ntsc.process(input: source, frameIndex: frameCount,
+                                         device: context.device, queue: context.queue)
+        guard let spec = downscale else { return processed }
+
+        guard let cb = context.queue.makeCommandBuffer() else {
+            throw NtscStage.Error.commandBuffer
         }
-        return try ntsc.process(input: input, frameIndex: frameCount,
-                                device: context.device, queue: context.queue)
+        let scratch = obtainDownscaleTexture(for: spec, sourceFormat: processed.pixelFormat)
+        context.downscaler.encode(into: cb, source: processed,
+                                  destination: scratch, method: spec.method)
+        cb.commit()
+        cb.waitUntilCompleted()
+        return scratch
     }
 
     private func obtainDownscaleTexture(for spec: DownscaleSpec,
