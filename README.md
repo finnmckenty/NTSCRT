@@ -1,6 +1,6 @@
 # NTSCRT
 
-![NTSCRT: VHS + CRT pipeline on the left of the split, untouched source on the right](docs/screenshot.png)
+![NTSCRT: VHS + CRT pipeline on the left of the split, untouched source on the right](docs/screenshot.webp)
 
 A native macOS app for recreating vintage analog TV and VHS images: [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) emulates the analog signal path (composite artifacts, tape noise, head switching), and RetroArch's CRT shaders — run through [librashader](https://github.com/SnowflakePowered/librashader), so output matches RetroArch frame-for-frame — draw the display. Pipeline: **NTSC (full res) → downscale → CRT shader**, on stills or video, with a normal mouse/keyboard UI.
 
