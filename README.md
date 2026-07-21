@@ -16,8 +16,6 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 
 **Requirements:** macOS 14 or later, Apple Silicon (M1 or newer).
 
-> **Current build is not yet notarized.** The first time you open the app, macOS will warn that it "cannot be verified." To run it anyway: try to open the app once, then go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** (macOS 14: right-click the app → Open → Open). You only need to do this once. A notarized build that skips all of this is coming.
-
 ## Using the app
 
 Everything lives in the left sidebar, top to bottom in pipeline order:
