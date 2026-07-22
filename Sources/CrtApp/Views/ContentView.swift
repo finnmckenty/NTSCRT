@@ -27,6 +27,8 @@ private struct Sidebar: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                ViewPanel()
+                Divider()
                 SourcePanel()
                 Divider()
                 ExportPanel()
@@ -38,8 +40,6 @@ private struct Sidebar: View {
                 NtscPanel()
                 Divider()
                 ShaderPanel()
-                Divider()
-                ViewPanel()
             }
             .padding(16)
         }
