@@ -131,7 +131,7 @@ The bare CLI relies on (2). The wrapped `.app` baked-in `LSEnvironment` makes (1
 
 - `outW outH` — final output / shader viewport size (default 1920×1080)
 - `downW downH method` — optional pre-shader downscale. `method` ∈
-  `nearest | bilinear | bicubic | lanczos | area`
+  `nearest | nearest+ | bilinear | bicubic | lanczos | area`
 
 Example: 4K image → 256×224 (lanczos) → crt-royale → 1080p PNG:
 

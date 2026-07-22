@@ -55,11 +55,16 @@ struct DownscalePanel: View {
                 Text("Sampling").font(.subheadline).foregroundStyle(.secondary)
                 Picker("", selection: $state.downscaleMethod) {
                     ForEach(DownscaleMethod.allCases, id: \.self) { m in
-                        Text(m.rawValue.capitalized).tag(m)
+                        Text(m.displayName).tag(m)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                if state.downscaleMethod == .nearest {
+                    Text("Tip: on video, Nearest shimmers in detailed areas — Nearest+ keeps the punch without the flicker.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .disabled(!state.downscaleEnabled)
             .opacity(state.downscaleEnabled ? 1 : 0.5)

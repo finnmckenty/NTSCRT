@@ -2,7 +2,18 @@ import Foundation
 import Metal
 
 public enum DownscaleMethod: String, CaseIterable, Sendable {
-    case nearest, bilinear, bicubic, lanczos, area
+    case nearest
+    /// "Stabilized nearest": a narrow Gaussian just wide enough to kill
+    /// temporal shimmer on video, keeping most of nearest's punch.
+    case nearestAA = "nearest+"
+    case bilinear, bicubic, lanczos, area
+
+    public var displayName: String {
+        switch self {
+        case .nearestAA: return "Nearest+"
+        default: return rawValue.capitalized
+        }
+    }
 }
 
 /// Downscales an input MTLTexture into a destination MTLTexture using a chosen
@@ -31,6 +42,7 @@ public final class Downscaler {
         self.device = device
         let library = try device.makeLibrary(source: Self.metalSource, options: nil)
         for fname in ["downscale_nearest", "downscale_area",
+                      "downscale_nearestaa_h", "downscale_nearestaa_v",
                       "downscale_bilinear_h", "downscale_bilinear_v",
                       "downscale_bicubic_h", "downscale_bicubic_v",
                       "downscale_lanczos_h", "downscale_lanczos_v"] {
@@ -53,17 +65,19 @@ public final class Downscaler {
                      dims: (source.width, source.height, destination.width, destination.height),
                      gridW: destination.width, gridH: destination.height)
 
-        case .bilinear, .bicubic, .lanczos:
+        case .nearestAA, .bilinear, .bicubic, .lanczos:
+            let base = method == .nearestAA ? "downscale_nearestaa"
+                                            : "downscale_\(method.rawValue)"
             guard let mid = scratchTexture(width: destination.width,
                                            height: source.height,
                                            format: destination.pixelFormat) else { return }
             // Horizontal: (srcW × srcH) → (dstW × srcH)
-            dispatch(name: "downscale_\(method.rawValue)_h",
+            dispatch(name: "\(base)_h",
                      into: commandBuffer, src: source, dst: mid,
                      dims: (source.width, source.height, destination.width, destination.height),
                      gridW: destination.width, gridH: source.height)
             // Vertical: (dstW × srcH) → (dstW × dstH)
-            dispatch(name: "downscale_\(method.rawValue)_v",
+            dispatch(name: "\(base)_v",
                      into: commandBuffer, src: mid, dst: destination,
                      dims: (source.width, source.height, destination.width, destination.height),
                      gridW: destination.width, gridH: destination.height)
@@ -130,6 +144,14 @@ public final class Downscaler {
     // lanczos3 ±3 — scaled back up by the ratio in the passes below.
     inline float w_bilinear(float t) {
         return max(0.0, 1.0 - fabs(t));
+    }
+
+    // Stabilized nearest: a narrow Gaussian (sigma 0.35 output pixels). Wide
+    // enough that sub-pixel motion no longer flips which source pixel wins
+    // (kills temporal shimmer on video), narrow enough to keep most of
+    // nearest's per-pixel punch.
+    inline float w_nearestaa(float t) {
+        return exp(t * t * -4.0816);
     }
 
     inline float w_bicubic(float t) {   // Mitchell-Netravali B=C=1/3
@@ -203,6 +225,7 @@ public final class Downscaler {
         dst.write(acc / max(wsum, 1e-6), gid); \\
     }
 
+    DEF_DOWNSCALE_1D(downscale_nearestaa, w_nearestaa, 1)
     DEF_DOWNSCALE_1D(downscale_bilinear, w_bilinear, 1)
     DEF_DOWNSCALE_1D(downscale_bicubic,  w_bicubic,  2)
     DEF_DOWNSCALE_1D(downscale_lanczos,  w_lanczos,  3)
