@@ -200,8 +200,15 @@ struct PreviewView: NSViewRepresentable {
                 if state.integerScale, inputW > 0, inputH > 0 {
                     // Largest whole multiple of the chain input that fits the
                     // drawable; the composite letterboxes it at 1:1.
-                    let k = max(1, min(Int(size.width) / inputW,
+                    var k = max(1, min(Int(size.width) / inputW,
                                        Int(size.height) / inputH))
+                    // Prefer EVEN multiples: the glow shaders' half-texel
+                    // scanline offset lands beam boundaries exactly on pixel
+                    // edges at odd multiples, and float rounding then jitters
+                    // scanline spacing by ±1 row (measured: stddev 0.7 at
+                    // k=9/11 vs 0.35 at k=10/12). Even k parks the boundary
+                    // mid-row, immune to rounding.
+                    if k > 1 && k % 2 == 1 { k -= 1 }
                     return (inputW * k, inputH * k)
                 }
                 let cap = Double(Self.maxTargetLongEdge)
