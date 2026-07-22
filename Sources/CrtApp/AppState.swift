@@ -112,9 +112,19 @@ final class AppState {
     // MARK: - downscale
 
     var downscaleEnabled: Bool = true { didSet { markChainDirty() } }
+    /// Downscale is width-only: the horizontal resolution is chosen (or
+    /// picked from a console preset), and the height follows the source's
+    /// aspect ratio so any input shape works.
     var downscaleWidth: Int = 320     { didSet { markChainDirty() } }
-    var downscaleHeight: Int = 240    { didSet { markChainDirty() } }
+    /// Selected preset label, purely cosmetic ("Custom" when hand-edited).
+    var downscalePreset: String = "VGA (320px)"
     var downscaleMethod: DownscaleMethod = .nearest { didSet { markChainDirty() } }
+
+    /// Derived from the source aspect (rounded to even lines).
+    var downscaleHeight: Int {
+        let aspect = max(0.05, Double(sourceAspect))
+        return max(16, 2 * Int((Double(downscaleWidth) / aspect / 2).rounded()))
+    }
 
     // MARK: - view (preview-only display state)
 
@@ -482,7 +492,7 @@ final class AppState {
             "downscale": [
                 "enabled": downscaleEnabled,
                 "width": downscaleWidth,
-                "height": downscaleHeight,
+                "preset": downscalePreset,
                 "method": downscaleMethod.rawValue,
             ],
             "ntsc": [
@@ -516,7 +526,9 @@ final class AppState {
         if let d = dict["downscale"] as? [String: Any] {
             if let v = d["enabled"] as? Bool { downscaleEnabled = v }
             if let v = d["width"] as? Int { downscaleWidth = v }
-            if let v = d["height"] as? Int { downscaleHeight = v }
+            if let v = d["preset"] as? String { downscalePreset = v } else { downscalePreset = "Custom" }
+            // Old look files carried an explicit height; it is now derived
+            // from the source aspect, so it is intentionally ignored.
             if let v = d["method"] as? String, let m = DownscaleMethod(rawValue: v) {
                 downscaleMethod = m
             }

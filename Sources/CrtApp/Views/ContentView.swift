@@ -29,6 +29,10 @@ private struct Sidebar: View {
             VStack(alignment: .leading, spacing: 18) {
                 SourcePanel()
                 Divider()
+                ExportPanel()
+                Divider()
+                LookPanel()
+                Divider()
                 DownscalePanel()
                 Divider()
                 NtscPanel()
@@ -36,10 +40,6 @@ private struct Sidebar: View {
                 ShaderPanel()
                 Divider()
                 ViewPanel()
-                Divider()
-                ExportPanel()
-                Divider()
-                LookPanel()
             }
             .padding(16)
         }

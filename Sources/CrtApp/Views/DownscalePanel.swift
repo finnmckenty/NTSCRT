@@ -4,18 +4,14 @@ import CrtCore
 struct DownscalePanel: View {
     @Environment(AppState.self) private var state
 
-    private struct ResolutionPreset: Hashable {
-        let label: String
-        let width: Int
-        let height: Int
-    }
-
-    private let presets: [ResolutionPreset] = [
-        .init(label: "SNES (256 × 224)",     width: 256, height: 224),
-        .init(label: "NES (256 × 240)",      width: 256, height: 240),
-        .init(label: "VGA (320 × 240)",      width: 320, height: 240),
-        .init(label: "Arcade (384 × 288)",   width: 384, height: 288),
-        .init(label: "VGA² (640 × 480)",     width: 640, height: 480),
+    /// Console presets pick a horizontal resolution; the vertical always
+    /// follows the source's aspect ratio, so any input shape works.
+    private static let presets: [(label: String, width: Int)] = [
+        ("SNES (256px)",   256),
+        ("NES (256px)",    256),
+        ("VGA (320px)",    320),
+        ("Arcade (384px)", 384),
+        ("VGA² (640px)",   640),
     ]
 
     var body: some View {
@@ -25,26 +21,36 @@ struct DownscalePanel: View {
                 .font(.headline)
 
             Group {
-                Text("Target resolution").font(.subheadline).foregroundStyle(.secondary)
+                Text("Horizontal resolution").font(.subheadline).foregroundStyle(.secondary)
                 Menu {
-                    ForEach(presets, id: \.self) { p in
+                    ForEach(Self.presets, id: \.label) { p in
                         Button(p.label) {
                             state.downscaleWidth = p.width
-                            state.downscaleHeight = p.height
+                            state.downscalePreset = p.label
                         }
                     }
                     Divider()
-                    Text("(custom: edit fields below)")
+                    Button("Custom") {
+                        state.downscalePreset = "Custom"
+                    }
                 } label: {
                     Text(currentLabel)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 HStack {
-                    Stepper("W \(state.downscaleWidth)", value: $state.downscaleWidth, in: 16...4096, step: 16)
-                    Stepper("H \(state.downscaleHeight)", value: $state.downscaleHeight, in: 16...4096, step: 8)
+                    Stepper(value: widthBinding, in: 16...4096, step: 16) {
+                        HStack(spacing: 4) {
+                            Text("W").font(.caption)
+                            IntField(value: widthBinding, range: 16...4096, width: 52)
+                        }
+                    }
+                    Spacer()
+                    Text("→ \(state.downscaleWidth) × \(state.downscaleHeight)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .help("Height follows the source's aspect ratio.")
                 }
-                .font(.caption)
 
                 Text("Sampling").font(.subheadline).foregroundStyle(.secondary)
                 Picker("", selection: $state.downscaleMethod) {
@@ -61,10 +67,25 @@ struct DownscalePanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Editing the width by hand demotes the selection to Custom.
+    private var widthBinding: Binding<Int> {
+        Binding(
+            get: { state.downscaleWidth },
+            set: {
+                state.downscaleWidth = $0
+                if let p = Self.presets.first(where: { $0.label == state.downscalePreset }),
+                   p.width != $0 {
+                    state.downscalePreset = "Custom"
+                }
+            }
+        )
+    }
+
     private var currentLabel: String {
-        for p in presets where p.width == state.downscaleWidth && p.height == state.downscaleHeight {
+        if let p = Self.presets.first(where: { $0.label == state.downscalePreset }),
+           p.width == state.downscaleWidth {
             return p.label
         }
-        return "Custom (\(state.downscaleWidth) × \(state.downscaleHeight))"
+        return "Custom (\(state.downscaleWidth)px)"
     }
 }

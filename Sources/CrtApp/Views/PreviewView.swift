@@ -21,6 +21,7 @@ struct PreviewView: NSViewRepresentable {
         let view = PreviewMTKView(frame: .zero, device: state.context.device)
         view.framebufferOnly = false
         view.colorPixelFormat = .bgra8Unorm
+        view.preferredFramesPerSecond = 60
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         view.delegate = context.coordinator
@@ -33,11 +34,22 @@ struct PreviewView: NSViewRepresentable {
         _ = state.chainTick
         _ = state.viewTick
         // Animation runs the MTKView's display link; otherwise draw on demand.
+        // Property ORDER matters when resuming: the display link only
+        // reliably restarts if enableSetNeedsDisplay is already false when
+        // isPaused flips to false (toggling Animate off→on froze otherwise).
         let animating = state.animatePreview && !state.exportInProgress
-        nsView.isPaused = !animating
-        nsView.enableSetNeedsDisplay = !animating
-        nsView.preferredFramesPerSecond = 60
-        context.coordinator.requestRedraw()
+        if animating {
+            if nsView.enableSetNeedsDisplay || nsView.isPaused {
+                nsView.enableSetNeedsDisplay = false
+                nsView.isPaused = false
+            }
+        } else {
+            if !nsView.isPaused || !nsView.enableSetNeedsDisplay {
+                nsView.isPaused = true
+                nsView.enableSetNeedsDisplay = true
+            }
+            context.coordinator.requestRedraw()
+        }
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {

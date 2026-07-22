@@ -21,12 +21,12 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 Everything lives in the left sidebar, top to bottom in pipeline order:
 
 - **Source** — Open or drag in an image (PNG/JPEG/HEIC) or video (MP4/MOV). Videos get a frame scrubber and a ▶ play button that previews playback with all effects applied.
-- **Downscale** — the retro resolution the CRT shader sees (SNES 256×224, VGA 320×240, or custom) and the resampling method. Nearest keeps pixels crunchy; Area is the smooth neutral choice.
+- **Export** — stills to PNG, videos to MP4 (with audio), at whatever resolution you choose. Exports are deterministic: same settings + same frame = same pixels.
+- **Preset** — save your entire configuration (downscale + VHS + shader + view) as a JSON file and load it back later.
+- **Downscale** — the retro horizontal resolution the CRT shader sees (SNES 256px, VGA 320px, or any custom width — height always follows your source's aspect ratio) and the resampling method. Nearest keeps pixels crunchy; Area is the smooth neutral choice.
 - **VHS (ntsc-rs)** — the analog signal stage: composite noise, chroma bleed, head switching, tracking noise, tape speed, edge wave, and about sixty more. These are ntsc-rs's own settings — preset JSON copy/pastes both ways with the [ntsc-rs desktop app](https://github.com/ntsc-rs/ntsc-rs/releases).
 - **Shader** — seven RetroArch CRT presets (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every runtime parameter exposed. Grayed-out controls tell you which switch activates them — many CRT parameters only apply when their feature (curvature, mask, geometry mode…) is on.
 - **View** — **Compare** splits the preview: full pipeline on the left of the line, untouched original on the right; drag the line. **Integer scale** locks the image to whole-pixel multiples for perfectly uniform scanlines. **Animate** runs the preview continuously so tape noise, jitter, and interlacing actually move — leave it on for the real experience. Zoom with the slider (or ⌥-scroll), hold Space to pan when zoomed.
-- **Export** — stills to PNG, videos to MP4 (with audio), at whatever resolution you choose. Exports are deterministic: same settings + same frame = same pixels.
-- **Look** — save your entire configuration (downscale + VHS + shader + view) as a JSON file and load it back later.
 
 **Tips**
 
@@ -40,7 +40,7 @@ Everything lives in the left sidebar, top to bottom in pipeline order:
 - The NTSC stage runs on the CPU at your source's full resolution — with **Animate** on or during video playback, 4K+ sources will noticeably drop the preview frame rate. Exports always render every frame regardless.
 - Video preview playback favors correctness over speed and can run below native fps on heavy footage; the exported MP4 is full quality.
 - A few crt-royale parameters are compile-time disabled in the shader itself (marked "static in this shader build") — they do nothing in RetroArch either.
-- No undo — save Looks before big experiments.
+- No undo — save Presets before big experiments.
 
 ## Building from source
 

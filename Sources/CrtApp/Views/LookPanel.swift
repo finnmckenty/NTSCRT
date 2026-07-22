@@ -2,14 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Save/load the whole visual configuration (downscale + VHS + shader +
-/// view options) as a JSON "look" file.
+/// view options) as a JSON preset file.
 struct LookPanel: View {
     @Environment(AppState.self) private var state
     @State private var status: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Look").font(.headline)
+            Text("Preset").font(.headline)
             HStack {
                 Button("Save…") { save() }
                 Button("Load…") { load() }
@@ -31,7 +31,7 @@ struct LookPanel: View {
     private func save() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "crt look \(timestamp).json"
+        panel.nameFieldStringValue = "ntscrt preset \(timestamp).json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try state.saveLook(to: url)
