@@ -162,10 +162,7 @@ private struct NtscControl: View {
             HStack {
                 Text(setting.label).font(.callout).lineLimit(1)
                 Spacer()
-                TextField("", value: intBinding, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 110)
-                    .multilineTextAlignment(.trailing)
+                IntField(value: intBinding, range: min...max, width: 110)
             }
             .padding(.leading, indent)
             .help(setting.description ?? "")
