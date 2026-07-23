@@ -49,8 +49,12 @@ struct NtscPanel: View {
             Button("Reset") { state.resetNtsc() }
                 .buttonStyle(.borderless)
         }
-        ForEach(state.ntscDescriptors) { setting in
-            NtscControl(setting: setting, depth: 0)
+        // Lazy: the full VHS list is ~80 AppKit-backed controls; building
+        // only the visible rows keeps expand latency to a single beat.
+        LazyVStack(alignment: .leading, spacing: 8) {
+            ForEach(state.ntscDescriptors) { setting in
+                NtscControl(setting: setting, depth: 0)
+            }
         }
     }
 }

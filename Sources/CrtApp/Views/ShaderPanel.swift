@@ -99,6 +99,7 @@ struct ShaderPanel: View {
                     .disabled(state.paramDescriptors.isEmpty)
             }
 
+            LazyVStack(alignment: .leading, spacing: 8) {
             ForEach(split.pre, id: \.name) { param in
                 ParamControl(param: param)
             }
@@ -122,6 +123,7 @@ struct ShaderPanel: View {
                         }
                     }
                 }
+            }
             }
         }
     }

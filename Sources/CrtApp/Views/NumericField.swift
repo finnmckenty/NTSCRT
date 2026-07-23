@@ -37,8 +37,15 @@ struct NumericField: View {
     let range: ClosedRange<Double>
     var width: CGFloat = 72
 
-    @State private var text: String = ""
+    @State private var text: String
     @FocusState private var focused: Bool
+
+    init(value: Binding<Double>, range: ClosedRange<Double>, width: CGFloat = 72) {
+        self.value = value
+        self.range = range
+        self.width = width
+        _text = State(initialValue: Self.display(value.wrappedValue))
+    }
 
     var body: some View {
         TextField("", text: $text)
@@ -54,7 +61,6 @@ struct NumericField: View {
             .onChange(of: value.wrappedValue) { _, v in
                 if !focused { text = Self.display(v) }
             }
-            .onAppear { text = Self.display(value.wrappedValue) }
     }
 
     private func commit() {
@@ -78,8 +84,15 @@ struct IntField: View {
     let range: ClosedRange<Int>
     var width: CGFloat = 56
 
-    @State private var text: String = ""
+    @State private var text: String
     @FocusState private var focused: Bool
+
+    init(value: Binding<Int>, range: ClosedRange<Int>, width: CGFloat = 56) {
+        self.value = value
+        self.range = range
+        self.width = width
+        _text = State(initialValue: String(value.wrappedValue))
+    }
 
     var body: some View {
         TextField("", text: $text)
@@ -95,7 +108,6 @@ struct IntField: View {
             .onChange(of: value.wrappedValue) { _, v in
                 if !focused { text = String(v) }
             }
-            .onAppear { text = String(value.wrappedValue) }
     }
 
     private func commit() {
