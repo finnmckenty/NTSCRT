@@ -4,11 +4,14 @@ import CrtCore
 
 struct ShaderPanel: View {
     @Environment(AppState.self) private var state
+    @State private var panelExpanded = true
+    @State private var expandedSections: [String: Bool] = [:]
 
     var body: some View {
         @Bindable var state = state
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                Twirl(expanded: $panelExpanded)
                 Text("Shader").font(.headline)
                 Spacer()
                 Toggle("", isOn: $state.shaderEnabled)
@@ -17,16 +20,64 @@ struct ShaderPanel: View {
                     .help("Enable/disable the CRT shader. Off shows the (optionally-downscaled) source.")
             }
 
-            shaderConfig
-                .opacity(state.shaderEnabled ? 1 : 0.4)
-                .allowsHitTesting(state.shaderEnabled)
+            if panelExpanded {
+                shaderConfig
+                    .opacity(state.shaderEnabled ? 1 : 0.4)
+                    .allowsHitTesting(state.shaderEnabled)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Contiguous run of parameters under one shader-declared section header
+    /// (label pseudo-params like Hyllian's "SCANLINES SETTINGS:").
+    private struct ParamSection: Identifiable {
+        let id: String
+        let title: String
+        let params: [LRShaderParam]
+    }
+
+    /// Split the flat parameter list at section headers. Params before the
+    /// first header stay flat; "//"-comment headers stay inline as captions.
+    private func makeSections(_ all: [LRShaderParam]) -> (pre: [LRShaderParam], sections: [ParamSection]) {
+        var pre: [LRShaderParam] = []
+        var sections: [ParamSection] = []
+        var current: (title: String, params: [LRShaderParam])? = nil
+
+        func close() {
+            if let c = current {
+                sections.append(ParamSection(id: c.title, title: c.title, params: c.params))
+            }
+            current = nil
+        }
+
+        for p in all {
+            let pres = presentation(for: p)
+            if case .header = pres.kind {
+                let title = pres.title.trimmingCharacters(in: .whitespaces)
+                if title.isEmpty {
+                    close()
+                } else if title.hasPrefix("//") {
+                    // Inline comment, not a section boundary.
+                    if current != nil { current!.params.append(p) } else { pre.append(p) }
+                } else {
+                    close()
+                    current = (title, [])
+                }
+            } else if current != nil {
+                current!.params.append(p)
+            } else {
+                pre.append(p)
+            }
+        }
+        close()
+        return (pre, sections)
     }
 
     @ViewBuilder
     private var shaderConfig: some View {
         @Bindable var state = state
+        let split = makeSections(state.paramDescriptors)
         VStack(alignment: .leading, spacing: 8) {
             Picker("Preset", selection: $state.selectedPreset) {
                 ForEach(Presets.all) { preset in
@@ -48,8 +99,29 @@ struct ShaderPanel: View {
                     .disabled(state.paramDescriptors.isEmpty)
             }
 
-            ForEach(state.paramDescriptors, id: \.name) { param in
+            ForEach(split.pre, id: \.name) { param in
                 ParamControl(param: param)
+            }
+            ForEach(split.sections) { section in
+                let expanded = Binding(
+                    get: { expandedSections[section.id, default: true] },
+                    set: { expandedSections[section.id] = $0 }
+                )
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 4) {
+                        Twirl(expanded: expanded)
+                        Text(section.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.top, 4)
+                    if expanded.wrappedValue {
+                        ForEach(section.params, id: \.name) { param in
+                            ParamControl(param: param)
+                        }
+                    }
+                }
             }
         }
     }

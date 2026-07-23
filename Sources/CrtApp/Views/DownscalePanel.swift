@@ -53,12 +53,14 @@ struct DownscalePanel: View {
                 }
 
                 Text("Sampling").font(.subheadline).foregroundStyle(.secondary)
+                // Menu, not segmented: six segments exceed the sidebar's
+                // width and clip the whole content column.
                 Picker("", selection: $state.downscaleMethod) {
                     ForEach(DownscaleMethod.allCases, id: \.self) { m in
                         Text(m.displayName).tag(m)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
                 if state.downscaleMethod == .nearest {
                     Text("Tip: on video, Nearest shimmers in detailed areas — Nearest+ keeps the punch without the flicker.")

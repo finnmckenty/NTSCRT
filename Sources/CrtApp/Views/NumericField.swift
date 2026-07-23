@@ -1,5 +1,23 @@
 import SwiftUI
 
+/// Disclosure chevron for collapsible sidebar sections.
+struct Twirl: View {
+    @Binding var expanded: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        } label: {
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+                .foregroundStyle(.secondary)
+                .frame(width: 14)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// Compact right-aligned numeric entry used as the value readout next to
 /// sliders — type an exact value and press return (or click away) to commit.
 /// Clamps to `range`.

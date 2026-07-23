@@ -7,11 +7,13 @@ import CrtCore
 /// desktop app (and its preset JSON is compatible both ways).
 struct NtscPanel: View {
     @Environment(AppState.self) private var state
+    @State private var panelExpanded = true
 
     var body: some View {
         @Bindable var state = state
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                Twirl(expanded: $panelExpanded)
                 Text("VHS (ntsc-rs)").font(.headline)
                 Spacer()
                 if state.ntscAvailable {
@@ -26,7 +28,7 @@ struct NtscPanel: View {
                 Text("ntscrs_capi.dylib not found — build it with scripts/build-ntscrs.sh (see README).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
+            } else if panelExpanded {
                 if let err = state.ntscError {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
@@ -57,6 +59,7 @@ private struct NtscControl: View {
     @Environment(AppState.self) private var state
     let setting: NtscSetting
     let depth: Int
+    @State private var groupExpanded = true
 
     var body: some View {
         switch setting.kind {
@@ -93,12 +96,15 @@ private struct NtscControl: View {
 
         case .group(let children):
             VStack(alignment: .leading, spacing: 6) {
-                Toggle(isOn: boolBinding) {
-                    Text(setting.label).font(.callout).bold().lineLimit(1)
+                HStack(spacing: 4) {
+                    Twirl(expanded: $groupExpanded)
+                    Toggle(isOn: boolBinding) {
+                        Text(setting.label).font(.callout).bold().lineLimit(1)
+                    }
+                    .toggleStyle(.switch)
+                    .help(setting.description ?? "")
                 }
-                .toggleStyle(.switch)
-                .help(setting.description ?? "")
-                if state.ntscBool(setting.name) {
+                if state.ntscBool(setting.name) && groupExpanded {
                     ForEach(children) { child in
                         NtscControl(setting: child, depth: depth + 1)
                     }
