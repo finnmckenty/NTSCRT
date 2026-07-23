@@ -194,11 +194,11 @@ if let ntscSettings {
 
     // CPU-visible copy of the full-res input.
     let w = inputTex.width, h = inputTex.height
-    let sharedDesc = MTLTextureDescriptor.texture2DDescriptor(
+    let readDesc = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
-    sharedDesc.usage = [.shaderRead]
-    sharedDesc.storageMode = .shared
-    guard let sharedTex = device.makeTexture(descriptor: sharedDesc),
+    readDesc.usage = [.shaderRead]
+    readDesc.storageMode = .shared
+    guard let readTex = device.makeTexture(descriptor: readDesc),
           let copyBlit = cb.makeBlitCommandEncoder() else {
         fputs("ntsc staging alloc failed\n", stderr); exit(23)
     }
@@ -206,27 +206,69 @@ if let ntscSettings {
                   sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: w, height: h, depth: 1),
-                  to: sharedTex,
+                  to: readTex,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
     copyBlit.endEncoding()
+    // On Intel, .shared storage requires explicit synchronize for CPU to see GPU writes.
+    let syncBlit = cb.makeBlitCommandEncoder()!
+    syncBlit.synchronize(resource: readTex)
+    syncBlit.endEncoding()
     cb.commit()
     cb.waitUntilCompleted()
+    if let err = cb.error {
+        fputs("ntsc blit command buffer error: \(err)\n", stderr); exit(25)
+    }
 
     let rowBytes = w * 4
     var bytes = [UInt8](repeating: 0, count: rowBytes * h)
     let fullRegion = MTLRegionMake2D(0, 0, w, h)
     bytes.withUnsafeMutableBytes { raw in
-        sharedTex.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: fullRegion, mipmapLevel: 0)
+        readTex.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: fullRegion, mipmapLevel: 0)
         guard filter.processBGRA8(raw.baseAddress!, width: UInt(w), height: UInt(h),
                                   rowBytes: UInt(rowBytes), frameIndex: frameIndex) else {
             fputs("ntsc process failed\n", stderr); exit(24)
         }
     }
-    sharedTex.replace(region: fullRegion, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
+    // Stage the processed bytes into a .shared texture, then blit to a .private
+    // texture for the shader chain. On Intel, GPU reads from a .shared texture
+    // written via replace() can be unreliable; a blit to .private sidesteps it.
+    let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
+    stageDesc.usage = [.shaderRead]
+    stageDesc.storageMode = .shared
+    guard let stageTex = device.makeTexture(descriptor: stageDesc) else {
+        fputs("ntsc stage texture alloc failed\n", stderr); exit(23)
+    }
+    stageTex.replace(region: fullRegion, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
+
+    let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
+    outDesc.usage = [.shaderRead, .shaderWrite]
+    outDesc.storageMode = .private
+    guard let privateOut = device.makeTexture(descriptor: outDesc) else {
+        fputs("ntsc private output alloc failed\n", stderr); exit(23)
+    }
+    guard let stageCb = queue.makeCommandBuffer(),
+          let stageBlit = stageCb.makeBlitCommandEncoder() else {
+        fputs("ntsc stage blit failed\n", stderr); exit(23)
+    }
+    stageBlit.copy(from: stageTex,
+                   sourceSlice: 0, sourceLevel: 0,
+                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                   sourceSize: MTLSize(width: w, height: h, depth: 1),
+                   to: privateOut,
+                   destinationSlice: 0, destinationLevel: 0,
+                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+    stageBlit.endEncoding()
+    stageCb.commit()
+    stageCb.waitUntilCompleted()
+    if let err = stageCb.error {
+        fputs("ntsc stage blit error: \(err)\n", stderr); exit(25)
+    }
     print("ntsc stage applied at full res (\(w)x\(h), frame \(frameIndex), settings: \(ntscSettings))")
 
-    ntscSource = sharedTex
+    ntscSource = privateOut
     guard let newCb = queue.makeCommandBuffer() else {
         fputs("commandBuffer failed\n", stderr); exit(9)
     }
@@ -284,6 +326,10 @@ blit.copy(from: outputTex,
           destinationSlice: 0, destinationLevel: 0,
           destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
 blit.endEncoding()
+// Intel Mac: .shared storage needs explicit synchronize for CPU to see GPU blit writes.
+let stagingSync = chainCb.makeBlitCommandEncoder()!
+stagingSync.synchronize(resource: staging)
+stagingSync.endEncoding()
 chainCb.commit()
 chainCb.waitUntilCompleted()
 if let err = chainCb.error {

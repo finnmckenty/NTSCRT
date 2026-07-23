@@ -27,7 +27,9 @@ public final class NtscStage {
     }
 
     private let filter: NTSCFilter
-    private var sharedTex: MTLTexture?
+    private var readTex: MTLTexture?
+    private var stageTex: MTLTexture?
+    private var outputTex: MTLTexture?
     private var bytes: [UInt8] = []
 
     /// nil if the ntscrs-capi dylib hasn't been loaded (NTSCFilter.loadLibrary).
@@ -58,27 +60,54 @@ public final class NtscStage {
                         queue: MTLCommandQueue) throws -> MTLTexture {
         let w = input.width, h = input.height
 
-        if sharedTex == nil || sharedTex!.width != w || sharedTex!.height != h
-            || sharedTex!.pixelFormat != input.pixelFormat {
+        // Lazily (re)allocate the three textures we need. On Intel Macs,
+        // .shared storage requires an explicit synchronize after a GPU blit
+        // before the CPU can read it, and GPU reads of CPU-replaced .shared
+        // data can be unreliable — so we stage through a .private texture
+        // for the chain to consume.
+        if readTex == nil || readTex!.width != w || readTex!.height != h
+            || readTex!.pixelFormat != input.pixelFormat {
             let d = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false)
             d.usage = [.shaderRead]
             d.storageMode = .shared
-            sharedTex = device.makeTexture(descriptor: d)
+            readTex = device.makeTexture(descriptor: d)
         }
-        guard let shared = sharedTex else { throw Error.textureAlloc }
+        if stageTex == nil || stageTex!.width != w || stageTex!.height != h
+            || stageTex!.pixelFormat != input.pixelFormat {
+            let d = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false)
+            d.usage = [.shaderRead]
+            d.storageMode = .shared
+            stageTex = device.makeTexture(descriptor: d)
+        }
+        if outputTex == nil || outputTex!.width != w || outputTex!.height != h
+            || outputTex!.pixelFormat != input.pixelFormat {
+            let d = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false)
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            outputTex = device.makeTexture(descriptor: d)
+        }
+        guard let read = readTex, let stage = stageTex, let output = outputTex else {
+            throw Error.textureAlloc
+        }
 
-        // GPU → CPU-visible copy.
+        // GPU → CPU-visible copy. On Intel, the .shared destination needs an
+        // explicit synchronize or getBytes returns stale zeros.
         guard let cb = queue.makeCommandBuffer(),
               let blit = cb.makeBlitCommandEncoder() else { throw Error.commandBuffer }
         blit.copy(from: input,
                   sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: w, height: h, depth: 1),
-                  to: shared,
+                  to: read,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
+        let sync = cb.makeBlitCommandEncoder()!
+        sync.synchronize(resource: read)
+        sync.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
 
@@ -89,13 +118,26 @@ public final class NtscStage {
         let region = MTLRegionMake2D(0, 0, w, h)
         var ok = false
         bytes.withUnsafeMutableBytes { raw in
-            shared.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: region, mipmapLevel: 0)
+            read.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: region, mipmapLevel: 0)
             ok = filter.processBGRA8(raw.baseAddress!, width: UInt(w), height: UInt(h),
                                      rowBytes: UInt(rowBytes), frameIndex: frameIndex)
         }
         guard ok else { throw Error.processFailed }
 
-        shared.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
-        return shared
+        // CPU → .shared stage texture, then blit to .private for the chain.
+        stage.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
+        guard let cb2 = queue.makeCommandBuffer(),
+              let blit2 = cb2.makeBlitCommandEncoder() else { throw Error.commandBuffer }
+        blit2.copy(from: stage,
+                   sourceSlice: 0, sourceLevel: 0,
+                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                   sourceSize: MTLSize(width: w, height: h, depth: 1),
+                   to: output,
+                   destinationSlice: 0, destinationLevel: 0,
+                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit2.endEncoding()
+        cb2.commit()
+        cb2.waitUntilCompleted()
+        return output
     }
 }
