@@ -1,16 +1,21 @@
 import SwiftUI
 
 /// Disclosure chevron for collapsible sidebar sections.
+///
+/// Deliberately NOT animated: animating the expand would relayout the whole
+/// (large) sidebar subtree over multiple frames on the main thread, which
+/// competes with the 60fps preview and feels laggy. Instant is snappy.
 struct Twirl: View {
     @Binding var expanded: Bool
 
     var body: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { expanded.toggle() }
         } label: {
-            Image(systemName: "chevron.right")
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
                 .font(.caption.weight(.semibold))
-                .rotationEffect(.degrees(expanded ? 90 : 0))
                 .foregroundStyle(.secondary)
                 .frame(width: 14)
         }
