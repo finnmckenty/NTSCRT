@@ -6,17 +6,23 @@ import UniformTypeIdentifiers
 struct LookPanel: View {
     @Environment(AppState.self) private var state
     @State private var status: String = ""
+    @State private var expanded = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Preset").font(.headline)
             HStack {
-                Button("Save…") { save() }
-                Button("Load…") { load() }
+                Twirl(expanded: $expanded)
+                Text("Preset").font(.headline)
             }
-            if !status.isEmpty {
-                Text(status).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
+            if expanded {
+                HStack {
+                    Button("Save…") { save() }
+                    Button("Load…") { load() }
+                }
+                if !status.isEmpty {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

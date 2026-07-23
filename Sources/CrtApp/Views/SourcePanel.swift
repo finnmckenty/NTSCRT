@@ -4,12 +4,17 @@ import UniformTypeIdentifiers
 
 struct SourcePanel: View {
     @Environment(AppState.self) private var state
+    @State private var expanded = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Source").font(.headline)
+            HStack {
+                Twirl(expanded: $expanded)
+                Text("Source").font(.headline)
+            }
 
             @Bindable var state = state
+            if expanded {
             HStack {
                 Button("Open…") { openMedia() }
                 if state.sourceURL != nil {
@@ -55,6 +60,7 @@ struct SourcePanel: View {
 
             if let err = state.sourceError {
                 Text(err).font(.caption).foregroundStyle(.red)
+            }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

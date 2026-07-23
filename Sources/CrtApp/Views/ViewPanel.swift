@@ -6,12 +6,17 @@ import SwiftUI
 /// shader-off on the other.
 struct ViewPanel: View {
     @Environment(AppState.self) private var state
+    @State private var expanded = true
 
     var body: some View {
         @Bindable var state = state
         VStack(alignment: .leading, spacing: 8) {
-            Text("View").font(.headline)
+            HStack {
+                Twirl(expanded: $expanded)
+                Text("View").font(.headline)
+            }
 
+            if expanded {
             Toggle("Compare (split before/after)", isOn: $state.compareEnabled)
                 .toggleStyle(.checkbox)
                 .help("Split the preview: full pipeline (downscale + VHS + shader) on the left of the line, the untouched original on the right. Drag the line to move the split.")
@@ -44,6 +49,7 @@ struct ViewPanel: View {
             Text("Hold space to pan when zoomed.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

@@ -29,10 +29,16 @@ struct ExportPanel: View {
         return (w & ~1, h & ~1)
     }
 
+    @State private var expanded = true
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Export").font(.headline)
+            HStack {
+                Twirl(expanded: $expanded)
+                Text("Export").font(.headline)
+            }
 
+            if expanded {
             HStack {
                 Stepper("Long edge \(longEdge) px", value: $longEdge, in: 64...8192, step: 64)
             }
@@ -54,6 +60,7 @@ struct ExportPanel: View {
 
             if !status.isEmpty {
                 Text(status).font(.caption).foregroundStyle(.secondary)
+            }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

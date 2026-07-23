@@ -14,12 +14,18 @@ struct DownscalePanel: View {
         ("VGA² (640px)",   640),
     ]
 
+    @State private var expanded = true
+
     var body: some View {
         @Bindable var state = state
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Downscale before shader", isOn: $state.downscaleEnabled)
-                .font(.headline)
+            HStack {
+                Twirl(expanded: $expanded)
+                Toggle("Downscale before shader", isOn: $state.downscaleEnabled)
+                    .font(.headline)
+            }
 
+            if expanded {
             Group {
                 Text("Horizontal resolution").font(.subheadline).foregroundStyle(.secondary)
                 Menu {
@@ -70,6 +76,7 @@ struct DownscalePanel: View {
             }
             .disabled(!state.downscaleEnabled)
             .opacity(state.downscaleEnabled ? 1 : 0.5)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
