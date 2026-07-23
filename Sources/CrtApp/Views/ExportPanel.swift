@@ -7,12 +7,40 @@ import CrtCore
 struct ExportPanel: View {
     @Environment(AppState.self) private var state
 
+    /// Quality tiers as bits-per-pixel-per-frame; actual bitrate scales with
+    /// resolution and frame rate. CRT output is worst-case for codecs (full-
+    /// frame high-frequency scanlines + animated noise), so these run higher
+    /// than typical camera-footage rates.
+    enum ExportQuality: String, CaseIterable {
+        case standard = "Standard"
+        case high = "High"
+        case veryHigh = "Very high"
+        case maximum = "Maximum"
+
+        var bitsPerPixel: Double {
+            switch self {
+            case .standard: return 0.12
+            case .high: return 0.25
+            case .veryHigh: return 0.5
+            case .maximum: return 1.0
+            }
+        }
+    }
+
     @State private var longEdge: Int = 1920
     @State private var status: String = ""
     @State private var working: Bool = false
     @State private var progress: Double = 0
+    @State private var codec: Mp4Exporter.Codec = .h264
+    @State private var quality: ExportQuality = .high
 
     private var isVideo: Bool { state.videoSource != nil }
+
+    private var computedBitrate: Int {
+        let size = outputSize
+        let fps = Double(state.videoSource?.frameRate ?? 30)
+        return max(2_000_000, Int(Double(size.width * size.height) * fps * quality.bitsPerPixel))
+    }
 
     /// Output size derived from the requested long edge and the source aspect.
     /// Even values are required by H.264; the rounding clamps that.
@@ -47,6 +75,40 @@ struct ExportPanel: View {
             let size = outputSize
             Text("Output: \(size.width) × \(size.height) px (matches source aspect)")
                 .font(.caption).foregroundStyle(.secondary)
+
+            if isVideo {
+                HStack {
+                    Text("Codec").font(.caption)
+                    Picker("", selection: $codec) {
+                        ForEach(Mp4Exporter.Codec.allCases, id: \.self) { c in
+                            Text(c.rawValue).tag(c)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                }
+                if !codec.isProRes {
+                    HStack {
+                        Text("Quality").font(.caption)
+                        Picker("", selection: $quality) {
+                            ForEach(ExportQuality.allCases, id: \.self) { q in
+                                Text(q.rawValue).tag(q)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        Spacer()
+                        Text(String(format: "≈ %.1f Mbps", Double(computedBitrate) / 1_000_000))
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Scanline detail is brutal on codecs — use High or above, or ProRes for editing.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
             Button(buttonLabel) {
                 if isVideo { exportMP4() } else { exportPNG() }
@@ -157,8 +219,8 @@ struct ExportPanel: View {
         let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
 
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.mpeg4Movie]
-        panel.nameFieldStringValue = "crt export \(exportTimestamp).mp4"
+        panel.allowedContentTypes = [codec.isProRes ? .quickTimeMovie : .mpeg4Movie]
+        panel.nameFieldStringValue = "crt export \(exportTimestamp).\(codec.fileExtension)"
         guard panel.runModal() == .OK, let outURL = panel.url else { return }
 
         let size = outputSize
@@ -177,7 +239,9 @@ struct ExportPanel: View {
             outputWidth: size.width,
             outputHeight: size.height,
             downscale: state.downscaleSpec,
-            presetPath: preset.path
+            presetPath: preset.path,
+            codec: codec,
+            averageBitrate: computedBitrate
         )
         let params = state.paramValues
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)

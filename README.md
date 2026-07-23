@@ -21,7 +21,7 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 Everything lives in the left sidebar, top to bottom in pipeline order:
 
 - **Source** — Open or drag in an image (PNG/JPEG/HEIC) or video (MP4/MOV). Videos get a frame scrubber and a ▶ play button that previews playback with all effects applied.
-- **Export** — stills to PNG, videos to MP4 (with audio), at whatever resolution you choose. Exports are deterministic: same settings + same frame = same pixels.
+- **Export** — stills to PNG; videos to H.264/HEVC .mp4 or ProRes .mov (with audio) at your choice of resolution and quality. Scanline detail is brutal on lossy codecs — use the High/Very high quality tiers, or ProRes when it's headed into an edit. Exports are deterministic: same settings + same frame = same pixels.
 - **Preset** — save your entire configuration (downscale + VHS + shader + view) as a JSON file and load it back later.
 - **Downscale** — the retro horizontal resolution the CRT shader sees (SNES 256px, VGA 320px, or any custom width — height always follows your source's aspect ratio) and the resampling method. Nearest keeps pixels crunchy (best for pixel art), Nearest+ keeps the punch without shimmering on video, Area is the smooth neutral choice.
 - **VHS (ntsc-rs)** — the analog signal stage: composite noise, chroma bleed, head switching, tracking noise, tape speed, edge wave, and about sixty more. These are ntsc-rs's own settings — preset JSON copy/pastes both ways with the [ntsc-rs desktop app](https://github.com/ntsc-rs/ntsc-rs/releases).

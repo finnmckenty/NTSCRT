@@ -11,7 +11,27 @@ import CrtCore
 @main
 struct VideoSmoke {
     static func main() async {
-        let args = CommandLine.arguments
+        var raw = Array(CommandLine.arguments.dropFirst())
+        var codec: Mp4Exporter.Codec = .h264
+        var bitrate: Int? = nil
+        var positional: [String] = [CommandLine.arguments[0]]
+        while !raw.isEmpty {
+            let a = raw.removeFirst()
+            if a == "--codec", !raw.isEmpty {
+                switch raw.removeFirst().lowercased() {
+                case "h264": codec = .h264
+                case "hevc": codec = .hevc
+                case "prores422": codec = .prores422
+                case "prores422hq": codec = .prores422HQ
+                default: fputs("unknown codec\n", stderr); exit(2)
+                }
+            } else if a == "--bitrate", !raw.isEmpty {
+                bitrate = Int(raw.removeFirst())
+            } else {
+                positional.append(a)
+            }
+        }
+        let args = positional
         guard args.count >= 5 else {
             fputs("usage: crt-video-smoke <input.mp4> <preset.slangp> <output.mp4> <librashader.dylib> [outW outH] [downW downH method]\n", stderr)
             exit(2)
@@ -51,7 +71,9 @@ struct VideoSmoke {
                 outputWidth: outW,
                 outputHeight: outH,
                 downscale: downscale,
-                presetPath: presetPath
+                presetPath: presetPath,
+                codec: codec,
+                averageBitrate: bitrate
             )
             try await exporter.export(source: vs, paramValues: [:], settings: settings) { p in
                 let pct = Int((p * 100).rounded())
