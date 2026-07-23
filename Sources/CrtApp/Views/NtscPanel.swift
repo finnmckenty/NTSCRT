@@ -82,7 +82,18 @@ private struct NtscControl: View {
             slider(min: min, max: max, logarithmic: logarithmic, percent: false)
 
         case .int(let min, let max):
-            intControl(min: min, max: max)
+            VStack(alignment: .leading, spacing: 2) {
+                intControl(min: min, max: max)
+                // ntsc-rs quirk: the head-switch band is `height` lines tall
+                // starting `offset` lines up — offset >= height puts it
+                // outside the frame and silently disables the effect.
+                if setting.name == "head_switching_offset",
+                   state.ntscNumber("head_switching_offset") >= state.ntscNumber("head_switching_height") {
+                    Text("No effect while Offset ≥ Height")
+                        .font(.caption2).foregroundStyle(.orange)
+                        .padding(.leading, indent)
+                }
+            }
 
         case .enumeration(let options):
             VStack(alignment: .leading, spacing: 2) {

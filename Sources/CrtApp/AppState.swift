@@ -219,8 +219,11 @@ final class AppState {
         "snow_intensity": 0,
         "video_scanline_phase_shift_offset": 3,
         "luma_smear": 0.6692,
-        "head_switching_height": 6,
-        "head_switching_offset": 18,
+        // Offset must stay below height or the switch band leaves the frame
+        // and the whole effect goes dead (measured: literally zero output
+        // change with 6/18).
+        "head_switching_height": 8,
+        "head_switching_offset": 3,
         "head_switching_horizontal_shift": 41.57,
         "head_switching_mid_line_jitter": 0.181,
         "tracking_noise_height": 63,
@@ -234,8 +237,10 @@ final class AppState {
         "chroma_delay_horizontal": 2.667,
         "chroma_delay_vertical": 2,
         "vhs_chroma_loss": 0.124,
-        "bandwidth_scale": 0.985,
-        "vertical_scale": 0.9884,
+        // Scale artifacts with the input resolution: these effects are sized
+        // in signal lines/pixels, and at 1080p+ inputs they're proportionally
+        // tiny (and then further diluted by the downscale) without this.
+        "scale_with_video_size": true,
     ]
 
     /// House shader tweaks per preset (vs the shaders' declared defaults).
