@@ -23,6 +23,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 
 cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/NTSCRT"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/librashader.dylib"
+cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Optional VHS stage dylib (the app runs without it).
 if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
   cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/ntscrs_capi.dylib"
@@ -47,6 +48,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>                <string>1</string>
     <key>LSMinimumSystemVersion</key>         <string>14.0</string>
     <key>NSHighResolutionCapable</key>        <true/>
+    <key>CFBundleIconFile</key>            <string>AppIcon</string>
     <!-- Tell the app where to find the slang-shaders presets.
          For a real distribution you'd copy them into Resources/ and update Paths.swift. -->
     <key>LSEnvironment</key>

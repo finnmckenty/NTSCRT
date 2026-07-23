@@ -58,6 +58,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 cp .build/release/crt-app "$APP/Contents/MacOS/NTSCRT"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/"
 cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/"
+cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/NTSCRT" 2>/dev/null || true
 
 # Shader presets: the crt/ tree (presets + shaders + textures) and the shared
@@ -83,6 +84,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>         <string>14.0</string>
     <key>LSApplicationCategoryType</key>      <string>public.app-category.graphics-design</string>
     <key>NSHighResolutionCapable</key>        <true/>
+    <key>CFBundleIconFile</key>            <string>AppIcon</string>
 </dict>
 </plist>
 PLIST
