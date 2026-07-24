@@ -43,10 +43,19 @@ Vendor/
 ```sh
 git submodule update --init --recursive
 
-# Build librashader once. The `stable` feature lets it compile on stable Rust.
-git clone --depth 1 https://github.com/SnowflakePowered/librashader.git /tmp/librashader-src
-(cd /tmp/librashader-src && cargo build --release -p librashader-capi --features stable)
-cp /tmp/librashader-src/target/release/liblibrashader_capi.dylib Vendor/librashader/librashader.dylib
+# Build librashader once (universal). The `stable` feature lets it compile on
+# stable Rust. Homebrew's rust is host-only; install rustup for the x86_64
+# target: brew install rustup && rustup toolchain install stable &&
+#         rustup target add --toolchain stable x86_64-apple-darwin
+# PINNED to 76462c03: newer librashader changes crt-royale rendering
+# (verified ~8/255 mean pixel change). Re-run the crt-smoke byte-compare
+# against current renders before ever bumping this.
+git clone https://github.com/SnowflakePowered/librashader.git /tmp/librashader-src
+git -C /tmp/librashader-src checkout 76462c03
+TC="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin"
+(cd /tmp/librashader-src && RUSTC="$TC/bin/rustc" "$TC/bin/cargo" build --release -p librashader-capi --features stable --target aarch64-apple-darwin)
+(cd /tmp/librashader-src && RUSTC="$TC/bin/rustc" "$TC/bin/cargo" build --release -p librashader-capi --features stable --target x86_64-apple-darwin)
+lipo -create /tmp/librashader-src/target/aarch64-apple-darwin/release/liblibrashader_capi.dylib /tmp/librashader-src/target/x86_64-apple-darwin/release/liblibrashader_capi.dylib -output Vendor/librashader/librashader.dylib
 install_name_tool -id @rpath/librashader.dylib Vendor/librashader/librashader.dylib
 
 # Build the CLI verifier and the SwiftUI app.

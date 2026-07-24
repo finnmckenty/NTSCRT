@@ -14,7 +14,9 @@ your image/video → NTSC/VHS signal degradation (full res) → downscale to ret
 
 Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTSCRT** to Applications.
 
-**Requirements:** macOS 14 or later, Apple Silicon (M1 or newer).
+**Requirements:** macOS 14 or later. The app is a universal binary (Apple Silicon + Intel).
+
+> **Intel note:** I build and test NTSCRT on Apple Silicon and haven't personally tested the Intel build. Intel support exists thanks to a contributed fix ([#1](../../pull/1)) verified by its author on an Intel iMac Pro — if something misbehaves on your Intel Mac, please open an issue.
 
 ## Using the app
 
@@ -36,7 +38,7 @@ Everything lives in the left sidebar, top to bottom in pipeline order:
 
 ## Limitations
 
-- Official builds are **Apple Silicon**, macOS 14+. Intel Macs work when building from source (thanks to a contributed fix for discrete-GPU texture synchronization) — no prebuilt Intel binaries yet.
+- The Intel half of the universal build is community-tested, not author-tested (see the note up top).
 - The NTSC stage runs on the CPU at your source's full resolution — with **Animate** on or during video playback, 4K+ sources will noticeably drop the preview frame rate. Exports always render every frame regardless.
 - Video preview playback favors correctness over speed and can run below native fps on heavy footage; the exported MP4 is full quality.
 - A few crt-royale parameters are compile-time disabled in the shader itself (marked "static in this shader build") — they do nothing in RetroArch either.

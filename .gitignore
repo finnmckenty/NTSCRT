@@ -16,3 +16,4 @@ build/
 Vendor/ntscrs-capi/ntscrs_capi.dylib
 Vendor/ntscrs-capi/target/
 dist/
+.build-x86/

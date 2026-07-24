@@ -48,18 +48,35 @@ if [[ ! -f Vendor/librashader/librashader.dylib ]]; then
   exit 1
 fi
 ./scripts/build-ntscrs.sh
+# Universal app binary: SPM's multi-arch --arch flags need full Xcode's
+# XCBuild; per-triple builds + lipo work with just the Command Line Tools.
 swift build -c release --product crt-app
+swift build -c release --triple x86_64-apple-macosx --scratch-path .build-x86 --product crt-app
+lipo -create .build/release/crt-app \
+             .build-x86/x86_64-apple-macosx/release/crt-app \
+     -output .build/crt-app-universal
 
 # ---- assemble self-contained bundle ----
 echo "== assembling $APP =="
 rm -rf dist
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
-cp .build/release/crt-app "$APP/Contents/MacOS/NTSCRT"
+cp .build/crt-app-universal "$APP/Contents/MacOS/NTSCRT"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/"
 cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/"
 cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/NTSCRT" 2>/dev/null || true
+
+# Releases ship universal - refuse to build a partial one by accident.
+for bin in "$APP/Contents/MacOS/NTSCRT" "$APP/Contents/Frameworks/librashader.dylib" "$APP/Contents/Frameworks/ntscrs_capi.dylib"; do
+  archs=$(lipo -archs "$bin")
+  if [[ "$archs" != *arm64* || "$archs" != *x86_64* ]]; then
+    echo "NOT UNIVERSAL: $bin ($archs)" >&2
+    echo 'librashader: build both targets and lipo (see DEVELOPMENT.md); ntscrs: install rustup stable + x86_64 target, re-run scripts/build-ntscrs.sh' >&2
+    exit 1
+  fi
+done
+echo 'universal check: all binaries arm64 + x86_64' 
 
 # Shader presets: the crt/ tree (presets + shaders + textures) and the shared
 # include/ headers are all our 7 presets reference. ~10 MB.
