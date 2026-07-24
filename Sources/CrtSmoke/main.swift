@@ -192,13 +192,17 @@ if let ntscSettings {
         }
     }
 
-    // CPU-visible copy of the full-res input.
+    // CPU-visible copy of the full-res input. Discrete-GPU Macs need
+    // .managed storage + a synchronize blit for the CPU to see GPU writes
+    // (.shared is only coherent on unified memory; synchronize is illegal
+    // on .shared and Metal validation aborts).
     let w = inputTex.width, h = inputTex.height
     let readDesc = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
     readDesc.usage = [.shaderRead]
-    readDesc.storageMode = .shared
-    guard let readTex = device.makeTexture(descriptor: readDesc),
+    let forceManaged = ProcessInfo.processInfo.environment["CRT_FORCE_MANAGED"] != nil
+    readDesc.storageMode = (device.hasUnifiedMemory && !forceManaged) ? .shared : .managed
+    guard let roundTrip = device.makeTexture(descriptor: readDesc),
           let copyBlit = cb.makeBlitCommandEncoder() else {
         fputs("ntsc staging alloc failed\n", stderr); exit(23)
     }
@@ -206,14 +210,13 @@ if let ntscSettings {
                   sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: w, height: h, depth: 1),
-                  to: readTex,
+                  to: roundTrip,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+    if roundTrip.storageMode == .managed {
+        copyBlit.synchronize(resource: roundTrip)
+    }
     copyBlit.endEncoding()
-    // On Intel, .shared storage requires explicit synchronize for CPU to see GPU writes.
-    let syncBlit = cb.makeBlitCommandEncoder()!
-    syncBlit.synchronize(resource: readTex)
-    syncBlit.endEncoding()
     cb.commit()
     cb.waitUntilCompleted()
     if let err = cb.error {
@@ -224,51 +227,17 @@ if let ntscSettings {
     var bytes = [UInt8](repeating: 0, count: rowBytes * h)
     let fullRegion = MTLRegionMake2D(0, 0, w, h)
     bytes.withUnsafeMutableBytes { raw in
-        readTex.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: fullRegion, mipmapLevel: 0)
+        roundTrip.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: fullRegion, mipmapLevel: 0)
         guard filter.processBGRA8(raw.baseAddress!, width: UInt(w), height: UInt(h),
                                   rowBytes: UInt(rowBytes), frameIndex: frameIndex) else {
             fputs("ntsc process failed\n", stderr); exit(24)
         }
     }
-    // Stage the processed bytes into a .shared texture, then blit to a .private
-    // texture for the shader chain. On Intel, GPU reads from a .shared texture
-    // written via replace() can be unreliable; a blit to .private sidesteps it.
-    let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
-    stageDesc.usage = [.shaderRead]
-    stageDesc.storageMode = .shared
-    guard let stageTex = device.makeTexture(descriptor: stageDesc) else {
-        fputs("ntsc stage texture alloc failed\n", stderr); exit(23)
-    }
-    stageTex.replace(region: fullRegion, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
-
-    let outDesc = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: inputTex.pixelFormat, width: w, height: h, mipmapped: false)
-    outDesc.usage = [.shaderRead, .shaderWrite]
-    outDesc.storageMode = .private
-    guard let privateOut = device.makeTexture(descriptor: outDesc) else {
-        fputs("ntsc private output alloc failed\n", stderr); exit(23)
-    }
-    guard let stageCb = queue.makeCommandBuffer(),
-          let stageBlit = stageCb.makeBlitCommandEncoder() else {
-        fputs("ntsc stage blit failed\n", stderr); exit(23)
-    }
-    stageBlit.copy(from: stageTex,
-                   sourceSlice: 0, sourceLevel: 0,
-                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                   sourceSize: MTLSize(width: w, height: h, depth: 1),
-                   to: privateOut,
-                   destinationSlice: 0, destinationLevel: 0,
-                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-    stageBlit.endEncoding()
-    stageCb.commit()
-    stageCb.waitUntilCompleted()
-    if let err = stageCb.error {
-        fputs("ntsc stage blit error: \(err)\n", stderr); exit(25)
-    }
+    // replace() is CPU->GPU coherent for both shared and managed textures.
+    roundTrip.replace(region: fullRegion, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
     print("ntsc stage applied at full res (\(w)x\(h), frame \(frameIndex), settings: \(ntscSettings))")
 
-    ntscSource = privateOut
+    ntscSource = roundTrip
     guard let newCb = queue.makeCommandBuffer() else {
         fputs("commandBuffer failed\n", stderr); exit(9)
     }
@@ -311,7 +280,8 @@ let stagingDesc = MTLTextureDescriptor.texture2DDescriptor(
     pixelFormat: .bgra8Unorm, width: outW, height: outH, mipmapped: false
 )
 stagingDesc.usage = [.shaderRead]
-stagingDesc.storageMode = .shared
+stagingDesc.storageMode = (device.hasUnifiedMemory
+    && ProcessInfo.processInfo.environment["CRT_FORCE_MANAGED"] == nil) ? .shared : .managed
 guard let staging = device.makeTexture(descriptor: stagingDesc) else {
     fputs("makeTexture(staging) failed\n", stderr); exit(11)
 }
@@ -325,11 +295,12 @@ blit.copy(from: outputTex,
           to: staging,
           destinationSlice: 0, destinationLevel: 0,
           destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+// Discrete-GPU Macs: managed staging needs a synchronize blit before the
+// CPU reads it (synchronize is illegal on .shared — validation aborts).
+if staging.storageMode == .managed {
+    blit.synchronize(resource: staging)
+}
 blit.endEncoding()
-// Intel Mac: .shared storage needs explicit synchronize for CPU to see GPU blit writes.
-let stagingSync = chainCb.makeBlitCommandEncoder()!
-stagingSync.synchronize(resource: staging)
-stagingSync.endEncoding()
 chainCb.commit()
 chainCb.waitUntilCompleted()
 if let err = chainCb.error {

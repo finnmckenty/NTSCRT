@@ -36,7 +36,7 @@ Everything lives in the left sidebar, top to bottom in pipeline order:
 
 ## Limitations
 
-- **Apple Silicon only**, macOS 14+. No Intel build.
+- Official builds are **Apple Silicon**, macOS 14+. Intel Macs work when building from source (thanks to a contributed fix for discrete-GPU texture synchronization) — no prebuilt Intel binaries yet.
 - The NTSC stage runs on the CPU at your source's full resolution — with **Animate** on or during video playback, 4K+ sources will noticeably drop the preview frame rate. Exports always render every frame regardless.
 - Video preview playback favors correctness over speed and can run below native fps on heavy footage; the exported MP4 is full quality.
 - A few crt-royale parameters are compile-time disabled in the shader itself (marked "static in this shader build") — they do nothing in RetroArch either.

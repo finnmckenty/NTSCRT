@@ -4,13 +4,23 @@ import CrtAppBridge
 
 /// CPU signal-degradation stage (ntsc-rs) between the downscaler and the
 /// shader chain: GPU texture → CPU BGRA8 → ntsc-rs in place → back to a
-/// shared-storage texture the chain reads directly.
+/// CPU-visible texture the chain reads directly.
+///
+/// Storage-mode note (the Intel fix, PR #1): on discrete-GPU Macs the CPU
+/// cannot coherently read a texture the GPU just wrote unless the texture is
+/// `.managed` and a blit `synchronize(resource:)` runs after the GPU write —
+/// otherwise `getBytes` returns stale zeros and the whole stage processes a
+/// black frame. `synchronize` is *only* legal on managed resources (Metal
+/// validation aborts on `.shared`), so we pick the storage mode per device:
+/// `.shared` on unified memory (Apple silicon — identical to the original
+/// behavior), `.managed` + synchronize on discrete GPUs. Managed textures
+/// handle the CPU→GPU direction (`replace`) automatically.
 ///
 /// The round trip runs synchronously (blit + waitUntilCompleted); at
-/// chain-input sizes (SD) both the copy and the effect are a few
-/// milliseconds. Instances are not thread-safe — keep each on one thread
-/// (main for the preview, the export task for MP4), matching the
-/// single-queue rule of the rest of the pipeline.
+/// chain-input sizes both the copy and the effect are a few milliseconds.
+/// Instances are not thread-safe — keep each on one thread (main for the
+/// preview, the export task for MP4), matching the single-queue rule of the
+/// rest of the pipeline.
 public final class NtscStage {
 
     public enum Error: Swift.Error, LocalizedError {
@@ -26,10 +36,16 @@ public final class NtscStage {
         }
     }
 
+    /// Testing hook: CRT_FORCE_MANAGED=1 exercises the discrete-GPU path on
+    /// unified-memory machines (managed storage is valid everywhere).
+    static let forceManaged = ProcessInfo.processInfo.environment["CRT_FORCE_MANAGED"] != nil
+
+    static func cpuStorageMode(for device: MTLDevice) -> MTLStorageMode {
+        (device.hasUnifiedMemory && !forceManaged) ? .shared : .managed
+    }
+
     private let filter: NTSCFilter
-    private var readTex: MTLTexture?
-    private var stageTex: MTLTexture?
-    private var outputTex: MTLTexture?
+    private var roundTrip: MTLTexture?
     private var bytes: [UInt8] = []
 
     /// nil if the ntscrs-capi dylib hasn't been loaded (NTSCFilter.loadLibrary).
@@ -59,55 +75,33 @@ public final class NtscStage {
                         device: MTLDevice,
                         queue: MTLCommandQueue) throws -> MTLTexture {
         let w = input.width, h = input.height
+        let storage = Self.cpuStorageMode(for: device)
 
-        // Lazily (re)allocate the three textures we need. On Intel Macs,
-        // .shared storage requires an explicit synchronize after a GPU blit
-        // before the CPU can read it, and GPU reads of CPU-replaced .shared
-        // data can be unreliable — so we stage through a .private texture
-        // for the chain to consume.
-        if readTex == nil || readTex!.width != w || readTex!.height != h
-            || readTex!.pixelFormat != input.pixelFormat {
+        if roundTrip == nil || roundTrip!.width != w || roundTrip!.height != h
+            || roundTrip!.pixelFormat != input.pixelFormat
+            || roundTrip!.storageMode != storage {
             let d = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false)
             d.usage = [.shaderRead]
-            d.storageMode = .shared
-            readTex = device.makeTexture(descriptor: d)
+            d.storageMode = storage
+            roundTrip = device.makeTexture(descriptor: d)
         }
-        if stageTex == nil || stageTex!.width != w || stageTex!.height != h
-            || stageTex!.pixelFormat != input.pixelFormat {
-            let d = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false)
-            d.usage = [.shaderRead]
-            d.storageMode = .shared
-            stageTex = device.makeTexture(descriptor: d)
-        }
-        if outputTex == nil || outputTex!.width != w || outputTex!.height != h
-            || outputTex!.pixelFormat != input.pixelFormat {
-            let d = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false)
-            d.usage = [.shaderRead, .shaderWrite]
-            d.storageMode = .private
-            outputTex = device.makeTexture(descriptor: d)
-        }
-        guard let read = readTex, let stage = stageTex, let output = outputTex else {
-            throw Error.textureAlloc
-        }
+        guard let tex = roundTrip else { throw Error.textureAlloc }
 
-        // GPU → CPU-visible copy. On Intel, the .shared destination needs an
-        // explicit synchronize or getBytes returns stale zeros.
+        // GPU → CPU-visible copy (synchronize required for managed).
         guard let cb = queue.makeCommandBuffer(),
               let blit = cb.makeBlitCommandEncoder() else { throw Error.commandBuffer }
         blit.copy(from: input,
                   sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: w, height: h, depth: 1),
-                  to: read,
+                  to: tex,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        if tex.storageMode == .managed {
+            blit.synchronize(resource: tex)
+        }
         blit.endEncoding()
-        let sync = cb.makeBlitCommandEncoder()!
-        sync.synchronize(resource: read)
-        sync.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
 
@@ -118,26 +112,15 @@ public final class NtscStage {
         let region = MTLRegionMake2D(0, 0, w, h)
         var ok = false
         bytes.withUnsafeMutableBytes { raw in
-            read.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: region, mipmapLevel: 0)
+            tex.getBytes(raw.baseAddress!, bytesPerRow: rowBytes, from: region, mipmapLevel: 0)
             ok = filter.processBGRA8(raw.baseAddress!, width: UInt(w), height: UInt(h),
                                      rowBytes: UInt(rowBytes), frameIndex: frameIndex)
         }
         guard ok else { throw Error.processFailed }
 
-        // CPU → .shared stage texture, then blit to .private for the chain.
-        stage.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
-        guard let cb2 = queue.makeCommandBuffer(),
-              let blit2 = cb2.makeBlitCommandEncoder() else { throw Error.commandBuffer }
-        blit2.copy(from: stage,
-                   sourceSlice: 0, sourceLevel: 0,
-                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                   sourceSize: MTLSize(width: w, height: h, depth: 1),
-                   to: output,
-                   destinationSlice: 0, destinationLevel: 0,
-                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-        blit2.endEncoding()
-        cb2.commit()
-        cb2.waitUntilCompleted()
-        return output
+        // CPU → GPU: replace() is coherent for both shared (unified memory)
+        // and managed (Metal uploads the dirtied region) textures.
+        tex.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
+        return tex
     }
 }
