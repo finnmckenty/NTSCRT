@@ -4,9 +4,33 @@ import Metal
 import CoreVideo
 import CrtAppBridge
 
-/// Encodes a source video through the CRT pipeline into an H.264 .mp4.
-/// Audio (if any) is passed through unmodified.
+/// Encodes a source video through the CRT pipeline into an .mp4 (H.264/HEVC)
+/// or .mov (ProRes). Audio (if any) is re-encoded to AAC.
 public final class Mp4Exporter {
+
+    /// Output codec. Scanline/mask detail is high-frequency content that
+    /// low-bitrate H.264 smears — HEVC keeps it at the same bitrate, and
+    /// ProRes preserves it outright (the right choice for edit workflows).
+    public enum Codec: String, CaseIterable, Sendable {
+        case h264 = "H.264"
+        case hevc = "HEVC"
+        case prores422 = "ProRes 422"
+        case prores422HQ = "ProRes 422 HQ"
+
+        public var isProRes: Bool { self == .prores422 || self == .prores422HQ }
+        /// ProRes must live in a QuickTime container.
+        public var fileExtension: String { isProRes ? "mov" : "mp4" }
+
+        var avCodec: AVVideoCodecType {
+            switch self {
+            case .h264: return .h264
+            case .hevc: return .hevc
+            case .prores422: return .proRes422
+            case .prores422HQ: return .proRes422HQ
+            }
+        }
+        var avFileType: AVFileType { isProRes ? .mov : .mp4 }
+    }
 
     public struct Settings {
         public var outputURL: URL
@@ -14,13 +38,19 @@ public final class Mp4Exporter {
         public var outputHeight: Int
         public var downscale: DownscaleSpec?
         public var presetPath: String           // .slangp file
+        public var codec: Codec
+        /// Target average bitrate in bits/s (H.264/HEVC only; ProRes ignores it).
+        public var averageBitrate: Int?
         public init(outputURL: URL, outputWidth: Int, outputHeight: Int,
-                    downscale: DownscaleSpec?, presetPath: String) {
+                    downscale: DownscaleSpec?, presetPath: String,
+                    codec: Codec = .h264, averageBitrate: Int? = nil) {
             self.outputURL = outputURL
             self.outputWidth = outputWidth
             self.outputHeight = outputHeight
             self.downscale = downscale
             self.presetPath = presetPath
+            self.codec = codec
+            self.averageBitrate = averageBitrate
         }
     }
 
@@ -72,19 +102,24 @@ public final class Mp4Exporter {
         try? FileManager.default.removeItem(at: settings.outputURL)
         let writer: AVAssetWriter
         do {
-            writer = try AVAssetWriter(outputURL: settings.outputURL, fileType: .mp4)
+            writer = try AVAssetWriter(outputURL: settings.outputURL,
+                                       fileType: settings.codec.avFileType)
         } catch {
             throw Error.writerInit("\(error)")
         }
 
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+        var videoSettings: [String: Any] = [
+            AVVideoCodecKey: settings.codec.avCodec,
             AVVideoWidthKey: settings.outputWidth,
             AVVideoHeightKey: settings.outputHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: max(2_000_000, settings.outputWidth * settings.outputHeight * 4),
-            ]
         ]
+        if !settings.codec.isProRes {
+            let bitrate = settings.averageBitrate
+                ?? max(2_000_000, settings.outputWidth * settings.outputHeight * 4)
+            videoSettings[AVVideoCompressionPropertiesKey] = [
+                AVVideoAverageBitRateKey: bitrate,
+            ]
+        }
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = false
         let pbAttrs: [String: Any] = [
