@@ -195,6 +195,12 @@ struct ExportPanel: View {
                   to: staging,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        // Discrete-GPU Macs: managed staging needs an explicit synchronize
+        // for the CPU to see the GPU's blit (no-op case skipped on unified
+        // memory, where staging is .shared; synchronize is illegal there).
+        if staging.storageMode == .managed {
+            blit.synchronize(resource: staging)
+        }
         blit.endEncoding()
 
         cb.addCompletedHandler { _ in
