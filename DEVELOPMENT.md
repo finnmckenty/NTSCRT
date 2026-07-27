@@ -79,6 +79,22 @@ The "VHS (ntsc-rs)" panel appears enabled-able in the sidebar when the dylib is 
 
 Env overrides: `CRT_NTSCRS=<dylib path>`, `CRT_NTSC=1` (start with the stage enabled).
 
+## Regression checks
+
+```sh
+swift build --product crt-scaletest && ./.build/debug/crt-scaletest
+```
+
+Asserts the preview's sizing rules — that integer scale snaps to whole
+multiples of the chain input and letterboxes, that the chain still renders at
+enough rows per source line for the shader to look the same at any window
+size, and that the step between them stays an exact integer factor. Those two
+requirements pull against each other and a fix for one silently broke the
+other once. `scripts/make-release.sh` runs it as a gate.
+
+XCTest and swift-testing both need full Xcode, which this project doesn't
+otherwise require, so it's a plain executable that exits nonzero.
+
 ## Dev hooks (env vars)
 
 For iteration and headless/screenshot verification:

@@ -233,57 +233,27 @@ struct PreviewView: NSViewRepresentable {
 
         // MARK: - target sizing
 
+        /// Sizing decided by PreviewScaler (pure, unit-tested in
+        /// PreviewScalingTests) — kept here so composite() can letterbox the
+        /// displayed size rather than stretching the render to fill.
+        private var scaling: PreviewScaling?
+
         private func renderTargetSize(inputW: Int, inputH: Int) -> (Int, Int) {
-            // Render the chain at the drawable's resolution — RetroArch
-            // renders at the viewport size, and mask/scanline structure only
-            // reads correctly when target pixels map 1:1 to screen pixels.
-            // (The MTKView is aspect-fitted to the source, so the drawable
-            // already carries the source aspect.) Capped for safety.
-            if let size = view?.drawableSize, size.width >= 1, size.height >= 1 {
-                if state.integerScale, inputW > 0, inputH > 0 {
-                    // Whole multiple of the chain input, so every source line
-                    // gets the same number of rows.
-                    //
-                    // The multiple has a FLOOR that doesn't depend on the
-                    // window. CRT shaders work in output pixels, so a small
-                    // window used to pick k=1 — one row per source line, no
-                    // room to draw a scanline, and a bloom radius covering a
-                    // huge fraction of the frame. Measured on a 320-line
-                    // input: k=1 clips 21% of the frame, k=2 clips 6%, k=4
-                    // clips 0.6%, k=6 clips none. Below the floor the preview
-                    // stopped matching the export and changed as you resized.
-                    var k = max(1, min(Int(size.width) / inputW,
-                                       Int(size.height) / inputH))
-                    // Prefer EVEN multiples: the glow shaders' half-texel
-                    // scanline offset lands beam boundaries exactly on pixel
-                    // edges at odd multiples, and float rounding then jitters
-                    // scanline spacing by ±1 row (measured: stddev 0.7 at
-                    // k=9/11 vs 0.35 at k=10/12). Even k parks the boundary
-                    // mid-row, immune to rounding.
-                    if k > 1 && k % 2 == 1 { k -= 1 }
-                    k = max(k, Self.minScanlineMultiple)
-                    // Respect the texture budget for big chain inputs.
-                    while k > 1 && (inputW * k > Self.maxTargetLongEdge
-                                    || inputH * k > Self.maxTargetLongEdge) {
-                        k -= (k > 2 ? 2 : 1)
-                    }
-                    return (inputW * k, inputH * k)
+            let size = view?.drawableSize ?? .zero
+            let plan = PreviewScaler.plan(
+                inputWidth: inputW, inputHeight: inputH,
+                drawableWidth: Int(size.width), drawableHeight: Int(size.height),
+                integerScale: state.integerScale,
+                maxLongEdge: Self.maxTargetLongEdge)
+            scaling = plan
+            if Self.scaleLog {
+                let key = "\(Int(size.width))x\(Int(size.height))/\(plan.renderWidth)/\(plan.displayWidth)"
+                if key != Self.lastScaleLogKey {
+                    Self.lastScaleLogKey = key
+                    fputs("[scale] drawable \(Int(size.width))x\(Int(size.height)) render \(plan.renderWidth)x\(plan.renderHeight) (x\(plan.renderMultiple)) display \(plan.displayWidth)x\(plan.displayHeight) (x\(plan.displayMultiple))\n", stderr)
                 }
-                let cap = Double(Self.maxTargetLongEdge)
-                let scale = min(1.0, cap / Double(max(size.width, size.height)))
-                return (max(64, Int(Double(size.width) * scale)),
-                        max(64, Int(Double(size.height) * scale)))
             }
-            // Before first layout: source aspect at 1080 long edge.
-            let aspect = state.sourceAspect
-            let cap = 1080
-            if aspect >= 1 {
-                let h = max(64, Int((Double(cap) / Double(aspect)).rounded()))
-                return (cap, h)
-            } else {
-                let w = max(64, Int((Double(cap) * Double(aspect)).rounded()))
-                return (w, cap)
-            }
+            return (plan.renderWidth, plan.renderHeight)
         }
 
         /// Area-downsampler + display-sized textures, allocated only when the
@@ -534,18 +504,15 @@ struct PreviewView: NSViewRepresentable {
             var primary = primaryIn
             var secondary = secondaryIn
 
-            // The chain may render larger than the window can show (integer
-            // scale keeps a minimum multiple so the shader has room to draw
-            // scanlines). Integrate it down to display size rather than
-            // point-sampling it, which would alias the scanlines away — the
-            // same reason the exporters supersample.
-            if state.zoom <= 1.001,
-               primary.width > dst.width || primary.height > dst.height,
-               let down = obtainDownscaler() {
-                let scale = min(Double(dst.width) / Double(primary.width),
-                                Double(dst.height) / Double(primary.height))
-                let fw = max(1, Int((Double(primary.width) * scale).rounded()))
-                let fh = max(1, Int((Double(primary.height) * scale).rounded()))
+            // The chain renders at a whole multiple that may exceed what's
+            // shown (integer scale keeps a floor so the shader has room to
+            // draw scanlines). Step it down to the DISPLAY size — an exact
+            // integer factor, so it's a clean box filter — then letterbox
+            // that. Applied regardless of zoom: skipping it while zoomed
+            // changed the mapping, so toggling integer scale appeared to
+            // change the zoom level.
+            if let plan = scaling, plan.needsDownsample, let down = obtainDownscaler() {
+                let fw = plan.displayWidth, fh = plan.displayHeight
                 if let fitP = obtainFitTexture(slot: 0, width: fw, height: fh,
                                                format: primary.pixelFormat) {
                     down.encode(into: cb, source: primary, destination: fitP, method: .area)
@@ -589,6 +556,8 @@ struct PreviewView: NSViewRepresentable {
                     fputs("[scale] drawable \(dst.width)x\(dst.height) chain-render \(primaryIn.width)x\(primaryIn.height) displayed \(primary.width)x\(primary.height) delta \(dx),\(dy) \(dx % 2 == 0 && dy % 2 == 0 ? "even" : "ODD")\n", stderr)
                 }
             }
+            // Integer scale letterboxes the displayed image at 1:1; without
+            // it the render fills the drawable.
             let stretch = !state.integerScale
             let tgtW = Float(stretch ? dst.width : primary.width)
             let tgtH = Float(stretch ? dst.height : primary.height)
