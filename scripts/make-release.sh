@@ -44,9 +44,8 @@ fi
 # ---- regression gates ----
 # Preview sizing has broken silently before (integer scale quietly stopped
 # snapping). Cheap to check, so check every release.
-echo "== running regression checks =="
-swift build -c release --product crt-scaletest
-./.build/release/crt-scaletest
+echo "== running tests =="
+./scripts/test.sh
 
 # ---- build everything ----
 echo "== building dylibs + app (release) =="

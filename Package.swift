@@ -11,7 +11,6 @@ let package = Package(
         .executable(name: "crt-sweep",       targets: ["CrtSweep"]),
         .executable(name: "crt-video-smoke", targets: ["CrtVideoSmoke"]),
         .executable(name: "crt-app",         targets: ["CrtApp"]),
-        .executable(name: "crt-scaletest",   targets: ["CrtScaleTest"]),
     ],
     targets: [
         .target(
@@ -68,10 +67,10 @@ let package = Package(
                 .linkedFramework("CoreVideo"),
             ]
         ),
-        .executableTarget(
-            name: "CrtScaleTest",
+        .testTarget(
+            name: "CrtCoreTests",
             dependencies: ["CrtCore"],
-            path: "Sources/CrtScaleTest"
+            path: "Tests/CrtCoreTests"
         ),
         .executableTarget(
             name: "CrtApp",

@@ -35,7 +35,7 @@ Vendor/
 
 - macOS 14+ on Apple Silicon
 - Xcode Command Line Tools (`xcode-select --install`) — enough for the CLI
-- Full Xcode (App Store) — required for the SwiftUI app target (Phase 2)
+- Full Xcode (App Store) — only for `swift test` (XCTest) and universal `--arch` builds; the app itself builds with the CLT
 - Rust toolchain (`brew install rust`) — to build librashader from source
 
 ## Build
@@ -79,21 +79,24 @@ The "VHS (ntsc-rs)" panel appears enabled-able in the sidebar when the dylib is 
 
 Env overrides: `CRT_NTSCRS=<dylib path>`, `CRT_NTSC=1` (start with the stage enabled).
 
-## Regression checks
+## Tests
 
 ```sh
-swift build --product crt-scaletest && ./.build/debug/crt-scaletest
+./scripts/test.sh
 ```
 
-Asserts the preview's sizing rules — that integer scale snaps to whole
+Covers the preview's sizing rules — that integer scale snaps to whole
 multiples of the chain input and letterboxes, that the chain still renders at
 enough rows per source line for the shader to look the same at any window
-size, and that the step between them stays an exact integer factor. Those two
-requirements pull against each other and a fix for one silently broke the
-other once. `scripts/make-release.sh` runs it as a gate.
+size, and that the step between the two stays an exact integer factor. Those
+requirements pull against each other, and a fix for one silently broke the
+other once. `scripts/make-release.sh` runs the suite as a gate.
 
-XCTest and swift-testing both need full Xcode, which this project doesn't
-otherwise require, so it's a plain executable that exits nonzero.
+The wrapper exists because XCTest ships with full Xcode, not the Command Line
+Tools, and `xcode-select` here points at the CLT — so it sets `DEVELOPER_DIR`
+for the test run only (no `sudo xcode-select` needed) and uses its own scratch
+path, since the two toolchains can't share a build database. Plain
+`swift test` works too if `xcode-select -p` already points at Xcode.
 
 ## Dev hooks (env vars)
 
