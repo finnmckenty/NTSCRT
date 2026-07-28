@@ -806,6 +806,14 @@ final class AppState {
                 }.sorted { $0.t < $1.t }
             }
             if let e = t["enabled"] as? Bool { timelineEnabled = e && isImageSource }
+            // A preset carrying keyframes opens the timeline, whether or not
+            // it was open when the preset was saved — otherwise the animation
+            // is loaded but invisible, and the preset looks like it did
+            // nothing.
+            if !timelineKeys.isEmpty && isImageSource {
+                timelineEnabled = true
+                scrubTimeline(to: 0)
+            }
         }
         markChainDirty()
     }

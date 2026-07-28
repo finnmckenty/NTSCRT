@@ -98,6 +98,13 @@ for the test run only (no `sudo xcode-select` needed) and uses its own scratch
 path, since the two toolchains can't share a build database. Plain
 `swift test` works too if `xcode-select -p` already points at Xcode.
 
+## Bundled presets
+
+Drop a `.json` look preset into `presets/` and rebuild — `wrap-app.sh` and
+`make-release.sh` copy the folder into `Contents/Resources/presets`, and the
+app lists whatever it finds there under Save/Load in the Preset menu, named
+after the file. No code change needed to add one.
+
 ## Dev hooks (env vars)
 
 For iteration and headless/screenshot verification:
@@ -124,6 +131,8 @@ For iteration and headless/screenshot verification:
 - `CRT_PANEL_BENCH=1` — time showing/hiding each VHS group's children and exit (`CRT_PANEL_BENCH_ORDER=a,b,c` picks the groups). Collapsing near the TOP of the panel costs more, since every row below is re-laid out — measured 40 ms for the first group vs ~9 ms mid-list
 - `CRT_NO_HOUSE_ORDER=1` — keep ntsc-rs's own setting order (Intensity not hoisted), for that A/B
 - `CRT_DUMP_NTSC_LAYOUT=1` — print the NTSC panel's grouping/label tree and exit (verifies `NtscSetting.houseLayout`)
+- `CRT_LOAD_BUILTIN=<name>` — list the bundled presets, load one by name, report what it restored (and whether it opened the timeline), then exit
+- `CRT_LOOK_PRESETS=<dir>` — override where bundled look presets are read from
 - `CRT_PRESET_ROUNDTRIP=<out.json>` — save a preset with a keyframed timeline, wipe the state, load it back, and assert duration/frame rate/keyframe times/easings/captured values all survived; prints PASS/FAIL and exits
 - `CRT_TL_AUTOKEY_TEST=1` — assert the auto-key rules (edit on a keyframe rewrites it, edits between keyframes don't, scrubbing never mutates), print PASS/FAIL, exit
 - `CRT_COMPARE_X=<0…1>` — place the compare divider at launch (edge-case captures)

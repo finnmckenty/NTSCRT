@@ -68,6 +68,21 @@ enum Paths {
         throw Error.notFound("slang-shaders (set CRT_PRESETS or init the Vendor/slang-shaders submodule)")
     }
 
+    /// Folder of bundled look presets (the JSON files the Preset menu lists).
+    /// Shipped in Resources/presets; in dev it's the repo's presets/ folder.
+    /// Optional — the menu just shows Save/Load without it.
+    static func lookPresetsRoot() -> URL? {
+        if let env = ProcessInfo.processInfo.environment["CRT_LOOK_PRESETS"] {
+            let url = URL(fileURLWithPath: env)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        if let r = resourcesURL(name: "presets") { return r }
+        for candidate in candidates(suffix: "presets") {
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+
     private static func candidates(suffix: String) -> [URL] {
         var bases: [URL] = []
         bases.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath))

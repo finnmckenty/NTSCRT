@@ -24,6 +24,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/NTSCRT"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/librashader.dylib"
 cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Bundled look presets: whatever is in presets/ at build time shows up in the
+# Preset menu, so adding one is just dropping a .json file in there.
+if [[ -d presets ]]; then
+  mkdir -p "$APP/Contents/Resources/presets"
+  cp presets/*.json "$APP/Contents/Resources/presets/" 2>/dev/null || true
+fi
 # Optional VHS stage dylib (the app runs without it).
 if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
   cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/ntscrs_capi.dylib"

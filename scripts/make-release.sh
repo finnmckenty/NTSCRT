@@ -71,6 +71,12 @@ cp .build/crt-app-universal "$APP/Contents/MacOS/NTSCRT"
 cp Vendor/librashader/librashader.dylib "$APP/Contents/Frameworks/"
 cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/"
 cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Bundled look presets: whatever is in presets/ at build time shows up in the
+# Preset menu, so adding one is just dropping a .json file in there.
+if [[ -d presets ]]; then
+  mkdir -p "$APP/Contents/Resources/presets"
+  cp presets/*.json "$APP/Contents/Resources/presets/" 2>/dev/null || true
+fi
 install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/NTSCRT" 2>/dev/null || true
 
 # Releases ship universal - refuse to build a partial one by accident.

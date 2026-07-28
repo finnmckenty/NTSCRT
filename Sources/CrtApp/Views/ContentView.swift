@@ -14,6 +14,8 @@ struct ContentView: View {
     @State private var paletteVisible = true
     @State private var palettePinned = false   // pointer is over the palette itself
     @State private var paletteRect: CGRect = .zero
+    /// Presets shipped in the app's presets folder, listed under Save/Load.
+    private let builtInPresets = BuiltInPreset.discover()
     private let hoverLog = ProcessInfo.processInfo.environment["CRT_HOVER_LOG"] == "1"
     /// Fade bookkeeping lives in a plain class so per-mouse-move updates
     /// don't invalidate the view body.
@@ -118,7 +120,7 @@ struct ContentView: View {
                 || env["CRT_EXPORT_FORMAT"] != nil || env["CRT_NTSC_SET"] != nil
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
-                || env["CRT_PRESET_ROUNDTRIP"] != nil
+                || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
@@ -144,6 +146,22 @@ struct ContentView: View {
             }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
+        // CRT_LOAD_BUILTIN=<name>: load a bundled preset and report what
+        // came back, including whether it opened the timeline.
+        if let want = env["CRT_LOAD_BUILTIN"] {
+            let found = BuiltInPreset.discover()
+            print("BUILTIN discovered: \(found.map(\.name))")
+            guard let preset = found.first(where: { $0.name == want }) else {
+                print("BUILTIN FAIL: no preset named \(want)"); exit(1)
+            }
+            do { try state.loadLook(from: preset.url) } catch {
+                print("BUILTIN FAIL load: \(error)"); exit(1)
+            }
+            print("BUILTIN loaded \(preset.name): keys=\(state.timelineKeys.count) duration=\(state.timelineDuration) fps=\(state.timelineFPS) timelineOpen=\(state.timelineEnabled)")
+            let ok = !state.timelineKeys.isEmpty && state.timelineEnabled
+            print(ok ? "BUILTIN-PASS" : "BUILTIN-FAIL (keyframed preset did not open the timeline)")
+            exit(ok ? 0 : 1)
+        }
         // CRT_PRESET_ROUNDTRIP=<path>: save a preset with a keyframed
         // timeline, wipe the state, load it back, and assert everything
         // returned — duration, frame rate, and each key's time, easing and
@@ -540,6 +558,12 @@ struct ContentView: View {
             Menu {
                 Button("Save Preset…") { savePreset() }
                 Button("Load Preset…") { loadPreset() }
+                if !builtInPresets.isEmpty {
+                    Divider()
+                    ForEach(builtInPresets) { preset in
+                        Button(preset.name) { load(preset.url) }
+                    }
+                }
             } label: {
                 Label("Preset", systemImage: "doc.badge.gearshape")
                     .labelStyle(.titleAndIcon)
@@ -600,6 +624,10 @@ struct ContentView: View {
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        load(url)
+    }
+
+    private func load(_ url: URL) {
         do {
             try state.loadLook(from: url)
         } catch {
