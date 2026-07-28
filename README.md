@@ -1,6 +1,6 @@
 # NTSCRT
 
-![NTSCRT — full VHS + CRT pipeline on the left of the split, untouched source on the right](docs/header.webp)
+![NTSCRT — the full NTSC + CRT pipeline on the left of the compare split, untouched source on the right, with a keyframed animation on the timeline below](docs/header.webp)
 
 **Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through a real analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) — composite artifacts, tape noise, head switching) and then through RetroArch's CRT shaders (via [librashader](https://github.com/SnowflakePowered/librashader) — scanlines, phosphor masks, glow), frame-identical to RetroArch itself.
 
