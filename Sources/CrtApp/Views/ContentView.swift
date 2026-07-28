@@ -118,6 +118,7 @@ struct ContentView: View {
                 || env["CRT_EXPORT_FORMAT"] != nil || env["CRT_NTSC_SET"] != nil
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
+                || env["CRT_PRESET_ROUNDTRIP"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
@@ -143,6 +144,70 @@ struct ContentView: View {
             }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
+        // CRT_PRESET_ROUNDTRIP=<path>: save a preset with a keyframed
+        // timeline, wipe the state, load it back, and assert everything
+        // returned — duration, frame rate, and each key's time, easing and
+        // captured values.
+        if let path = env["CRT_PRESET_ROUNDTRIP"] {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
+                let d = detail()
+                print("PRESET \(ok ? "PASS" : "FAIL") \(label)\(d.isEmpty ? "" : "  — \(d)")")
+                if !ok { failures += 1 }
+            }
+            state.timelineEnabled = true
+            state.timelineDuration = 7.5
+            state.timelineFPS = 12
+            state.scrubTimeline(to: 0.25)
+            state.setNtscValue("composite_preemphasis", 1.75)
+            state.setKeyframeAtPlayhead()
+            state.scrubTimeline(to: 0.9)
+            state.setNtscValue("composite_preemphasis", 0.5)
+            state.setKeyframeAtPlayhead()
+            state.setKeyframeEasing(id: state.timelineKeys[0].id, .easeInOut)
+            let before = state.timelineKeys
+            let firstParam = state.paramDescriptors.first?.name
+            let beforeShader = firstParam.flatMap { before[0].shaderParams[$0] }
+
+            let url = URL(fileURLWithPath: path)
+            do { try state.saveLook(to: url) } catch {
+                print("PRESET FAIL save: \(error)"); exit(1)
+            }
+            // Wipe, so anything that survives really came from the file.
+            state.timelineKeys = []
+            state.timelineDuration = 1
+            state.timelineFPS = 60
+            state.timelineEnabled = false
+            do { try state.loadLook(from: url) } catch {
+                print("PRESET FAIL load: \(error)"); exit(1)
+            }
+
+            check("duration restored", state.timelineDuration == 7.5, "\(state.timelineDuration)")
+            check("frame rate restored", state.timelineFPS == 12, "\(state.timelineFPS)")
+            check("timeline re-enabled", state.timelineEnabled)
+            check("keyframe count restored", state.timelineKeys.count == before.count,
+                  "\(state.timelineKeys.count) vs \(before.count)")
+            if state.timelineKeys.count == before.count {
+                for (i, k) in state.timelineKeys.enumerated() {
+                    check("key \(i) time", abs(k.t - before[i].t) < 1e-9, "\(k.t) vs \(before[i].t)")
+                    check("key \(i) easing", k.easing == before[i].easing,
+                          "\(k.easing.rawValue) vs \(before[i].easing.rawValue)")
+                    let ntsc = (k.ntscValues["composite_preemphasis"] as? NSNumber)?.doubleValue
+                    let want = (before[i].ntscValues["composite_preemphasis"] as? NSNumber)?.doubleValue
+                    check("key \(i) VHS value", ntsc == want, "\(ntsc ?? -1) vs \(want ?? -1)")
+                    check("key \(i) shader param count",
+                          k.shaderParams.count == before[i].shaderParams.count,
+                          "\(k.shaderParams.count) vs \(before[i].shaderParams.count)")
+                }
+                if let firstParam, let beforeShader {
+                    check("key 0 shader value",
+                          state.timelineKeys[0].shaderParams[firstParam] == beforeShader,
+                          "\(firstParam)")
+                }
+            }
+            print(failures == 0 ? "PRESET-ROUNDTRIP-PASS" : "PRESET-ROUNDTRIP-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         // CRT_PANEL_BENCH=1: time a show/hide of each VHS group's children.
         // Toggling a group's boolean adds/removes exactly the subtree that
         // collapsing it does, so this measures collapse cost headlessly.
