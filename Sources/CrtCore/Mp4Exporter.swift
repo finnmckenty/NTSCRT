@@ -78,10 +78,14 @@ public final class Mp4Exporter {
     /// `ntscSettingsJSON` non-nil enables the ntsc-rs stage per frame (the
     /// exporter builds its own NtscStage so the preview's instance is never
     /// touched off the main thread).
+    /// - Parameter frameParams: optional per-frame values (the keyframe
+    ///   timeline). Called with (frameIndex, totalFrames) on the export
+    ///   thread; must be self-contained.
     public func export(source: VideoSource,
                        paramValues: [String: Float],
                        settings: Settings,
                        ntscSettingsJSON: String? = nil,
+                       frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? = nil,
                        progress: @escaping @Sendable (Double) -> Void) async throws {
 
         var ntscStage: NtscStage? = nil
@@ -219,6 +223,14 @@ public final class Mp4Exporter {
                     return
                 }
 
+                if let perFrame = frameParams?(frameIndex, totalFrames) {
+                    if let shader = perFrame.shader {
+                        for (n, v) in shader { try? chain.setParameter(n, value: v) }
+                    }
+                    if let json = perFrame.ntscJSON, let stage = ntscStage {
+                        try stage.setSettingsJSON(json)
+                    }
+                }
                 guard let cb = self.context.queue.makeCommandBuffer() else {
                     throw Error.encodeFailed("commandBuffer")
                 }

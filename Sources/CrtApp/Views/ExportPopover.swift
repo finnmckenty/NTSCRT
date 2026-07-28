@@ -170,6 +170,16 @@ struct ExportPopover: View {
         state.timelineEnabled && !state.timelineKeys.isEmpty
     }
 
+    /// Per-frame keyframe values for a video export, or nil when nothing is
+    /// keyed (then the whole clip uses the current settings, as before).
+    private var videoFrameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? {
+        guard hasKeyframes, let ev = state.makeTimelineEvaluator() else { return nil }
+        return { i, total in
+            let t = total > 1 ? Double(i) / Double(total - 1) : 0
+            return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+        }
+    }
+
     private var buttonLabel: String {
         if state.exportWorking { return "Exporting…" }
         let name = state.exportFormat.buttonName
@@ -379,7 +389,8 @@ struct ExportPopover: View {
                 if let vs = videoSource {
                     try await exporter.exportVideo(source: vs, paramValues: params,
                                                    settings: settings,
-                                                   ntscSettingsJSON: ntscJSON) { p in
+                                                   ntscSettingsJSON: ntscJSON,
+                                                   frameParams: videoFrameParams) { p in
                         Task { @MainActor in state.exportProgress = p }
                     }
                 } else {
@@ -529,7 +540,8 @@ struct ExportPopover: View {
             do {
                 try await exporter.export(source: vs, paramValues: params,
                                           settings: settings,
-                                          ntscSettingsJSON: ntscJSON) { p in
+                                          ntscSettingsJSON: ntscJSON,
+                                          frameParams: videoFrameParams) { p in
                     Task { @MainActor in state.exportProgress = p }
                 }
                 await MainActor.run {

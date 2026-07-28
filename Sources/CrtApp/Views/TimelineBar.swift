@@ -42,12 +42,12 @@ struct TimelineBar: View {
             Button {
                 state.toggleTimelinePreview()
             } label: {
-                Image(systemName: state.timelinePlaying ? "pause.fill" : "play.fill")
+                Image(systemName: (state.timelinePlaying || state.videoPlaying) ? "pause.fill" : "play.fill")
                     .font(.system(size: 14))
                     .frame(width: 20, height: 20)
             }
             .buttonStyle(.borderless)
-            .disabled(state.exportInProgress || state.timelineKeys.isEmpty)
+            .disabled(state.exportInProgress || (state.timelineKeys.isEmpty && state.videoSource == nil))
             .tooltip(state.timelinePlaying ? "Pause"
                      : "Preview the keyframe animation in the preview (loops)")
 
@@ -77,29 +77,38 @@ struct TimelineBar: View {
 
             Spacer()
 
-            Text(String(format: "%.2f s", state.playheadT * state.timelineDuration))
+            Text(String(format: "%.2f s", state.playheadT * state.effectiveTimelineDuration))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
 
             Divider().frame(height: 14)
 
-            HStack(spacing: 4) {
-                Text("Duration").font(.caption).foregroundStyle(.secondary)
-                NumericField(value: $state.timelineDuration, range: 0.5...600, width: 46)
-                Text("s").font(.caption).foregroundStyle(.secondary)
-            }
-            .tooltip("Video duration. Keyframes are proportional — changing the duration stretches the whole animation.")
+            if state.videoSource == nil {
+                HStack(spacing: 4) {
+                    Text("Duration").font(.caption).foregroundStyle(.secondary)
+                    NumericField(value: $state.timelineDuration, range: 0.5...600, width: 46)
+                    Text("s").font(.caption).foregroundStyle(.secondary)
+                }
+                .tooltip("Video duration. Keyframes are proportional — changing the duration stretches the whole animation.")
 
-            Picker("", selection: $state.timelineFPS) {
-                Text("12 fps").tag(12)
-                Text("24 fps").tag(24)
-                Text("30 fps").tag(30)
-                Text("60 fps").tag(60)
+                Picker("", selection: $state.timelineFPS) {
+                    Text("12 fps").tag(12)
+                    Text("24 fps").tag(24)
+                    Text("30 fps").tag(30)
+                    Text("60 fps").tag(60)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .tooltip("Frame rate for the exported video")
+            } else {
+                // A clip brings its own length and frame rate.
+                Text(String(format: "%.2f s  ·  %d fps",
+                            state.effectiveTimelineDuration, state.effectiveTimelineFPS))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .tooltip("Length and frame rate come from the clip. Keyframes are positioned proportionally along it.")
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
-            .tooltip("Frame rate for the exported video")
         }
     }
 
@@ -153,7 +162,7 @@ struct TimelineBar: View {
 
     private func ticks(width w: CGFloat) -> some View {
         // One label per second while they fit; otherwise thin out.
-        let duration = state.timelineDuration
+        let duration = state.effectiveTimelineDuration
         let step = max(1.0, (duration / max(1, Double(Int(w / 60)))).rounded(.up))
         let marks = stride(from: 0.0, through: duration, by: step).map { $0 }
         return ForEach(marks, id: \.self) { s in
@@ -225,7 +234,7 @@ struct TimelineBar: View {
                     if selectedKey == key.id { selectedKey = nil }
                 }
             }
-            .tooltip("Keyframe at \(String(format: "%.2fs", key.t * state.timelineDuration)) — drag to move, click to jump here")
+            .tooltip("Keyframe at \(String(format: "%.2fs", key.t * state.effectiveTimelineDuration)) — drag to move, click to jump here")
     }
 
     /// Easing dropdown under each keyframe. Chips stagger onto a second row

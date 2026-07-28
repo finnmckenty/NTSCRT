@@ -94,10 +94,13 @@ struct ContentView: View {
                     }
                 }
 
-                if state.timelineEnabled && state.isImageSource {
+                // On a video the timeline replaces the transport — it has
+                // the same play button and scrubber, plus the keyframes.
+                if state.timelineEnabled && state.timelineAvailable {
                     TimelineBar()
+                } else {
+                    TransportBar()
                 }
-                TransportBar()
             }
             .frame(minWidth: 480, minHeight: 360)
         }
@@ -121,6 +124,7 @@ struct ContentView: View {
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
                 || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
+                || env["CRT_VIDEO_TL_TEST"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
@@ -146,6 +150,78 @@ struct ContentView: View {
             }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
+        // CRT_VIDEO_TL_TEST=<out.gif>: keyframe a VIDEO source and render it,
+        // then report whether the animation actually varied across the clip.
+        if let out = env["CRT_VIDEO_TL_TEST"] {
+            guard let vs = state.videoSource else {
+                print("VIDEOTL FAIL: source is not a video"); exit(1)
+            }
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
+                let d = detail()
+                print("VIDEOTL \(ok ? "PASS" : "FAIL") \(label)\(d.isEmpty ? "" : "  — \(d)")")
+                if !ok { failures += 1 }
+            }
+            check("timeline available for video", state.timelineAvailable)
+            state.timelineEnabled = true
+            check("timeline length comes from the clip",
+                  abs(state.effectiveTimelineDuration - Double(vs.totalFrames) / Double(vs.frameRate)) < 0.01,
+                  "\(state.effectiveTimelineDuration)s")
+
+            // Scrubbing the timeline must move the video frame with it.
+            state.scrubTimeline(to: 0.5)
+            let midFrame = state.currentFrameIndex
+            check("scrubbing the timeline seeks the clip",
+                  midFrame > 0 && midFrame < vs.totalFrames - 1, "frame \(midFrame)")
+            check("playhead quantizes to that frame",
+                  abs(state.playheadT - Double(midFrame) / Double(vs.totalFrames - 1)) < 1e-9)
+
+            // Key a big swing: clean at the start, hammered at the end.
+            state.scrubTimeline(to: 0)
+            state.setNtscValue("composite_noise_intensity", 0.0)
+            state.setKeyframeAtPlayhead()
+            state.scrubTimeline(to: 1)
+            state.setNtscValue("composite_noise_intensity", 0.9)
+            state.setKeyframeAtPlayhead()
+            check("two keyframes on a video", state.timelineKeys.count == 2,
+                  "\(state.timelineKeys.count)")
+
+            // Auto-key on a video: park on a key and edit it.
+            state.scrubTimeline(to: 0)
+            state.setNtscValue("composite_noise_intensity", 0.25)
+            let keyed = (state.timelineKeys[0].ntscValues["composite_noise_intensity"] as? NSNumber)?.doubleValue
+            check("editing while parked rewrites the key (half-frame tolerance)",
+                  keyed == 0.25, "stored \(keyed ?? -1)")
+
+            guard let ev = state.makeTimelineEvaluator() else {
+                print("VIDEOTL FAIL: no evaluator"); exit(1)
+            }
+            let a = (ev.ntscValues(at: 0)["composite_noise_intensity"] as? NSNumber)?.doubleValue ?? -1
+            let b = (ev.ntscValues(at: 1)["composite_noise_intensity"] as? NSNumber)?.doubleValue ?? -1
+            check("animation spans the clip", abs(b - a) > 0.5, "\(a) -> \(b)")
+
+            let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
+            let settings = GifExporter.Settings(
+                outputURL: URL(fileURLWithPath: out), width: 240, height: 180, fps: 8,
+                downscale: state.downscaleSpec, presetPath: preset.path)
+            let ntscJSON = state.ntscStage?.settingsJSON()
+            do {
+                try await GifExporter(context: state.context).exportVideo(
+                    source: vs, paramValues: state.paramValues, settings: settings,
+                    ntscSettingsJSON: ntscJSON,
+                    frameParams: { i, total in
+                        let t = total > 1 ? Double(i) / Double(total - 1) : 0
+                        return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+                    },
+                    progress: { _ in })
+                let bytes = (try? FileManager.default.attributesOfItem(atPath: out)[.size] as? Int) ?? 0
+                check("keyframed video export wrote a file", (bytes ?? 0) > 10_000, "\(bytes ?? 0) bytes")
+            } catch {
+                check("keyframed video export", false, "\(error)")
+            }
+            print(failures == 0 ? "VIDEOTL-ALL-PASS" : "VIDEOTL-FAILURES \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         // CRT_LOAD_BUILTIN=<name>: load a bundled preset and report what
         // came back, including whether it opened the timeline.
         if let want = env["CRT_LOAD_BUILTIN"] {
@@ -552,8 +628,8 @@ struct ContentView: View {
                     .labelStyle(.titleAndIcon)
             }
             .toggleStyle(.button)
-            .disabled(!state.isImageSource)
-            .help("Keyframe-animate the VHS and shader parameters over time and export the result as video (image sources)")
+            .disabled(!state.timelineAvailable)
+            .help("Keyframe-animate the NTSC and CRT parameters over time and export the result as video")
 
             Menu {
                 Button("Save Preset…") { savePreset() }

@@ -130,6 +130,7 @@ public final class GifExporter {
                             paramValues: [String: Float],
                             settings: Settings,
                             ntscSettingsJSON: String? = nil,
+                            frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? = nil,
                             progress: @escaping @Sendable (Double) -> Void) async throws {
         let sourceFPS = Double(max(1, source.frameRate))
         let step = max(1.0, sourceFPS / Double(max(1, settings.fps)))
@@ -151,6 +152,14 @@ public final class GifExporter {
             while written < outFrames, let frame = reader.nextFrame() {
                 // Keep the frame nearest each output timestamp.
                 if Double(sourceIndex) >= nextWanted {
+                    if let perFrame = frameParams?(written, outFrames) {
+                        if let shader = perFrame.shader {
+                            for (n, v) in shader { try? ctx.chain.setParameter(n, value: v) }
+                        }
+                        if let json = perFrame.ntscJSON, let stage = ctx.ntscStage {
+                            try stage.setSettingsJSON(json)
+                        }
+                    }
                     let image = try ctx.renderFrame(source: frame.texture,
                                                     frameIndex: written + 1,
                                                     pipeline: pipeline,

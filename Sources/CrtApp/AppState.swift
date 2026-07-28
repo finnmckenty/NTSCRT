@@ -77,6 +77,9 @@ final class AppState {
                 do {
                     let tex = try await vs.frame(atIndex: next)
                     self.sourceTexture = tex
+                    // The playhead follows playback, and any keyframed
+                    // animation is applied for this frame.
+                    self.applyTimeline(atFrame: next)
                     self.tickFrame()          // VHS noise/interlace advance with the video
                     self.markChainDirty()
                 } catch {
@@ -170,8 +173,10 @@ final class AppState {
 
     // MARK: - timeline (keyframe animation, image sources → video)
 
-    /// Timeline mode: animate parameters over time from a still image and
-    /// render the result as a video. Image sources only.
+    /// Timeline mode: animate parameters over time and render the result as
+    /// video. On a still the length is ours to choose; on a video the clip
+    /// supplies it, and the playhead IS the video position — one time axis,
+    /// not two disagreeing scrubbers.
     var timelineEnabled: Bool = false {
         didSet { if !timelineEnabled { stopTimelinePreview() } }
     }
@@ -197,8 +202,42 @@ final class AppState {
                                     downscale: downscaleSpec)
     }
 
+    /// Frames the timeline spans. A video's own frames, or the chosen
+    /// duration × frame rate for a still.
     var timelineTotalFrames: Int {
-        max(1, Int((timelineDuration * Double(timelineFPS)).rounded()))
+        if let vs = videoSource { return max(1, vs.totalFrames) }
+        return max(1, Int((timelineDuration * Double(timelineFPS)).rounded()))
+    }
+
+    /// Length in seconds — the clip's for a video, the chosen one otherwise.
+    var effectiveTimelineDuration: Double {
+        if let vs = videoSource {
+            return Double(vs.totalFrames) / Double(max(1, vs.frameRate))
+        }
+        return timelineDuration
+    }
+
+    /// Frame rate the timeline runs at (a video's own; ours for a still).
+    var effectiveTimelineFPS: Int {
+        if let vs = videoSource { return max(1, Int(Double(vs.frameRate).rounded())) }
+        return timelineFPS
+    }
+
+    /// Timelines are available for stills and video alike.
+    var timelineAvailable: Bool { sourceKind != nil }
+
+    /// Normalized position of a video frame.
+    private func normalizedTime(forFrame index: Int) -> Double {
+        let last = max(1, timelineTotalFrames - 1)
+        return min(1, max(0, Double(index) / Double(last)))
+    }
+
+    /// How close the playhead must be to a keyframe to count as parked on it.
+    /// A still can land exactly; video time is quantized to frames, so half a
+    /// frame is as close as it gets.
+    private var parkedTolerance: Double {
+        guard videoSource != nil else { return 1e-6 }
+        return 0.5 / Double(max(1, timelineTotalFrames - 1))
     }
 
     /// Value-captured evaluator for scrubbing and export. nil when there are
@@ -230,11 +269,29 @@ final class AppState {
     /// Replaces an existing key sitting (nearly) on the playhead — that's
     /// the only way values are ever keyed; scrubbing and slider edits never
     /// auto-key.
+    /// Move the playhead to a video frame and apply the animation there,
+    /// without seeking (the caller already has the frame).
+    private func applyTimeline(atFrame index: Int) {
+        playheadT = normalizedTime(forFrame: index)
+        guard timelineEnabled, let ev = makeTimelineEvaluator() else { return }
+        withAutoKeySuppressed {
+            setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
+            applyNtscValues(ev.ntscValues(at: playheadT))
+        }
+    }
+
+    /// Keep the playhead in step when the transport moves the frame by other
+    /// means (scrubber, arrow keys, load).
+    func syncPlayheadToCurrentFrame() {
+        guard videoSource != nil else { return }
+        applyTimeline(atFrame: currentFrameIndex)
+    }
+
     func setKeyframeAtPlayhead() {
         let snapshot = Keyframe(t: playheadT,
                                 shaderParams: paramValues,
                                 ntscValues: ntscValues)
-        if let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < 0.005 }) {
+        if let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < max(0.005, parkedTolerance) }) {
             var k = timelineKeys[i]
             k.shaderParams = snapshot.shaderParams
             k.ntscValues = snapshot.ntscValues
@@ -271,6 +328,13 @@ final class AppState {
            abs(near.t - target) < 0.004 {
             target = near.t
         }
+        // On a video the playhead and the transport are the same thing:
+        // moving it seeks the clip, and time quantizes to whole frames.
+        if let vs = videoSource {
+            let frame = Int((target * Double(max(1, vs.totalFrames - 1))).rounded())
+            target = normalizedTime(forFrame: frame)
+            if frame != currentFrameIndex { currentFrameIndex = frame }
+        }
         playheadT = target
         guard timelineEnabled, let ev = makeTimelineEvaluator() else { return }
         // Applying interpolated values must never look like a user edit.
@@ -301,12 +365,15 @@ final class AppState {
     /// baking those into a keyframe would drag it toward its neighbour.
     private func autoKeyIfParked() {
         guard timelineEnabled, !suppressAutoKey, !timelinePlaying, !exportInProgress else { return }
-        guard let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < 1e-6 }) else { return }
+        guard let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < parkedTolerance })
+        else { return }
         timelineKeys[i].shaderParams = paramValues
         timelineKeys[i].ntscValues = ntscValues
     }
 
     func toggleTimelinePreview() {
+        // A video plays through its own transport; the timeline just follows.
+        if videoSource != nil { togglePlayback(); return }
         if timelinePlaying { stopTimelinePreview(); return }
         guard timelineEnabled, isImageSource, !exportInProgress else { return }
         timelinePlaying = true
@@ -590,6 +657,9 @@ final class AppState {
         do {
             let tex = try await vs.frame(atIndex: currentFrameIndex)
             sourceTexture = tex
+            // Scrubbing the transport moves the playhead too, so a keyframed
+            // animation follows the frame you land on.
+            applyTimeline(atFrame: currentFrameIndex)
             markChainDirty()
         } catch {
             sourceError = error.localizedDescription
@@ -805,12 +875,12 @@ final class AppState {
                     return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc)
                 }.sorted { $0.t < $1.t }
             }
-            if let e = t["enabled"] as? Bool { timelineEnabled = e && isImageSource }
+            if let e = t["enabled"] as? Bool { timelineEnabled = e && timelineAvailable }
             // A preset carrying keyframes opens the timeline, whether or not
             // it was open when the preset was saved — otherwise the animation
             // is loaded but invisible, and the preset looks like it did
             // nothing.
-            if !timelineKeys.isEmpty && isImageSource {
+            if !timelineKeys.isEmpty && timelineAvailable {
                 timelineEnabled = true
                 scrubTimeline(to: 0)
             }
