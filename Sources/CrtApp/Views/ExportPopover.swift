@@ -110,6 +110,17 @@ struct ExportPopover: View {
                 .fixedSize()
             }
 
+            if !state.exportFormat.isGIF {
+                HStack(spacing: 6) {
+                    Text("Loop").font(.caption)
+                    IntField(value: $state.exportLoopCount, range: 1...100, width: 44)
+                    Text(state.exportLoopCount == 1 ? "× (plays once)"
+                                                    : "× (\(loopedLengthText))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .tooltip("Repeat the content this many times in the exported file, so it runs longer somewhere that won't loop it for you. 1 plays through once. GIFs loop forever on their own, so this doesn't apply to them.")
+            }
+
             Toggle("Snap size to scanline grid", isOn: $state.snapExportToScanlineGrid)
                 .toggleStyle(.checkbox)
                 .font(.caption)
@@ -164,6 +175,17 @@ struct ExportPopover: View {
         let f = DateFormatter()
         f.dateFormat = "dd-MM-yy HH.mm.ss"
         return f.string(from: Date())
+    }
+
+    /// Length of the export once looped, for the field's caption.
+    private var loopedLengthText: String {
+        let once = state.videoSource != nil
+            ? state.effectiveTimelineDuration
+            : state.timelineDuration
+        let total = once * Double(max(1, state.exportLoopCount))
+        return total >= 60
+            ? String(format: "%d:%04.1f total", Int(total) / 60, total.truncatingRemainder(dividingBy: 60))
+            : String(format: "%.1f s total", total)
     }
 
     private var hasKeyframes: Bool {
@@ -373,6 +395,8 @@ struct ExportPopover: View {
             ? state.ntscStage?.settingsJSON()
             : nil
         let videoSource = state.videoSource
+        // GIFs loop forever by themselves, so the animation spans the whole
+        // file rather than repeating in passes.
         let totalFrames = gifFrameCount
         let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
         let frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? =
@@ -456,7 +480,9 @@ struct ExportPopover: View {
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON()
             : nil
-        let totalFrames = state.timelineTotalFrames
+        let baseFrames = state.timelineTotalFrames
+        let loops = max(1, state.exportLoopCount)
+        let totalFrames = baseFrames * loops
         let fps = state.timelineFPS
 
         // Keyframes drive per-frame parameters; without keys the params hold
@@ -464,8 +490,11 @@ struct ExportPopover: View {
         let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
         let frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? =
             evaluator.map { ev in
-                { i, total in
-                    let t = total > 1 ? Double(i) / Double(total - 1) : 0
+                { i, _ in
+                    // Phase within the pass, so each loop replays the
+                    // animation instead of stretching it across all passes.
+                    let within = i % baseFrames
+                    let t = baseFrames > 1 ? Double(within) / Double(baseFrames - 1) : 0
                     return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
                 }
             }

@@ -41,9 +41,15 @@ public final class Mp4Exporter {
         public var codec: Codec
         /// Target average bitrate in bits/s (H.264/HEVC only; ProRes ignores it).
         public var averageBitrate: Int?
+        /// How many times the content plays through. 1 = once (normal).
+        /// Written as repeated passes so the file itself is longer — for
+        /// places that don't loop a video on playback.
+        public var loopCount: Int
         public init(outputURL: URL, outputWidth: Int, outputHeight: Int,
                     downscale: DownscaleSpec?, presetPath: String,
-                    codec: Codec = .h264, averageBitrate: Int? = nil) {
+                    codec: Codec = .h264, averageBitrate: Int? = nil,
+                    loopCount: Int = 1) {
+            self.loopCount = max(1, loopCount)
             self.outputURL = outputURL
             self.outputWidth = outputWidth
             self.outputHeight = outputHeight
@@ -72,6 +78,30 @@ public final class Mp4Exporter {
     public init(context: MetalContext) {
         self.context = context
         self.pipeline = Pipeline(context: context)
+    }
+
+    /// Copy an audio sample buffer with its timestamps shifted — needed when
+    /// the same audio is written more than once for a looped export.
+    static func offsetSampleBuffer(_ sb: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        var count: CMItemCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: 0, arrayToFill: nil,
+                                                     entriesNeededOut: &count) == noErr else { return nil }
+        var timings = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)
+        guard CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: count, arrayToFill: &timings,
+                                                     entriesNeededOut: nil) == noErr else { return nil }
+        for i in 0..<count {
+            timings[i].presentationTimeStamp = CMTimeAdd(timings[i].presentationTimeStamp, offset)
+            if timings[i].decodeTimeStamp.isValid {
+                timings[i].decodeTimeStamp = CMTimeAdd(timings[i].decodeTimeStamp, offset)
+            }
+        }
+        var out: CMSampleBuffer?
+        guard CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault,
+                                                    sampleBuffer: sb,
+                                                    sampleTimingEntryCount: count,
+                                                    sampleTimingArray: &timings,
+                                                    sampleBufferOut: &out) == noErr else { return nil }
+        return out
     }
 
     /// Run the export. Calls `progress(0...1)` as it goes. Async, throws.
@@ -146,6 +176,23 @@ public final class Mp4Exporter {
         var audioInput: AVAssetWriterInput?
         var audioOutput: AVAssetReaderTrackOutput?
         var audioReader: AVAssetReader?
+        // Each loop pass needs its own reader — an AVAssetReader can't rewind.
+        let asset = source.asset
+        let makeAudioReader: @Sendable () -> (reader: AVAssetReader, output: AVAssetReaderTrackOutput)? = {
+            guard let track = audioTracks.first,
+                  let r = try? AVAssetReader(asset: asset) else { return nil }
+            let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ])
+            guard r.canAdd(out) else { return nil }
+            r.add(out)
+            r.startReading()
+            return (r, out)
+        }
         if let audioTrack = audioTracks.first {
             let aReader = try AVAssetReader(asset: source.asset)
             let lpcmSettings: [String: Any] = [
@@ -182,6 +229,8 @@ public final class Mp4Exporter {
 
         let videoReader = try source.makeSequentialReader()
         let totalFrames = source.totalFrames
+        let loops = max(1, settings.loopCount)
+        let clipDuration = CMTime(seconds: source.durationSeconds, preferredTimescale: 600)
         var frameIndex = 0
 
         // Guard against scanline banding at small output sizes (ScanlineGrid).
@@ -213,17 +262,29 @@ public final class Mp4Exporter {
             // -- video task --
             group.addTask {
                 try await Task.detached { () throws -> Void in
+            var pass = 0
+            var reader = videoReader
+            var passFrame = 0
             while true {
                 if !videoInput.isReadyForMoreMediaData {
                     Thread.sleep(forTimeInterval: 0.005)
                     continue
                 }
-                guard let frame = videoReader.nextFrame() else {
+                guard let frame = reader.nextFrame() else {
+                    // End of this pass. Loop again from the top if asked,
+                    // with a fresh reader; the clip's own timestamps restart
+                    // at zero, so each pass is shifted by its duration.
+                    pass += 1
+                    if pass < loops, let next = try? source.makeSequentialReader() {
+                        reader = next
+                        passFrame = 0
+                        continue
+                    }
                     videoInput.markAsFinished()
                     return
                 }
 
-                if let perFrame = frameParams?(frameIndex, totalFrames) {
+                if let perFrame = frameParams?(passFrame, totalFrames) {
                     if let shader = perFrame.shader {
                         for (n, v) in shader { try? chain.setParameter(n, value: v) }
                     }
@@ -239,7 +300,7 @@ public final class Mp4Exporter {
                 if let stage = ntscStage {
                     frameInput = try self.pipeline.prepareChainInput(
                         source: frame.texture, downscale: frameDownscale,
-                        ntsc: stage, frameCount: frameIndex + 1)
+                        ntsc: stage, frameCount: passFrame + 1)
                     frameDownscale = nil
                 }
                 if let supersample {
@@ -286,7 +347,11 @@ public final class Mp4Exporter {
                 cb.commit()
                 cb.waitUntilCompleted()
 
-                if !adaptor.append(pb, withPresentationTime: frame.presentationTime) {
+                let pts = pass == 0
+                    ? frame.presentationTime
+                    : CMTimeAdd(frame.presentationTime,
+                                CMTimeMultiply(clipDuration, multiplier: Int32(pass)))
+                if !adaptor.append(pb, withPresentationTime: pts) {
                     throw Error.encodeFailed("adaptor.append: \(writer.error?.localizedDescription ?? "?")")
                 }
 
@@ -294,27 +359,44 @@ public final class Mp4Exporter {
                 CVMetalTextureCacheFlush(sharedCache, 0)
 
                     frameIndex += 1
-                    let p = min(1.0, Double(frameIndex) / Double(totalFrames))
+                    passFrame += 1
+                    let p = min(1.0, Double(frameIndex) / Double(totalFrames * loops))
                     progress(p)
                 }
                 }.value
             }
 
             // -- audio task (only if there's an audio track) --
-            if let audioInput, let audioOutput {
-                _ = audioReader   // keep reader alive
+            if let audioInput, let audioOutput, let firstAudioReader = audioReader {
+                let makeAudio = makeAudioReader
                 group.addTask {
                     try await Task.detached { () throws -> Void in
+                        var output = audioOutput
+                        var keepAlive: AVAssetReader? = firstAudioReader
+                        var pass = 0
                         while true {
                             if !audioInput.isReadyForMoreMediaData {
                                 Thread.sleep(forTimeInterval: 0.005)
                                 continue
                             }
-                            if let sb = audioOutput.copyNextSampleBuffer() {
-                                if !audioInput.append(sb) {
+                            if let sb = output.copyNextSampleBuffer() {
+                                // Later passes have to be shifted, or the
+                                // writer rejects timestamps that go backwards.
+                                let shifted = pass == 0
+                                    ? sb
+                                    : (Mp4Exporter.offsetSampleBuffer(
+                                        sb, by: CMTimeMultiply(clipDuration, multiplier: Int32(pass))) ?? sb)
+                                if !audioInput.append(shifted) {
                                     throw Error.encodeFailed("audio append: \(writer.error?.localizedDescription ?? "?")")
                                 }
                             } else {
+                                pass += 1
+                                if pass < loops, let next = makeAudio() {
+                                    keepAlive = next.reader
+                                    output = next.output
+                                    _ = keepAlive
+                                    continue
+                                }
                                 audioInput.markAsFinished()
                                 return
                             }

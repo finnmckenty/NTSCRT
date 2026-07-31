@@ -125,7 +125,7 @@ struct ContentView: View {
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
                 || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
-                || env["CRT_VIDEO_TL_TEST"] != nil || env["CRT_PLAY_BENCH"] != nil || env["CRT_PLAY_FRAME_CHECK"] != nil
+                || env["CRT_VIDEO_TL_TEST"] != nil || env["CRT_PLAY_BENCH"] != nil || env["CRT_LOOP_TEST"] != nil || env["CRT_STILL_LOOP_TEST"] != nil || env["CRT_PLAY_FRAME_CHECK"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
@@ -151,6 +151,49 @@ struct ContentView: View {
             }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
+        // CRT_STILL_LOOP_TEST=<out.mp4>: loop a still->video export.
+        if let out = env["CRT_STILL_LOOP_TEST"] {
+            guard let src = state.sourceTexture else { print("SLOOP FAIL"); exit(1) }
+            let loops = env["CRT_LOOP_N"].flatMap(Int.init) ?? 3
+            state.timelineDuration = 2; state.timelineFPS = 24
+            let base = state.timelineTotalFrames
+            let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
+            let settings = Mp4Exporter.Settings(
+                outputURL: URL(fileURLWithPath: out), outputWidth: 480, outputHeight: 360,
+                downscale: state.downscaleSpec, presetPath: preset.path,
+                codec: .h264, averageBitrate: 6_000_000)
+            do {
+                try await Mp4Exporter(context: state.context).exportStill(
+                    source: src, totalFrames: base * loops, fps: state.timelineFPS,
+                    paramValues: state.paramValues, settings: settings,
+                    ntscSettingsJSON: state.ntscStage?.settingsJSON(), progress: { _ in })
+                print("SLOOP wrote base=\(base) loops=\(loops) expectedFrames=\(base * loops)")
+                exit(0)
+            } catch { print("SLOOP FAIL: \(error)"); exit(1) }
+        }
+        // CRT_LOOP_TEST=<out.mp4>: export the loaded VIDEO twice through and
+        // report duration/frames so looping can be checked headlessly.
+        if let out = env["CRT_LOOP_TEST"] {
+            guard let vs = state.videoSource else { print("LOOP FAIL: not a video"); exit(1) }
+            let loops = env["CRT_LOOP_N"].flatMap(Int.init) ?? 2
+            let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
+            let settings = Mp4Exporter.Settings(
+                outputURL: URL(fileURLWithPath: out),
+                outputWidth: 480, outputHeight: 720,
+                downscale: state.downscaleSpec, presetPath: preset.path,
+                codec: .h264, averageBitrate: 6_000_000, loopCount: loops)
+            let ntscJSON = (state.ntscEnabled && state.ntscAvailable)
+                ? state.ntscStage?.settingsJSON() : nil
+            do {
+                try await Mp4Exporter(context: state.context).export(
+                    source: vs, paramValues: state.paramValues, settings: settings,
+                    ntscSettingsJSON: ntscJSON, progress: { _ in })
+                print("LOOP wrote \(out) loops=\(loops) sourceFrames=\(vs.totalFrames) sourceDuration=\(String(format: "%.2f", vs.durationSeconds))")
+                exit(0)
+            } catch {
+                print("LOOP FAIL: \(error)"); exit(1)
+            }
+        }
         // CRT_PLAY_FRAME_CHECK=<n>: play to frame n, then check that the
         // frame it decoded matches the SEEKED frame n more closely than its
         // neighbours. Compared by coarse luminance signature, not bytes: the

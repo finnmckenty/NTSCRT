@@ -649,6 +649,10 @@ final class AppState {
     /// supersample instead.
     var snapExportToScanlineGrid: Bool = false
     var exportQuality: ExportQuality = .high
+    /// How many times an exported video plays through. 1 = once. Written as
+    /// repeated passes so the file is genuinely longer — for places that
+    /// don't loop video on playback.
+    var exportLoopCount: Int = 1
     var exportStatus: String = ""
     var exportProgress: Double = 0
     var exportWorking: Bool = false
