@@ -133,6 +133,9 @@ For iteration and headless/screenshot verification:
 - `CRT_DUMP_NTSC_LAYOUT=1` — print the NTSC panel's grouping/label tree and exit (verifies `NtscSetting.houseLayout`)
 - `CRT_LOAD_BUILTIN=<name>` — list the bundled presets, load one by name, report what it restored (and whether it opened the timeline), then exit
 - `CRT_LOOK_PRESETS=<dir>` — override where bundled look presets are read from
+- `CRT_PLAY_BENCH=<seconds>` — play the loaded video and report the frame rate actually achieved (with `CRT_PERF_LOG=1`, also per-frame work vs wall clock)
+- `CRT_PLAY_FRAME_CHECK=<n>` — play to frame n, then verify the decoded frame matches the *seeked* frame n more closely than its neighbours (guards against the sequential decoder drifting out of step)
+- `CRT_FORCE_SEEK_DECODE=1` — decode playback frames by seeking to each one (the old, slow path; also what rotated tracks use)
 - `CRT_VIDEO_TL_TEST=<out.gif>` — keyframe a *video* source headlessly and assert the timeline follows the clip: length from the clip, scrubbing seeks it, playhead quantizes to frames, editing while parked rewrites the key (half-frame tolerance), and a keyframed export renders
 - `CRT_PRESET_ROUNDTRIP=<out.json>` — save a preset with a keyframed timeline, wipe the state, load it back, and assert duration/frame rate/keyframe times/easings/captured values all survived; prints PASS/FAIL and exits
 - `CRT_TL_AUTOKEY_TEST=1` — assert the auto-key rules (edit on a keyframe rewrites it, edits between keyframes don't, scrubbing never mutates), print PASS/FAIL, exit

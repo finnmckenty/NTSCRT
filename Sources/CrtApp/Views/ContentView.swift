@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import Metal
 import CrtCore
 
 struct ContentView: View {
@@ -124,7 +125,7 @@ struct ContentView: View {
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
                 || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
-                || env["CRT_VIDEO_TL_TEST"] != nil
+                || env["CRT_VIDEO_TL_TEST"] != nil || env["CRT_PLAY_BENCH"] != nil || env["CRT_PLAY_FRAME_CHECK"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
@@ -150,6 +151,81 @@ struct ContentView: View {
             }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
+        // CRT_PLAY_FRAME_CHECK=<n>: play to frame n, then check that the
+        // frame it decoded matches the SEEKED frame n more closely than its
+        // neighbours. Compared by coarse luminance signature, not bytes: the
+        // seek path renders via CGImage/sRGB while sequential decode hands
+        // back raw BGRA, so identical frames aren't byte-identical.
+        if let target = env["CRT_PLAY_FRAME_CHECK"].flatMap(Int.init) {
+            guard state.videoSource != nil else { print("FRAMECHK FAIL: not a video"); exit(1) }
+            func signature() -> [Double] {
+                guard let t = state.sourceTexture else { return [] }
+                let w = t.width, h = t.height, bpr = w * 4
+                var bytes = [UInt8](repeating: 0, count: h * bpr)
+                bytes.withUnsafeMutableBytes { raw in
+                    t.getBytes(raw.baseAddress!, bytesPerRow: bpr,
+                               from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                }
+                var sig: [Double] = []
+                let cells = 12
+                for gy in 0..<cells {
+                    for gx in 0..<cells {
+                        var sum = 0.0, n = 0
+                        for y in stride(from: gy * h / cells, to: (gy + 1) * h / cells, by: 8) {
+                            for x in stride(from: gx * w / cells, to: (gx + 1) * w / cells, by: 8) {
+                                let o = y * bpr + x * 4
+                                sum += Double(bytes[o]) + Double(bytes[o + 1]) + Double(bytes[o + 2])
+                                n += 3
+                            }
+                        }
+                        sig.append(n > 0 ? sum / Double(n) : 0)
+                    }
+                }
+                return sig
+            }
+            func distance(_ a: [Double], _ b: [Double]) -> Double {
+                guard a.count == b.count, !a.isEmpty else { return .infinity }
+                return zip(a, b).map { abs($0 - $1) }.reduce(0, +) / Double(a.count)
+            }
+            state.ntscEnabled = false
+            state.togglePlayback()
+            var spins = 0
+            while state.currentFrameIndex != target && spins < 400 {
+                try? await Task.sleep(for: .milliseconds(20)); spins += 1
+            }
+            state.stopPlayback()
+            try? await Task.sleep(for: .milliseconds(150))
+            let playedIndex = state.currentFrameIndex
+            let played = signature()
+
+            var best = (index: -1, dist: Double.infinity)
+            for candidate in (playedIndex - 2)...(playedIndex + 2) where candidate >= 0 {
+                state.currentFrameIndex = candidate
+                try? await Task.sleep(for: .milliseconds(350))
+                let d = distance(played, signature())
+                print(String(format: "FRAMECHK   vs seeked frame %d: distance %.3f", candidate, d))
+                if d < best.dist { best = (candidate, d) }
+            }
+            let ok = best.index == playedIndex
+            print("FRAMECHK played frame \(playedIndex); closest seeked frame is \(best.index)")
+            print(ok ? "FRAMECHK-PASS (playback and scrub agree on the frame)"
+                     : "FRAMECHK-FAIL (playback is showing a different frame)")
+            exit(ok ? 0 : 1)
+        }
+        // CRT_PLAY_BENCH=<seconds>: play the loaded video and report the
+        // frame rate actually achieved.
+        if let secs = env["CRT_PLAY_BENCH"].flatMap(Double.init) {
+            guard state.videoSource != nil else { print("PLAYBENCH FAIL: not a video"); exit(1) }
+            state.togglePlayback()
+            let start = state.currentFrameIndex
+            try? await Task.sleep(for: .seconds(secs))
+            let advanced = state.currentFrameIndex - start
+            let frames = advanced >= 0 ? advanced : advanced + (state.videoSource?.totalFrames ?? 0)
+            state.stopPlayback()
+            print(String(format: "PLAYBENCH %.1f fps (%d frames in %.1fs)",
+                         Double(frames) / secs, frames, secs))
+            exit(0)
+        }
         // CRT_VIDEO_TL_TEST=<out.gif>: keyframe a VIDEO source and render it,
         // then report whether the animation actually varied across the clip.
         if let out = env["CRT_VIDEO_TL_TEST"] {

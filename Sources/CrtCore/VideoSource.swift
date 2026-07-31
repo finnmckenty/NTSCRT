@@ -170,10 +170,37 @@ public final class VideoSource {
         }
     }
 
+    /// True when frames need the track's rotation applied. The sequential
+    /// reader hands back raw pixel buffers, so anything non-identity has to
+    /// go through the (much slower) image-generator path to stay upright.
+    public var needsPreferredTransform: Bool {
+        videoTrack.preferredTransform != .identity
+    }
+
+    /// Sequential reader positioned at a frame — the playback path.
+    ///
+    /// Decoding successive frames by seeking to each one re-decodes from the
+    /// preceding keyframe every time: measured 47 ms/frame on a 1176×1764
+    /// h264 clip versus 2.8 ms sequentially, which alone overruns a 24 fps
+    /// frame budget.
+    public func makeSequentialReader(startingAtFrame index: Int) throws -> SequentialReader {
+        try makeSequentialReader(startFrame: index)
+    }
+
     public func makeSequentialReader() throws -> SequentialReader {
+        try makeSequentialReader(startFrame: 0)
+    }
+
+    private func makeSequentialReader(startFrame: Int) throws -> SequentialReader {
         let reader: AVAssetReader
         do { reader = try AVAssetReader(asset: asset) }
         catch { throw Error.readerSetup("\(error)") }
+        // Must be set before reading starts (SequentialReader's init starts it).
+        if startFrame > 0 {
+            let start = CMTime(value: CMTimeValue(startFrame),
+                               timescale: CMTimeScale(frameRate.rounded()))
+            reader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
+        }
         let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true,

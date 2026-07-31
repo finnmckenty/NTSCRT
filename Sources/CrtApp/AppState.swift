@@ -47,6 +47,10 @@ final class AppState {
     var currentFrameIndex: Int = 0 {
         didSet {
             if currentFrameIndex != oldValue && !suppressFrameReload {
+                // Someone seeked (scrubber, timeline, keyboard): the
+                // sequential decoder is now positioned somewhere else, so
+                // drop it and let playback rebuild it where we landed.
+                playbackReader = nil
                 Task { await reloadVideoFrame() }
             }
         }
@@ -56,15 +60,37 @@ final class AppState {
 
     private(set) var videoPlaying: Bool = false
     private var playbackTask: Task<Void, Never>?
+    static let playLog = ProcessInfo.processInfo.environment["CRT_PERF_LOG"] != nil
+    /// CRT_FORCE_SEEK_DECODE=1: decode playback frames by seeking to each one
+    /// (the pre-0.9 path, and what a rotated track still needs).
+    static let forceSeekDecode = ProcessInfo.processInfo.environment["CRT_FORCE_SEEK_DECODE"] == "1"
+    static var playCount = 0
+    static var playWorkTotal = 0.0
+    static var playWallStart = ContinuousClock.now
     /// Set while the playback loop advances the index itself (it fetches
     /// frames directly, so the didSet reload would double-fetch).
     private var suppressFrameReload = false
+    /// Sequential decoder used while playing (nil when scrubbing, or on a
+    /// rotated track that needs the image generator's transform).
+    private var playbackReader: VideoSource.SequentialReader?
+    /// The frame currently on screen. Its texture is backed by this pixel
+    /// buffer, so it has to stay retained until the next frame replaces it.
+    private var playbackFrame: VideoSource.SequentialReader.Frame?
 
     func togglePlayback() {
         if videoPlaying { stopPlayback(); return }
-        guard videoSource != nil, !exportInProgress else { return }
+        guard let source = videoSource, !exportInProgress else { return }
         videoPlaying = true
+        // Decode sequentially while playing. Asking for each frame by time
+        // re-decodes from the preceding keyframe every time — measured 47 ms
+        // a frame on a 1176x1764 h264 clip versus 2.8 ms sequentially, which
+        // on its own blows a 24 fps budget. Rotated tracks still need the
+        // image generator, which applies the transform.
+        playbackReader = (source.needsPreferredTransform || Self.forceSeekDecode)
+            ? nil
+            : try? source.makeSequentialReader(startingAtFrame: currentFrameIndex + 1)
         playbackTask = Task { @MainActor [weak self] in
+            var deadline = ContinuousClock.now
             while let self, self.videoPlaying, !Task.isCancelled {
                 guard let vs = self.videoSource, !self.exportInProgress else {
                     self.stopPlayback(); return
@@ -75,8 +101,25 @@ final class AppState {
                 self.currentFrameIndex = next
                 self.suppressFrameReload = false
                 do {
-                    let tex = try await vs.frame(atIndex: next)
-                    self.sourceTexture = tex
+                    if !vs.needsPreferredTransform && !Self.forceSeekDecode {
+                        // Rebuild the decoder after a seek, or when wrapping
+                        // back to the start.
+                        if self.playbackReader == nil || next == 0 {
+                            self.playbackReader = try? vs.makeSequentialReader(startingAtFrame: next)
+                        }
+                        var frame = self.playbackReader?.nextFrame()
+                        if frame == nil {   // ran dry early: restart at this frame
+                            self.playbackReader = try? vs.makeSequentialReader(startingAtFrame: next)
+                            frame = self.playbackReader?.nextFrame()
+                        }
+                        guard let frame else { self.stopPlayback(); return }
+                        // Hold the frame: its texture is backed by the pixel
+                        // buffer, which must outlive the render that reads it.
+                        self.playbackFrame = frame
+                        self.sourceTexture = frame.texture
+                    } else {
+                        self.sourceTexture = try await vs.frame(atIndex: next)
+                    }
                     // The playhead follows playback, and any keyframed
                     // animation is applied for this frame.
                     self.applyTimeline(atFrame: next)
@@ -87,8 +130,35 @@ final class AppState {
                 }
                 let frameDuration = Duration.seconds(1.0 / Double(max(1, vs.frameRate)))
                 let elapsed = start.duration(to: .now)
-                if elapsed < frameDuration {
-                    try? await Task.sleep(for: frameDuration - elapsed)
+                if Self.playLog {
+                    let workMs = Double(elapsed.components.attoseconds) / 1e15
+                        + Double(elapsed.components.seconds) * 1000
+                    Self.playWorkTotal += workMs
+                    Self.playCount += 1
+                    if Self.playCount >= 24 {
+                        let wall = Self.playWallStart.duration(to: .now)
+                        let wallMs = Double(wall.components.attoseconds) / 1e15
+                            + Double(wall.components.seconds) * 1000
+                        fputs(String(format: "[play] %d frames: work %.1f ms/frame, wall %.1f ms/frame (target %.1f)\n",
+                                     Self.playCount, Self.playWorkTotal / Double(Self.playCount),
+                                     wallMs / Double(Self.playCount), 1000.0 / Double(vs.frameRate)), stderr)
+                        Self.playCount = 0; Self.playWorkTotal = 0; Self.playWallStart = .now
+                    }
+                }
+                // Pace to an absolute schedule. Sleeping "frameDuration minus
+                // work" each time re-bases on wake-up, so every overshoot —
+                // and Task.sleep on the main actor routinely overshoots by
+                // tens of ms — becomes permanent drift. Measured on a 24 fps
+                // clip: 0.7 ms of work per frame still yielded 66 ms frames.
+                deadline = deadline.advanced(by: frameDuration)
+                let now = ContinuousClock.now
+                if deadline > now {
+                    try? await Task.sleep(until: deadline, clock: .continuous)
+                } else if now - deadline > frameDuration {
+                    // More than a frame behind (a slow render, or the app was
+                    // backgrounded): give up on catching up and re-base,
+                    // rather than sprinting through frames.
+                    deadline = now
                 }
             }
         }
@@ -98,6 +168,7 @@ final class AppState {
         videoPlaying = false
         playbackTask?.cancel()
         playbackTask = nil
+        playbackReader = nil
     }
     var videoSource: VideoSource? {
         if case .video(let v) = sourceKind { return v }
