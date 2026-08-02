@@ -233,7 +233,7 @@ struct ContentView: View {
             state.ntscEnabled = false
             state.togglePlayback()
             var spins = 0
-            while state.currentFrameIndex != target && spins < 400 {
+            while state.currentFrameIndex < target && spins < 400 {
                 try? await Task.sleep(for: .milliseconds(20)); spins += 1
             }
             state.stopPlayback()
@@ -250,9 +250,12 @@ struct ContentView: View {
                 if d < best.dist { best = (candidate, d) }
             }
             let ok = best.index == playedIndex
-            print("FRAMECHK played frame \(playedIndex); closest seeked frame is \(best.index)")
-            print(ok ? "FRAMECHK-PASS (playback and scrub agree on the frame)"
-                     : "FRAMECHK-FAIL (playback is showing a different frame)")
+            let verdict = ok ? "FRAMECHK-PASS played \(playedIndex), closest seeked \(best.index)"
+                             : "FRAMECHK-FAIL played \(playedIndex), closest seeked \(best.index)"
+            print(verdict)
+            if let out = env["CRT_BENCH_OUT"] {
+                try? (verdict + "\n").write(toFile: out, atomically: true, encoding: .utf8)
+            }
             exit(ok ? 0 : 1)
         }
         // CRT_PLAY_BENCH=<seconds>: play the loaded video and report the
@@ -265,8 +268,14 @@ struct ContentView: View {
             let advanced = state.currentFrameIndex - start
             let frames = advanced >= 0 ? advanced : advanced + (state.videoSource?.totalFrames ?? 0)
             state.stopPlayback()
-            print(String(format: "PLAYBENCH %.1f fps (%d frames in %.1fs)",
-                         Double(frames) / secs, frames, secs))
+            _ = frames   // frame-index delta wraps on looping clips; displayed is the truth
+            let line = String(format: "PLAYBENCH displayed %.1f fps, dropped %d (in %.1fs)",
+                              Double(state.playbackDisplayed) / secs,
+                              state.playbackDropped, secs)
+            print(line)
+            if let out = env["CRT_BENCH_OUT"] {
+                try? (line + "\n").write(toFile: out, atomically: true, encoding: .utf8)
+            }
             exit(0)
         }
         // CRT_VIDEO_TL_TEST=<out.gif>: keyframe a VIDEO source and render it,

@@ -133,7 +133,8 @@ For iteration and headless/screenshot verification:
 - `CRT_DUMP_NTSC_LAYOUT=1` — print the NTSC panel's grouping/label tree and exit (verifies `NtscSetting.houseLayout`)
 - `CRT_LOAD_BUILTIN=<name>` — list the bundled presets, load one by name, report what it restored (and whether it opened the timeline), then exit
 - `CRT_LOOK_PRESETS=<dir>` — override where bundled look presets are read from
-- `CRT_PLAY_BENCH=<seconds>` — play the loaded video and report the frame rate actually achieved (with `CRT_PERF_LOG=1`, also per-frame work vs wall clock)
+- `CRT_PLAY_BENCH=<seconds>` — play the loaded video and report displayed fps + drops (`CRT_BENCH_OUT=<file>` writes the result to a file). **Timing benches must run via `open build/NTSCRT.app --env …`**: a binary exec'd from a background shell gets a QoS clamp that throttles every main-thread timer (Task.sleep, CVDisplayLink, CADisplayLink all fire at ~15 Hz), which corrupts the numbers while leaving work-bound measurements plausible
+- `CRT_PERF_LOG=1` during playback also prints producer stage times and display-link draw gaps
 - `CRT_PLAY_FRAME_CHECK=<n>` — play to frame n, then verify the decoded frame matches the *seeked* frame n more closely than its neighbours (guards against the sequential decoder drifting out of step)
 - `CRT_FORCE_SEEK_DECODE=1` — decode playback frames by seeking to each one (the old, slow path; also what rotated tracks use)
 - `CRT_LOOP_TEST=<out.mp4>` / `CRT_STILL_LOOP_TEST=<out.mp4>` (+ `CRT_LOOP_N=<n>`) — export a looped video from a clip or a still and report the frame count, for checking duration and audio continuity

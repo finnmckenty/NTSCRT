@@ -37,7 +37,17 @@ struct PreviewView: NSViewRepresentable {
         // Property ORDER matters when resuming: the display link only
         // reliably restarts if enableSetNeedsDisplay is already false when
         // isPaused flips to false (toggling Animate off→on froze otherwise).
+        // Pipelined playback runs the display link at full rate and pulls
+        // the due frame inside draw() — the only macOS timer with
+        // frame-accurate wake-ups (Task.sleep on the main actor was measured
+        // waking 30-55 ms late, capping playback at ~16 fps by itself).
+        if state.isPipelinedPlayback {
+            nsView.startPlaybackLink()
+            return
+        }
+        nsView.stopPlaybackLink()
         let animating = state.animatePreview && !state.exportInProgress
+            && !state.videoPlaying
         if animating {
             // The ntsc-rs stage is CPU work at the source's full resolution,
             // and it runs on this thread — measured at ~10 ms a frame on a
@@ -96,6 +106,10 @@ struct PreviewView: NSViewRepresentable {
         private static var frameMsTotal = 0.0
         private static var frameMsMax = 0.0
         private static var windowStart: UInt64 = 0
+        private static var lastDrawAt: UInt64 = 0
+        private static var gapTotal = 0.0
+        private static var gapMax = 0.0
+        private static var gapN = 0
 
         init(state: AppState) {
             self.state = state
@@ -144,7 +158,28 @@ struct PreviewView: NSViewRepresentable {
             guard let drawable = view.currentDrawable,
                   let cb = state.context.queue.makeCommandBuffer() else { return }
 
+            // Pull-model playback: fetch whichever frame is due right now.
+            if state.isPipelinedPlayback { state.consumePipelinedFrame() }
+            if Self.perfLog {
+                let now = DispatchTime.now().uptimeNanoseconds
+                if Self.lastDrawAt != 0 {
+                    let gap = Double(now - Self.lastDrawAt) / 1_000_000
+                    Self.gapTotal += gap; Self.gapMax = max(Self.gapMax, gap); Self.gapN += 1
+                    if Self.gapN >= 48 {
+                        fputs(String(format: "[link] draw gap mean %.1f ms max %.1f — paused=%d needsDisp=%d pref=%d screenMax=%d\n",
+                                     Self.gapTotal / Double(Self.gapN), Self.gapMax,
+                                     view.isPaused ? 1 : 0,
+                                     view.enableSetNeedsDisplay ? 1 : 0,
+                                     view.preferredFramesPerSecond,
+                                     NSScreen.main?.maximumFramesPerSecond ?? -1), stderr)
+                        Self.gapTotal = 0; Self.gapMax = 0; Self.gapN = 0
+                    }
+                }
+                Self.lastDrawAt = now
+            }
+
             let animating = state.animatePreview && !state.exportInProgress
+                && !state.videoPlaying
             if animating { state.tickFrame() }
 
             guard let source = state.sourceTexture else {
@@ -183,7 +218,13 @@ struct PreviewView: NSViewRepresentable {
                 // consume it with no further downscaling.
                 var chainSource = source
                 var spec = state.downscaleSpec
-                if state.ntscEnabled, let stage = state.ntscStage {
+                if state.ntscEnabled, let baked = state.processedSourceTexture {
+                    // Pipelined playback already ran the NTSC stage on a
+                    // background thread; the chain input is ready. The
+                    // downscale still runs (in the encode below), and the
+                    // compare side keeps using the clean `source`.
+                    chainSource = baked
+                } else if state.ntscEnabled, let stage = state.ntscStage {
                     do {
                         chainSource = try state.pipeline.prepareChainInput(
                             source: source, downscale: spec,
@@ -608,6 +649,37 @@ struct PreviewView: NSViewRepresentable {
 ///   - compare mode + drag mouse → move the compare line
 ///   - cursor changes for visual feedback
 final class PreviewMTKView: MTKView {
+
+    /// CADisplayLink drive for pipelined playback.
+    ///
+    /// MTKView's built-in pacing (CVDisplayLink) follows the panel's CURRENT
+    /// refresh rate — and ProMotion panels idle down when presents are
+    /// sparse, settling into a ~16 Hz equilibrium: few presents → panel
+    /// idles → link slows → fewer presents. Measured: 60-62 ms between
+    /// draws with preferredFramesPerSecond=60 on a 120 Hz panel. CADisplayLink
+    /// carries an explicit preferredFrameRateRange, which keeps the panel's
+    /// rate up; the callback drives MTKView.draw() directly.
+    private var playbackLink: CADisplayLink?
+
+    func startPlaybackLink() {
+        guard playbackLink == nil else { return }
+        isPaused = true                 // we drive draws ourselves
+        enableSetNeedsDisplay = false
+        let link = displayLink(target: self, selector: #selector(playbackLinkFired))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        playbackLink = link
+    }
+
+    func stopPlaybackLink() {
+        playbackLink?.invalidate()
+        playbackLink = nil
+    }
+
+    @objc private func playbackLinkFired() {
+        draw()
+    }
+
 
     weak var appState: AppState?
 

@@ -47,11 +47,13 @@ final class AppState {
     var currentFrameIndex: Int = 0 {
         didSet {
             if currentFrameIndex != oldValue && !suppressFrameReload {
-                // Someone seeked (scrubber, timeline, keyboard): the
-                // sequential decoder is now positioned somewhere else, so
-                // drop it and let playback rebuild it where we landed.
-                playbackReader = nil
-                Task { await reloadVideoFrame() }
+                if videoPlaying, playbackPipeline != nil {
+                    // Seek while playing: the producer is decoding somewhere
+                    // else now — restart it at the new position.
+                    startPipeline(at: currentFrameIndex)
+                } else {
+                    Task { await reloadVideoFrame() }
+                }
             }
         }
     }
@@ -64,100 +66,188 @@ final class AppState {
     /// CRT_FORCE_SEEK_DECODE=1: decode playback frames by seeking to each one
     /// (the pre-0.9 path, and what a rotated track still needs).
     static let forceSeekDecode = ProcessInfo.processInfo.environment["CRT_FORCE_SEEK_DECODE"] == "1"
-    static var playCount = 0
-    static var playWorkTotal = 0.0
-    static var playWallStart = ContinuousClock.now
     /// Set while the playback loop advances the index itself (it fetches
     /// frames directly, so the didSet reload would double-fetch).
     private var suppressFrameReload = false
-    /// Sequential decoder used while playing (nil when scrubbing, or on a
-    /// rotated track that needs the image generator's transform).
-    private var playbackReader: VideoSource.SequentialReader?
-    /// The frame currently on screen. Its texture is backed by this pixel
-    /// buffer, so it has to stay retained until the next frame replaces it.
-    private var playbackFrame: VideoSource.SequentialReader.Frame?
+    // MARK: - pipelined playback
+
+    /// Producer for pipelined playback: decodes and runs the NTSC stage on a
+    /// background thread so the main thread only renders. See
+    /// PlaybackPipeline for the measured rationale.
+    private var playbackPipeline: PlaybackPipeline?
+    /// Last frame consumed from the pipeline (retains its pixel buffer).
+    private var pipelineOutput: PlaybackPipeline.Output?
+    /// Source texture with the NTSC stage already baked in, when playback is
+    /// pipelined. The preview uses it as the chain input directly (still
+    /// downscaled on the GPU); the compare split keeps using the clean
+    /// `sourceTexture`. nil = process normally on the main thread.
+    private(set) var processedSourceTexture: MTLTexture?
+    /// Bumped on any user edit of NTSC settings; queued pipeline frames baked
+    /// with an older generation are discarded rather than shown.
+    private(set) var ntscGeneration: Int = 0
+    /// Dropped-frame count for the current playback run (CRT_PERF_LOG).
+    private(set) var playbackDropped: Int = 0
+
+    /// User changed VHS settings: invalidate pre-baked frames everywhere.
+    private func noteNtscSettingsEdited() {
+        ntscGeneration &+= 1
+        processedSourceTexture = nil
+        pushPipelineConfig()
+    }
+
+    private func pushPipelineConfig() {
+        guard let playbackPipeline else { return }
+        let ev = (timelineEnabled && !timelineKeys.isEmpty) ? makeTimelineEvaluator() : nil
+        let total = timelineTotalFrames
+        let perFrame: (@Sendable (Int) -> String?)? = ev.map { e in
+            { idx in
+                let t = total > 1 ? Double(idx) / Double(total - 1) : 0
+                return e.ntscJSON(at: t)
+            }
+        }
+        playbackPipeline.config.update(enabled: ntscEnabled,
+                               baseJSON: ntscStage?.settingsJSON(),
+                               perFrameJSON: perFrame,
+                               generation: ntscGeneration)
+    }
+
+    /// Held while a video plays. Without it App Nap coalesces every timing
+    /// mechanism in the process — Task.sleep, CVDisplayLink and CADisplayLink
+    /// were all measured firing at ~13-16 Hz on an idle main thread, which
+    /// capped playback regardless of pipeline throughput. latencyCritical is
+    /// exactly the assertion real media apps hold during playback.
+    private var playbackActivity: NSObjectProtocol?
 
     func togglePlayback() {
         if videoPlaying { stopPlayback(); return }
         guard let source = videoSource, !exportInProgress else { return }
         videoPlaying = true
-        // Decode sequentially while playing. Asking for each frame by time
-        // re-decodes from the preceding keyframe every time — measured 47 ms
-        // a frame on a 1176x1764 h264 clip versus 2.8 ms sequentially, which
-        // on its own blows a 24 fps budget. Rotated tracks still need the
-        // image generator, which applies the transform.
-        playbackReader = (source.needsPreferredTransform || Self.forceSeekDecode)
-            ? nil
-            : try? source.makeSequentialReader(startingAtFrame: currentFrameIndex + 1)
-        playbackTask = Task { @MainActor [weak self] in
+        playbackDropped = 0
+        playbackActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical],
+            reason: "video playback")
+
+        // Rotated tracks still go through the image generator (only it
+        // applies preferredTransform); CRT_FORCE_SEEK_DECODE keeps the old
+        // path reachable for A/B measurement.
+        if source.needsPreferredTransform || Self.forceSeekDecode {
+            playbackTask = legacyPlaybackTask(source: source)
+            return
+        }
+
+        playbackFPS = Double(max(1, source.frameRate))
+        startPipeline(at: (currentFrameIndex + 1) % max(1, source.totalFrames))
+        // Consumption is pull-model from the display link (see
+        // consumePipelinedFrame); a nudge starts the first draw.
+        markChainDirty()
+    }
+
+    private func startPipeline(at frame: Int) {
+        guard let source = videoSource else { return }
+        playbackPipeline?.stop()
+        let cfg = PlaybackPipeline.Config(enabled: ntscEnabled,
+                                          baseJSON: ntscStage?.settingsJSON(),
+                                          perFrameJSON: nil,
+                                          generation: ntscGeneration)
+        let pipe = PlaybackPipeline(source: source, device: context.device,
+                                    startFrame: frame, config: cfg)
+        playbackPipeline = pipe
+        pushPipelineConfig()   // fills in the keyframe evaluator if any
+        pipe.start()
+        pipelineScheduleBase = frame
+        playbackClockStart = nil    // re-prime on the next display tick
+    }
+
+    /// Where the consumer's schedule (re)starts, in producer-absolute frames.
+    private var pipelineScheduleBase = 0
+
+    /// Pull-model consumer, called from the MTKView's display link each
+    /// refresh while a video plays. The display link is the only timer on
+    /// macOS with frame-accurate wake-ups — Task.sleep on the main actor was
+    /// measured waking 30-55 ms late on an otherwise idle main thread, which
+    /// alone capped playback at ~16 fps. The schedule is wall-clock: the
+    /// frame due *now* is shown, later frames wait, missed frames drop.
+    private var playbackClockStart: ContinuousClock.Instant?
+    private var playbackScheduleBase = 0
+    private var playbackFPS = 24.0
+    private(set) var playbackDisplayed = 0
+    private var playbackLogStart = ContinuousClock.now
+
+    var isPipelinedPlayback: Bool { videoPlaying && playbackPipeline != nil }
+
+    func consumePipelinedFrame() {
+        guard videoPlaying, let pipe = playbackPipeline else { return }
+        guard !exportInProgress else { stopPlayback(); return }
+
+        // Prime: the clock starts when the first frame exists, so the
+        // schedule can't run ahead of a producer that hasn't begun.
+        if playbackClockStart == nil {
+            guard pipe.hasOutput() else { return }
+            playbackClockStart = .now
+            playbackScheduleBase = pipe.firstQueuedIndex() ?? pipelineScheduleBase
+            playbackDisplayed = 0
+            playbackLogStart = .now
+        }
+        guard let clockStart = playbackClockStart else { return }
+
+        let elapsed = clockStart.duration(to: .now)
+        let secs = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        let schedule = playbackScheduleBase + Int(secs * playbackFPS)
+
+        pipe.setTargetAbsoluteIndex(schedule)
+        let (out, dropped) = pipe.takeReady(schedule: schedule, generation: ntscGeneration)
+        playbackDropped += dropped
+        guard let out else { return }
+
+        pipelineOutput = out
+        suppressFrameReload = true
+        currentFrameIndex = out.frameIndex
+        suppressFrameReload = false
+        sourceTexture = out.clean
+        processedSourceTexture = out.processed
+        // Playhead + keyframed shader params for this frame (librashader is
+        // main-thread; NTSC is already baked).
+        applyTimeline(atFrame: out.frameIndex)
+        tickFrame()
+        markChainDirty()
+        playbackDisplayed += 1
+
+        if Self.playLog, playbackDisplayed % 48 == 0 {
+            let span = playbackLogStart.duration(to: .now)
+            let s = Double(span.components.seconds)
+                + Double(span.components.attoseconds) / 1e18
+            fputs(String(format: "[play] displayed %.1f fps, dropped %d total — %@\n",
+                         48.0 / max(s, 0.001), playbackDropped,
+                         pipe.takeStatsLine() as NSString), stderr)
+            playbackLogStart = .now
+        }
+    }
+
+    /// Pre-pipeline path: seek + decode each frame via the image generator.
+    private func legacyPlaybackTask(source vs: VideoSource) -> Task<Void, Never> {
+        Task { @MainActor [weak self] in
             var deadline = ContinuousClock.now
             while let self, self.videoPlaying, !Task.isCancelled {
-                guard let vs = self.videoSource, !self.exportInProgress else {
-                    self.stopPlayback(); return
-                }
-                let start = ContinuousClock.now
+                guard !self.exportInProgress else { self.stopPlayback(); return }
                 let next = (self.currentFrameIndex + 1) % vs.totalFrames
                 self.suppressFrameReload = true
                 self.currentFrameIndex = next
                 self.suppressFrameReload = false
                 do {
-                    if !vs.needsPreferredTransform && !Self.forceSeekDecode {
-                        // Rebuild the decoder after a seek, or when wrapping
-                        // back to the start.
-                        if self.playbackReader == nil || next == 0 {
-                            self.playbackReader = try? vs.makeSequentialReader(startingAtFrame: next)
-                        }
-                        var frame = self.playbackReader?.nextFrame()
-                        if frame == nil {   // ran dry early: restart at this frame
-                            self.playbackReader = try? vs.makeSequentialReader(startingAtFrame: next)
-                            frame = self.playbackReader?.nextFrame()
-                        }
-                        guard let frame else { self.stopPlayback(); return }
-                        // Hold the frame: its texture is backed by the pixel
-                        // buffer, which must outlive the render that reads it.
-                        self.playbackFrame = frame
-                        self.sourceTexture = frame.texture
-                    } else {
-                        self.sourceTexture = try await vs.frame(atIndex: next)
-                    }
-                    // The playhead follows playback, and any keyframed
-                    // animation is applied for this frame.
+                    self.sourceTexture = try await vs.frame(atIndex: next)
                     self.applyTimeline(atFrame: next)
-                    self.tickFrame()          // VHS noise/interlace advance with the video
+                    self.tickFrame()
                     self.markChainDirty()
                 } catch {
                     self.stopPlayback(); return
                 }
                 let frameDuration = Duration.seconds(1.0 / Double(max(1, vs.frameRate)))
-                let elapsed = start.duration(to: .now)
-                if Self.playLog {
-                    let workMs = Double(elapsed.components.attoseconds) / 1e15
-                        + Double(elapsed.components.seconds) * 1000
-                    Self.playWorkTotal += workMs
-                    Self.playCount += 1
-                    if Self.playCount >= 24 {
-                        let wall = Self.playWallStart.duration(to: .now)
-                        let wallMs = Double(wall.components.attoseconds) / 1e15
-                            + Double(wall.components.seconds) * 1000
-                        fputs(String(format: "[play] %d frames: work %.1f ms/frame, wall %.1f ms/frame (target %.1f)\n",
-                                     Self.playCount, Self.playWorkTotal / Double(Self.playCount),
-                                     wallMs / Double(Self.playCount), 1000.0 / Double(vs.frameRate)), stderr)
-                        Self.playCount = 0; Self.playWorkTotal = 0; Self.playWallStart = .now
-                    }
-                }
-                // Pace to an absolute schedule. Sleeping "frameDuration minus
-                // work" each time re-bases on wake-up, so every overshoot —
-                // and Task.sleep on the main actor routinely overshoots by
-                // tens of ms — becomes permanent drift. Measured on a 24 fps
-                // clip: 0.7 ms of work per frame still yielded 66 ms frames.
                 deadline = deadline.advanced(by: frameDuration)
                 let now = ContinuousClock.now
                 if deadline > now {
                     try? await Task.sleep(until: deadline, clock: .continuous)
                 } else if now - deadline > frameDuration {
-                    // More than a frame behind (a slow render, or the app was
-                    // backgrounded): give up on catching up and re-base,
-                    // rather than sprinting through frames.
                     deadline = now
                 }
             }
@@ -168,7 +258,13 @@ final class AppState {
         videoPlaying = false
         playbackTask?.cancel()
         playbackTask = nil
-        playbackReader = nil
+        playbackPipeline?.stop()
+        playbackPipeline = nil
+        playbackClockStart = nil
+        if let activity = playbackActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            playbackActivity = nil
+        }
     }
     var videoSource: VideoSource? {
         if case .video(let v) = sourceKind { return v }
@@ -481,7 +577,9 @@ final class AppState {
     private(set) var ntscDefaults: [String: Any] = [:]
     /// Flat values in ntsc-rs preset-JSON form (includes "version").
     private(set) var ntscValues: [String: Any] = [:]
-    var ntscEnabled: Bool = true { didSet { markChainDirty() } }
+    var ntscEnabled: Bool = true {
+        didSet { noteNtscSettingsEdited(); markChainDirty() }
+    }
     private(set) var ntscError: String?
 
     var ntscAvailable: Bool { ntscStage != nil }
@@ -490,6 +588,7 @@ final class AppState {
         ntscValues[name] = value
         pushNtscSettings()
         autoKeyIfParked()
+        noteNtscSettingsEdited()
         markChainDirty()
     }
 
@@ -505,6 +604,7 @@ final class AppState {
         ntscValues = ntscDefaults
         pushNtscSettings()
         autoKeyIfParked()
+        noteNtscSettingsEdited()
         markChainDirty()
     }
 
@@ -732,6 +832,7 @@ final class AppState {
         do {
             let tex = try await vs.frame(atIndex: currentFrameIndex)
             sourceTexture = tex
+            processedSourceTexture = nil    // draw re-processes on main
             // Scrubbing the transport moves the playhead too, so a keyframed
             // animation follows the frame you land on.
             applyTimeline(atFrame: currentFrameIndex)
@@ -933,6 +1034,7 @@ final class AppState {
             }
             if let v = s["enabled"] as? Bool { shaderEnabled = v }
         }
+        noteNtscSettingsEdited()
         if let v = dict["view"] as? [String: Any] {
             if let b = v["integerScale"] as? Bool { integerScale = b }
             if let b = v["animate"] as? Bool { animatePreview = b }
