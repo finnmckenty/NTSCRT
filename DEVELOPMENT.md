@@ -13,10 +13,10 @@ To be clear about what this is: **I basically hacked two much better projects to
 - [libretro/slang-shaders](https://github.com/libretro/slang-shaders) and the RetroArch community — the CRT shader presets themselves (crt-royale by TroggleMonkey, crt-easymode/crt-aperture by EasyMode, crt-hyllian by Hyllian, crtsim, crtglow — various licenses, largely GPL).
 
 Status:
-- **Phase 1** — librashader bridge: working, all 6 shaders verified.
-- **Phase 1+** — downscale pre-pass: working, all 5 sampling methods verified.
-- **Phase 2** — SwiftUI app shell with sidebar (source / downscale / shader / export panels) and live MTKView preview: builds and launches. Visual verification of the window UI is pending (waiting on full Xcode for proper iteration).
-- **Phase 3** — video pipeline: not yet built.
+- **Phase 1** — librashader bridge: working, all 7 shaders verified.
+- **Phase 1+** — downscale pre-pass: working, all 6 sampling methods verified.
+- **Phase 2** — SwiftUI app shell with sidebar (source / downscale / shader / export panels) and live MTKView preview: working.
+- **Phase 3** — video pipeline: working (real-time playback, MP4/MOV/GIF export, keyframe timeline).
 
 ## Layout
 
@@ -33,7 +33,7 @@ Vendor/
 
 ## Prerequisites
 
-- macOS 14+ on Apple Silicon
+- macOS 14+ (Apple Silicon or Intel; the release is a universal binary)
 - Xcode Command Line Tools (`xcode-select --install`) — enough for the CLI
 - Full Xcode (App Store) — only for `swift test` (XCTest) and universal `--arch` builds; the app itself builds with the CLT
 - Rust toolchain (`brew install rust`) — to build librashader from source
@@ -232,7 +232,7 @@ The smoke binary prints all runtime parameters declared by the preset (the thing
 
 `--set` pins a parameter for the whole sweep — use it to open a gate, e.g. `--set CURVATURE=1` to measure the warp params that only apply with curvature on. Params dead on a static frame are retried at frameCount 37 and reported `ANIM-ONLY` if they respond.
 
-## The 6 target shaders
+## The 7 target shaders
 
 All in `Vendor/slang-shaders/crt/`:
 
@@ -261,5 +261,5 @@ The librashader Metal runtime is **not thread-safe**. All chain calls must happe
 
 ## Roadmap
 
-- **Phase 2**: SwiftUI app shell (sidebar with shader picker / params / downscale / export, MTKView preview). Needs full Xcode.
-- **Phase 3**: video. `AVAssetReader` for input, `AVAssetWriterInputPixelBufferAdaptor` for MP4 export, scrub-only preview.
+- **Phase 2** ✅: SwiftUI app shell (sidebar with shader picker / params / downscale / export, MTKView preview). Done.
+- **Phase 3** ✅: video. `AVAssetReader` for input, `AVAssetWriterInputPixelBufferAdaptor` for MP4 export, real-time playback pipeline, GIF export, keyframe timeline. Done.
