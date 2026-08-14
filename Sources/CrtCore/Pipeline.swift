@@ -12,6 +12,16 @@ public struct DownscaleSpec: Equatable, Sendable {
         self.height = height
         self.method = method
     }
+
+    /// Clamp a downscale width to the range the UI enforces (16...4096).
+    /// Look/preset files are user-editable JSON, so a width loaded from disk
+    /// can be 0, negative, or absurdly large — any of which makes
+    /// `makeTexture` return nil and (before the guard in
+    /// `Pipeline.obtainDownscaleTexture`) trapped the render thread. Shared
+    /// here so the load path and the spec constructor agree on the bounds.
+    public static func clampedWidth(_ width: Int) -> Int {
+        min(max(width, 16), 4096)
+    }
 }
 
 /// Encodes one frame of: optional downscale → librashader chain → output texture.
@@ -22,6 +32,16 @@ public struct DownscaleSpec: Equatable, Sendable {
 /// in so the chain can be swapped (different preset) without re-creating the
 /// pipeline.
 public final class Pipeline {
+
+    public enum Error: Swift.Error, LocalizedError {
+        case downscaleTextureAlloc
+        public var errorDescription: String? {
+            switch self {
+            case .downscaleTextureAlloc:
+                return "downscale: staging texture allocation failed (check the downscale width)"
+            }
+        }
+    }
 
     public let context: MetalContext
     private var downscaleCache: (spec: DownscaleSpec, texture: MTLTexture)?
@@ -42,7 +62,7 @@ public final class Pipeline {
                        frameCount: Int) throws -> MTLTexture {
         let chainInput: MTLTexture
         if let spec = downscale {
-            let scratch = obtainDownscaleTexture(for: spec, sourceFormat: inputTexture.pixelFormat)
+            let scratch = try obtainDownscaleTexture(for: spec, sourceFormat: inputTexture.pixelFormat)
             context.downscaler.encode(into: commandBuffer,
                                       source: inputTexture,
                                       destination: scratch,
@@ -87,7 +107,7 @@ public final class Pipeline {
         guard let cb = context.queue.makeCommandBuffer() else {
             throw NtscStage.Error.commandBuffer
         }
-        let scratch = obtainDownscaleTexture(for: spec, sourceFormat: processed.pixelFormat)
+        let scratch = try obtainDownscaleTexture(for: spec, sourceFormat: processed.pixelFormat)
         context.downscaler.encode(into: cb, source: processed,
                                   destination: scratch, method: spec.method)
         cb.commit()
@@ -96,7 +116,7 @@ public final class Pipeline {
     }
 
     private func obtainDownscaleTexture(for spec: DownscaleSpec,
-                                        sourceFormat: MTLPixelFormat) -> MTLTexture {
+                                        sourceFormat: MTLPixelFormat) throws -> MTLTexture {
         if let cached = downscaleCache, cached.spec == spec,
            cached.texture.pixelFormat == sourceFormat {
             return cached.texture
@@ -107,7 +127,13 @@ public final class Pipeline {
         )
         d.usage = [.shaderRead, .shaderWrite]
         d.storageMode = .private
-        let tex = context.device.makeTexture(descriptor: d)!
+        // makeTexture returns nil for invalid dimensions (zero/negative, or a
+        // size the device can't allocate). The UI and loadLook clamp the width,
+        // but don't trap here — throw so a bad spec surfaces as an error rather
+        // than crashing the render/export thread.
+        guard let tex = context.device.makeTexture(descriptor: d) else {
+            throw Error.downscaleTextureAlloc
+        }
         downscaleCache = (spec, tex)
         return tex
     }

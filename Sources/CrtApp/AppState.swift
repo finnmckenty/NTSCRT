@@ -1006,7 +1006,12 @@ final class AppState {
         }
         if let d = dict["downscale"] as? [String: Any] {
             if let v = d["enabled"] as? Bool { downscaleEnabled = v }
-            if let v = d["width"] as? Int { downscaleWidth = v }
+            // Clamp to the same range the UI enforces (DownscalePanel's
+            // Stepper/IntField: 16...4096). A hand-edited or shared look file
+            // can carry 0, a negative, or an absurdly large width, which would
+            // otherwise flow into a zero/huge-dimension Metal texture and
+            // trap on the force-unwrap in Pipeline.obtainDownscaleTexture.
+            if let v = d["width"] as? Int { downscaleWidth = DownscaleSpec.clampedWidth(v) }
             if let v = d["preset"] as? String { downscalePreset = v } else { downscalePreset = "Custom" }
             // Old look files carried an explicit height; it is now derived
             // from the source aspect, so it is intentionally ignored.
@@ -1041,8 +1046,12 @@ final class AppState {
             if let b = v["compare"] as? Bool { compareEnabled = b }
         }
         if let t = dict["timeline"] as? [String: Any] {
-            if let d = t["duration"] as? Double { timelineDuration = d }
-            if let f = t["fps"] as? Int { timelineFPS = f }
+            // Clamp to the UI's ranges (TimelineBar: duration 0.5...600,
+            // fps a picker of {12,24,30,60}). Without this a look file with
+            // e.g. duration 1e18 overflows Int when timelineTotalFrames
+            // multiplies it through, trapping on the Int(...) conversion.
+            if let d = t["duration"] as? Double { timelineDuration = min(max(d, 0.5), 600) }
+            if let f = t["fps"] as? Int { timelineFPS = min(max(f, 1), 60) }
             if let rawKeys = t["keys"] as? [[String: Any]] {
                 timelineKeys = rawKeys.compactMap { k in
                     guard let kt = k["t"] as? Double else { return nil }

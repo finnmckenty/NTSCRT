@@ -1,6 +1,6 @@
 import Foundation
 
-/// One of the six target shaders bundled with the app.
+/// One of the seven target shaders bundled with the app.
 public struct PresetEntry: Identifiable, Hashable, Sendable {
     public let id: String
     public let displayName: String
