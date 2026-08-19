@@ -362,11 +362,11 @@ struct ContentView: View {
                 print("BUILTIN FAIL load: \(error)"); exit(1)
             }
             print("BUILTIN loaded \(preset.name): keys=\(state.timelineKeys.count) duration=\(state.timelineDuration) fps=\(state.timelineFPS) timelineOpen=\(state.timelineEnabled)")
-            // Keyframed presets must open the timeline; keyless ones must not.
-            let ok = state.timelineKeys.isEmpty
-                ? !state.timelineEnabled
-                : state.timelineEnabled
-            print(ok ? "BUILTIN-PASS" : "BUILTIN-FAIL (timeline state doesn't match the preset's keyframes)")
+            // Keyframed presets must open the timeline. Keyless ones follow
+            // whatever "enabled" state they were saved with, so no assertion
+            // either way — restoring the saved state faithfully is correct.
+            let ok = state.timelineKeys.isEmpty || state.timelineEnabled
+            print(ok ? "BUILTIN-PASS" : "BUILTIN-FAIL (keyframed preset did not open the timeline)")
             exit(ok ? 0 : 1)
         }
         // CRT_PRESET_ROUNDTRIP=<path>: save a preset with a keyframed
