@@ -44,10 +44,23 @@ struct NtscSetting: Identifiable {
             "bandwidth_scale": "Horizontal intensity",
             "vertical_scale": "Vertical intensity",
         ]
+        // ntsc-rs allows these up to 8, but past ~3 the effect is mush — the
+        // useful values all live low, so the slider spends its travel there.
+        // The floor stays 0.125: the library silently clamps anything lower
+        // up to it (verified), so a slider reaching 0 would show values the
+        // effect isn't actually using. Preset JSON is unaffected — values
+        // above 3 still load; the slider just pins until touched.
+        let rangeOverrides: [String: (min: Double, max: Double)] = [
+            "bandwidth_scale": (0.125, 3.0),
+            "vertical_scale": (0.125, 3.0),
+        ]
         func relabel(_ s: NtscSetting) -> NtscSetting {
             var kind = s.kind
             if case .group(let kids) = s.kind {
                 kind = .group(children: kids.map(relabel))
+            }
+            if case .float(_, _, let log) = s.kind, let r = rangeOverrides[s.name] {
+                kind = .float(min: r.min, max: r.max, logarithmic: log)
             }
             return NtscSetting(name: s.name,
                                label: relabels[s.name] ?? s.label,

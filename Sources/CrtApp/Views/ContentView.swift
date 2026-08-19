@@ -362,8 +362,11 @@ struct ContentView: View {
                 print("BUILTIN FAIL load: \(error)"); exit(1)
             }
             print("BUILTIN loaded \(preset.name): keys=\(state.timelineKeys.count) duration=\(state.timelineDuration) fps=\(state.timelineFPS) timelineOpen=\(state.timelineEnabled)")
-            let ok = !state.timelineKeys.isEmpty && state.timelineEnabled
-            print(ok ? "BUILTIN-PASS" : "BUILTIN-FAIL (keyframed preset did not open the timeline)")
+            // Keyframed presets must open the timeline; keyless ones must not.
+            let ok = state.timelineKeys.isEmpty
+                ? !state.timelineEnabled
+                : state.timelineEnabled
+            print(ok ? "BUILTIN-PASS" : "BUILTIN-FAIL (timeline state doesn't match the preset's keyframes)")
             exit(ok ? 0 : 1)
         }
         // CRT_PRESET_ROUNDTRIP=<path>: save a preset with a keyframed
@@ -480,6 +483,8 @@ struct ContentView: View {
                         print("\(pad)[group] \(s.label)  (\(s.name))"); dump(c, depth + 1)
                     case .section(let c):
                         print("\(pad)[section] \(s.label)  (\(s.name))"); dump(c, depth + 1)
+                    case .float(let lo, let hi, _):
+                        print("\(pad)- \(s.label)  (\(s.name))  range \(lo)…\(hi)")
                     default:
                         print("\(pad)- \(s.label)  (\(s.name))")
                     }
