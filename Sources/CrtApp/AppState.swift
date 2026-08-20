@@ -797,6 +797,9 @@ final class AppState {
     private func reloadSource() async {
         stopPlayback()
         sourceTexture = nil
+        // A baked frame from the previous source must not survive into the
+        // new one — draw() prefers it over re-processing when NTSC is on.
+        processedSourceTexture = nil
         sourceKind = nil
         sourceError = nil
         currentFrameIndex = 0

@@ -142,6 +142,7 @@ For iteration and headless/screenshot verification:
 - `CRT_PRESET_ROUNDTRIP=<out.json>` — save a preset with a keyframed timeline, wipe the state, load it back, and assert duration/frame rate/keyframe times/easings/captured values all survived; prints PASS/FAIL and exits
 - `CRT_TL_AUTOKEY_TEST=1` — assert the auto-key rules (edit on a keyframe rewrites it, edits between keyframes don't, scrubbing never mutates), print PASS/FAIL, exit
 - `CRT_COMPARE_X=<0…1>` — place the compare divider at launch (edge-case captures)
+- `CRT_ZOOM=<factor>` — start zoomed in, for capturing the pixel-inspection path. Zoomed composites must sample the full-resolution render, not the display-fit texture — the fit's box average can flatten scanlines entirely (`scripts/check-zoom-scanlines.sh` guards this; run it when touching `PreviewView.composite()` or `PreviewScaling` — it needs a GUI session, so it isn't in the release gate)
 - `CRT_FRONT=1` — activate the app at launch
 - `CRT_DUMP_TOOLTIPS=1` — print every NSView carrying tooltip text, plus what a click at its centre hits, then exit
 - `CRT_HOVER_LOG=1` — log preview hover events and the palette's measured frame

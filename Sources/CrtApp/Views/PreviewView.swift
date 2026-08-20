@@ -549,23 +549,36 @@ struct PreviewView: NSViewRepresentable {
             // shown (integer scale keeps a floor so the shader has room to
             // draw scanlines). Step it down to the DISPLAY size — an exact
             // integer factor, so it's a clean box filter — then letterbox
-            // that. Applied regardless of zoom: skipping it while zoomed
-            // changed the mapping, so toggling integer scale appeared to
-            // change the zoom level.
-            if let plan = scaling, plan.needsDownsample, let down = obtainDownscaler() {
-                let fw = plan.displayWidth, fh = plan.displayHeight
-                if let fitP = obtainFitTexture(slot: 0, width: fw, height: fh,
-                                               format: primary.pixelFormat) {
-                    down.encode(into: cb, source: primary, destination: fitP, method: .area)
-                    primary = fitP
-                }
-                if state.compareEnabled, secondaryIn !== primaryIn,
-                   let fitS = obtainFitTexture(slot: 1, width: fw, height: fh,
-                                               format: secondaryIn.pixelFormat) {
-                    down.encode(into: cb, source: secondaryIn, destination: fitS, method: .area)
-                    secondary = fitS
-                } else if secondaryIn === primaryIn {
-                    secondary = primary
+            // that.
+            //
+            // Zoomed in, sample the FULL render instead: the step-down is a
+            // box filter, and at small display multiples it averages the
+            // scanlines nearly flat (a 6×→2× fit leaves almost none), which
+            // reads as "the CRT shader stopped working" under magnification.
+            // The letterbox geometry below always uses the DISPLAY size —
+            // the composite samples by normalized uv, so which texture backs
+            // it never moves the framing, and toggling integer scale still
+            // doesn't appear to change the zoom level (the regression that
+            // once made this step unconditional).
+            let zoomedIn = state.zoom > 1.001
+            var displayW = primary.width, displayH = primary.height
+            if let plan = scaling, plan.needsDownsample {
+                displayW = plan.displayWidth
+                displayH = plan.displayHeight
+                if !zoomedIn, let down = obtainDownscaler() {
+                    if let fitP = obtainFitTexture(slot: 0, width: displayW, height: displayH,
+                                                   format: primary.pixelFormat) {
+                        down.encode(into: cb, source: primary, destination: fitP, method: .area)
+                        primary = fitP
+                    }
+                    if state.compareEnabled, secondaryIn !== primaryIn,
+                       let fitS = obtainFitTexture(slot: 1, width: displayW, height: displayH,
+                                                   format: secondaryIn.pixelFormat) {
+                        down.encode(into: cb, source: secondaryIn, destination: fitS, method: .area)
+                        secondary = fitS
+                    } else if secondaryIn === primaryIn {
+                        secondary = primary
+                    }
                 }
             }
 
@@ -590,20 +603,21 @@ struct PreviewView: NSViewRepresentable {
             // resized. Measured on a 1280 target: an odd delta duplicates
             // ~150 of 1280 rows, an even delta none.
             if Self.scaleLog {
-                let dx = dst.width - primary.width, dy = dst.height - primary.height
-                let key = "\(dst.width)x\(dst.height)/\(primaryIn.width)/\(primary.width)"
+                let dx = dst.width - displayW, dy = dst.height - displayH
+                let key = "\(dst.width)x\(dst.height)/\(primaryIn.width)/\(displayW)/\(primary.width)"
                 if key != Self.lastScaleLogKey {
                     Self.lastScaleLogKey = key
-                    fputs("[scale] drawable \(dst.width)x\(dst.height) chain-render \(primaryIn.width)x\(primaryIn.height) displayed \(primary.width)x\(primary.height) delta \(dx),\(dy) \(dx % 2 == 0 && dy % 2 == 0 ? "even" : "ODD")\n", stderr)
+                    fputs("[scale] drawable \(dst.width)x\(dst.height) chain-render \(primaryIn.width)x\(primaryIn.height) displayed \(displayW)x\(displayH) sampled \(primary.width)x\(primary.height) delta \(dx),\(dy) \(dx % 2 == 0 && dy % 2 == 0 ? "even" : "ODD")\n", stderr)
                 }
             }
             // Integer scale letterboxes the displayed image at 1:1; without
-            // it the render fills the drawable.
+            // it the render fills the drawable. Geometry comes from the
+            // display size, never from whichever texture is being sampled.
             let stretch = !state.integerScale
-            let tgtW = Float(stretch ? dst.width : primary.width)
-            let tgtH = Float(stretch ? dst.height : primary.height)
-            let offX = stretch ? 0 : Float((dst.width - primary.width) / 2)
-            let offY = stretch ? 0 : Float((dst.height - primary.height) / 2)
+            let tgtW = Float(stretch ? dst.width : displayW)
+            let tgtH = Float(stretch ? dst.height : displayH)
+            let offX = stretch ? 0 : Float((dst.width - displayW) / 2)
+            let offY = stretch ? 0 : Float((dst.height - displayH) / 2)
             var u = CompositeU(
                 compareLineX: state.compareLineX,
                 compareEnabled: state.compareEnabled ? 1 : 0,
