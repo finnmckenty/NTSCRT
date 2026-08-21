@@ -8,14 +8,15 @@
 # not the fit texture — while keeping letterbox geometry at the display size
 # so toggling integer scale never appears to change the zoom level.
 #
-# This launches the app zoomed 6x with the CRT shader on (NTSC off), captures
-# the window, and measures mean adjacent-row luminance delta in the preview
-# center. Measured: broken build 0.8, fixed build 18.7, unzoomed 1.5 —
-# threshold 6.
+# Measures the drawable's own pixels via CRT_COMPOSITE_DUMP — never
+# `screencapture`, which returns a 1x image of a 2x window and halves the
+# scanline detail it's supposed to measure. Metric: mean adjacent-row
+# luminance delta at the dump center. Measured at this config: fixed build
+# ~7-9, v0.10.0 behavior ~2.7 — threshold 4.5.
 #
-# Needs a GUI session and Screen Recording permission for `screencapture`.
-# Not part of the release gate (GUI captures don't belong in one); run it
-# by hand when touching PreviewView.composite() or PreviewScaling.
+# Needs a GUI session. Not part of the release gate (GUI launches don't
+# belong in one); run it by hand when touching PreviewView.composite() or
+# PreviewScaling.
 #
 # Usage: scripts/check-zoom-scanlines.sh [source-image]
 set -euo pipefail
@@ -29,50 +30,38 @@ BIN=".build/release/crt-app"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; kill $APP_PID 2>/dev/null || true' EXIT
 
-cat > "$TMP/win.swift" <<'EOF'
-import CoreGraphics
-import Foundation
-let pid = Int32(CommandLine.arguments[1])!
-let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]
-for w in list {
-    guard let owner = w[kCGWindowOwnerPID as String] as? Int32, owner == pid,
-          let num = w[kCGWindowNumber as String] as? Int,
-          let bounds = w[kCGWindowBounds as String] as? [String: Any],
-          let width = bounds["Width"] as? Double, width > 300 else { continue }
-    print(num)
-}
-EOF
-
 # 1200pt wide keeps the preview drawable under 6x the default 320px downscale
 # on both 1x and 2x displays, so the render/display split (the code path
 # under test) is actually active — verified against the app's own scale log.
 CRT_SOURCE="$SRC" CRT_NTSC_OFF=1 CRT_COMPARE_OFF=1 CRT_ZOOM=6 \
-  CRT_WINDOW_SIZE=1200x1100 CRT_SCALE_LOG=1 "$BIN" > "$TMP/app.log" 2>&1 &
+  CRT_WINDOW_SIZE=1200x1100 CRT_SCALE_LOG=1 \
+  CRT_COMPOSITE_DUMP="$TMP/dump.png" "$BIN" > "$TMP/app.log" 2>&1 &
 APP_PID=$!
 disown $APP_PID
-sleep 9
 
-WIN=$(swift "$TMP/win.swift" $APP_PID | head -1)
-[ -n "$WIN" ] || { echo "FAIL: app window not found"; exit 1; }
-screencapture -x -o -l "$WIN" "$TMP/shot.png"
+for _ in $(seq 1 30); do
+  [ -f "$TMP/dump.png" ] && break
+  sleep 1
+done
 kill $APP_PID 2>/dev/null || true
+[ -f "$TMP/dump.png" ] || { echo "FAIL: no composite dump appeared"; exit 1; }
 
-if ! grep -q "sampled" "$TMP/app.log"; then
-    echo "FAIL: composite scale log missing — capture path changed?"; exit 1
+if grep -m1 "\[scale\] drawable" "$TMP/app.log" | grep -vq "needs-fit\|(x"; then
+    : # log format changed; fall through, the metric still decides
 fi
-if grep -m1 "\[scale\] drawable" "$TMP/app.log" | grep -q "(x0)"; then
-    echo "SKIP: render==display at this window/display combo; shrink CRT_WINDOW_SIZE"
+if ! grep -m1 "render" "$TMP/app.log" >/dev/null; then
+    echo "FAIL: scale log missing — CRT_SCALE_LOG path changed?"; exit 1
+fi
+RENDER=$(grep -m1 "\[scale\] drawable" "$TMP/app.log" | sed -E 's/.*render ([0-9]+x[0-9]+).*/\1/')
+DISPLAY_SZ=$(grep -m1 "\[scale\] drawable" "$TMP/app.log" | sed -E 's/.*display ([0-9]+x[0-9]+).*/\1/')
+if [ "$RENDER" = "$DISPLAY_SZ" ]; then
+    echo "SKIP: render==display ($RENDER) at this window/display combo; shrink CRT_WINDOW_SIZE"
     exit 1
 fi
 
-W=$(sips -g pixelWidth "$TMP/shot.png" | tail -1 | awk '{print $2}')
-H=$(sips -g pixelHeight "$TMP/shot.png" | tail -1 | awk '{print $2}')
-# Sample right of the sidebar, vertically centred — inside the zoomed preview.
-sips -c 400 400 --cropOffset $((H/2-200)) $((W/2+100)) "$TMP/shot.png" \
-     --out "$TMP/crop.png" >/dev/null
-sips -s format bmp "$TMP/crop.png" --out "$TMP/crop.bmp" >/dev/null
+sips -s format bmp "$TMP/dump.png" --out "$TMP/dump.bmp" >/dev/null
 
-python3 - "$TMP/crop.bmp" <<'EOF'
+python3 - "$TMP/dump.bmp" <<'EOF'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
 off = struct.unpack('<I', d[10:14])[0]
@@ -84,12 +73,12 @@ def lum(x, y):
     i = off + yy*row + x*bpp
     return 0.2126*d[i+2] + 0.7152*d[i+1] + 0.0722*d[i]
 total = n = 0
-for x in range(w//2-60, w//2+60, 4):
-    for y in range(absh//2-100, absh//2+100):
+for x in range(w//2-80, w//2+80, 4):
+    for y in range(absh//2-200, absh//2+200):
         total += abs(lum(x, y) - lum(x, y+1)); n += 1
 m = total/n
-print(f"row modulation: {m:.2f} (threshold 6.0)")
-sys.exit(0 if m > 6.0 else 1)
+print(f"row modulation: {m:.2f} (threshold 4.5)")
+sys.exit(0 if m > 4.5 else 1)
 EOF
 STATUS=$?
 [ $STATUS -eq 0 ] && echo "PASS: scanlines present under zoom" || echo "FAIL: zoomed preview has no scanline modulation"

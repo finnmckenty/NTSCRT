@@ -269,7 +269,51 @@ struct PreviewView: NSViewRepresentable {
                       into: drawable.texture, cb: cb)
 
             cb.present(drawable)
+            // CRT_COMPOSITE_DUMP=<path.png>: write the drawable's actual
+            // pixels once things settle — ground truth for scanline checks.
+            // `screencapture -l` returns a 1x image of a 2x window, which
+            // halves scanline detail and corrupts modulation measurements.
+            if let dumpPath = Self.compositeDumpPath {
+                compositeDumpCountdown -= 1
+                if compositeDumpCountdown == 0 {
+                    cb.addCompletedHandler { _ in
+                        Coordinator.writeDump(texture: drawable.texture, to: dumpPath)
+                    }
+                }
+            }
             cb.commit()
+        }
+
+        private static let compositeDumpPath =
+            ProcessInfo.processInfo.environment["CRT_COMPOSITE_DUMP"]
+        private var compositeDumpCountdown = 30
+
+        private static func writeDump(texture: MTLTexture, to path: String) {
+            let w = texture.width, h = texture.height
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            bytes.withUnsafeMutableBytes { buf in
+                texture.getBytes(buf.baseAddress!, bytesPerRow: w * 4,
+                                 from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            }
+            // Drawables are BGRA; swap to RGBA for CGImage.
+            for i in stride(from: 0, to: bytes.count, by: 4) {
+                bytes.swapAt(i, i + 2)
+                bytes[i + 3] = 255
+            }
+            let cs = CGColorSpaceCreateDeviceRGB()
+            let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+            guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+                  let img = CGImage(width: w, height: h, bitsPerComponent: 8,
+                                    bitsPerPixel: 32, bytesPerRow: w * 4,
+                                    space: cs, bitmapInfo: info, provider: provider,
+                                    decode: nil, shouldInterpolate: false,
+                                    intent: .defaultIntent),
+                  let dest = CGImageDestinationCreateWithURL(
+                    URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil)
+            else { fputs("COMPOSITE-DUMP failed\n", stderr); return }
+            CGImageDestinationAddImage(dest, img, nil)
+            CGImageDestinationFinalize(dest)
+            fputs("COMPOSITE-DUMP \(path) \(w)x\(h)\n", stderr)
         }
 
         // MARK: - target sizing

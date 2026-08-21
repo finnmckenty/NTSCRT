@@ -143,6 +143,8 @@ For iteration and headless/screenshot verification:
 - `CRT_TL_AUTOKEY_TEST=1` — assert the auto-key rules (edit on a keyframe rewrites it, edits between keyframes don't, scrubbing never mutates), print PASS/FAIL, exit
 - `CRT_COMPARE_X=<0…1>` — place the compare divider at launch (edge-case captures)
 - `CRT_ZOOM=<factor>` — start zoomed in, for capturing the pixel-inspection path. Zoomed composites must sample the full-resolution render, not the display-fit texture — the fit's box average can flatten scanlines entirely (`scripts/check-zoom-scanlines.sh` guards this; run it when touching `PreviewView.composite()` or `PreviewScaling` — it needs a GUI session, so it isn't in the release gate)
+- `CRT_DOWNSCALE_W=<px>` — set the downscale width at launch (reproduce reports at an exact chain-input size)
+- `CRT_COMPOSITE_DUMP=<out.png>` — write the drawable's actual pixels once the preview settles. **This is the only trustworthy way to measure preview pixels:** `screencapture -l` returns a 1× image of a 2× window, which halves scanline detail and corrupts any modulation measurement. Also note the *signed app bundle* must be launched via `open … --env` — exec'ing its binary directly from a shell never registers with the window server, so no window appears at all (the unsandboxed `.build/release/crt-app` is fine either way)
 - `CRT_FRONT=1` — activate the app at launch
 - `CRT_DUMP_TOOLTIPS=1` — print every NSView carrying tooltip text, plus what a click at its centre hits, then exit
 - `CRT_HOVER_LOG=1` — log preview hover events and the palette's measured frame

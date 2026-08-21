@@ -127,7 +127,8 @@ struct ContentView: View {
                 || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
                 || env["CRT_VIDEO_TL_TEST"] != nil || env["CRT_PLAY_BENCH"] != nil || env["CRT_LOOP_TEST"] != nil || env["CRT_STILL_LOOP_TEST"] != nil || env["CRT_PLAY_FRAME_CHECK"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil
-                || env["CRT_ZOOM"] != nil else { return }
+                || env["CRT_ZOOM"] != nil
+                || env["CRT_DOWNSCALE_W"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -153,6 +154,7 @@ struct ContentView: View {
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
         if let z = env["CRT_ZOOM"].flatMap(Float.init) { state.zoom = z }
+        if let w = env["CRT_DOWNSCALE_W"].flatMap(Int.init) { state.downscaleWidth = w }
         // CRT_STILL_LOOP_TEST=<out.mp4>: loop a still->video export.
         if let out = env["CRT_STILL_LOOP_TEST"] {
             guard let src = state.sourceTexture else { print("SLOOP FAIL"); exit(1) }
