@@ -180,12 +180,15 @@ struct ContentView: View {
         if let out = env["CRT_LOOP_TEST"] {
             guard let vs = state.videoSource else { print("LOOP FAIL: not a video"); exit(1) }
             let loops = env["CRT_LOOP_N"].flatMap(Int.init) ?? 2
+            // CRT_LOOP_CODEC="ProRes 422" etc. — exercise the .mov path too
+            // (the output path's extension must match: .mov for ProRes).
+            let codec = env["CRT_LOOP_CODEC"].flatMap(Mp4Exporter.Codec.init(rawValue:)) ?? .h264
             let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
             let settings = Mp4Exporter.Settings(
                 outputURL: URL(fileURLWithPath: out),
                 outputWidth: 480, outputHeight: 720,
                 downscale: state.downscaleSpec, presetPath: preset.path,
-                codec: .h264, averageBitrate: 6_000_000, loopCount: loops)
+                codec: codec, averageBitrate: 6_000_000, loopCount: loops)
             let ntscJSON = (state.ntscEnabled && state.ntscAvailable)
                 ? state.ntscStage?.settingsJSON() : nil
             do {
