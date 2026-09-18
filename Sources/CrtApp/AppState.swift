@@ -953,6 +953,26 @@ final class AppState {
     var exportProgress: Double = 0
     var exportWorking: Bool = false
 
+    /// Settings for exporting the loaded VIDEO. One builder for the Export
+    /// button and the headless loop test, so an option the popover shows
+    /// can't silently fail to reach the exporter: the Loop count once did —
+    /// the button never passed it, and the test never noticed because it
+    /// built its own settings.
+    func videoExportSettings(outputURL: URL,
+                             size: (width: Int, height: Int),
+                             bitrate: Int,
+                             codec: Mp4Exporter.Codec) -> Mp4Exporter.Settings {
+        Mp4Exporter.Settings(
+            outputURL: outputURL,
+            outputWidth: size.width,
+            outputHeight: size.height,
+            downscale: downscaleSpec,
+            presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
+            codec: codec,
+            averageBitrate: bitrate,
+            loopCount: max(1, exportLoopCount))
+    }
+
     /// True while an MP4 export is running. The exporter drives its own frame
     /// loop against the shared Metal queue, and librashader's Metal runtime is
     /// not thread-safe — the preview suspends animation for the duration.

@@ -531,7 +531,6 @@ struct ExportPopover: View {
 
     private func exportMP4() {
         guard let vs = state.videoSource else { return }
-        let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
         let codec = state.exportFormat.codec ?? .h264
 
         let panel = NSSavePanel()
@@ -550,15 +549,8 @@ struct ExportPopover: View {
         state.exportInProgress = true
 
         let exporter = Mp4Exporter(context: state.context)
-        let settings = Mp4Exporter.Settings(
-            outputURL: outURL,
-            outputWidth: size.width,
-            outputHeight: size.height,
-            downscale: state.downscaleSpec,
-            presetPath: preset.path,
-            codec: codec,
-            averageBitrate: computedBitrate
-        )
+        let settings = state.videoExportSettings(outputURL: outURL, size: size,
+                                                 bitrate: computedBitrate, codec: codec)
         let params = state.paramValues
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON()

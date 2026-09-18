@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import UniformTypeIdentifiers
 import Metal
 import CrtCore
@@ -183,20 +184,25 @@ struct ContentView: View {
             // CRT_LOOP_CODEC="ProRes 422" etc. — exercise the .mov path too
             // (the output path's extension must match: .mov for ProRes).
             let codec = env["CRT_LOOP_CODEC"].flatMap(Mp4Exporter.Codec.init(rawValue:)) ?? .h264
-            let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
-            let settings = Mp4Exporter.Settings(
-                outputURL: URL(fileURLWithPath: out),
-                outputWidth: 480, outputHeight: 720,
-                downscale: state.downscaleSpec, presetPath: preset.path,
-                codec: codec, averageBitrate: 6_000_000, loopCount: loops)
+            // Set the popover's own state and build the settings the way the
+            // Export button does. An earlier version handed loopCount straight
+            // to the exporter and so never noticed that the button didn't.
+            state.exportLoopCount = loops
+            let settings = state.videoExportSettings(outputURL: URL(fileURLWithPath: out),
+                                                     size: (480, 720), bitrate: 6_000_000,
+                                                     codec: codec)
             let ntscJSON = (state.ntscEnabled && state.ntscAvailable)
                 ? state.ntscStage?.settingsJSON() : nil
             do {
                 try await Mp4Exporter(context: state.context).export(
                     source: vs, paramValues: state.paramValues, settings: settings,
                     ntscSettingsJSON: ntscJSON, progress: { _ in })
-                print("LOOP wrote \(out) loops=\(loops) sourceFrames=\(vs.totalFrames) sourceDuration=\(String(format: "%.2f", vs.durationSeconds))")
-                exit(0)
+                let written = try await AVURLAsset(url: URL(fileURLWithPath: out))
+                    .load(.duration).seconds
+                let expected = vs.durationSeconds * Double(loops)
+                let ok = abs(written - expected) < 0.25
+                print("LOOP \(ok ? "PASS" : "FAIL") wrote \(out) loops=\(loops) sourceFrames=\(vs.totalFrames) sourceDuration=\(String(format: "%.2f", vs.durationSeconds)) writtenDuration=\(String(format: "%.2f", written))")
+                exit(ok ? 0 : 1)
             } catch {
                 print("LOOP FAIL: \(error)"); exit(1)
             }
