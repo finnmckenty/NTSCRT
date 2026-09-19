@@ -22,8 +22,13 @@ public final class GifExporter {
         public var fps: Int
         public var downscale: DownscaleSpec?
         public var presetPath: String
+        /// The CRT toggle (see Mp4Exporter.Settings.shaderEnabled). No
+        /// default on purpose.
+        public var shaderEnabled: Bool
         public init(outputURL: URL, width: Int, height: Int, fps: Int,
-                    downscale: DownscaleSpec?, presetPath: String) {
+                    downscale: DownscaleSpec?, presetPath: String,
+                    shaderEnabled: Bool) {
+            self.shaderEnabled = shaderEnabled
             self.outputURL = outputURL
             self.width = width
             self.height = height
@@ -107,7 +112,7 @@ public final class GifExporter {
             for i in 0..<totalFrames {
                 if let perFrame = frameParams?(i, totalFrames) {
                     if let shader = perFrame.shader {
-                        for (n, v) in shader { try? ctx.chain.setParameter(n, value: v) }
+                        for (n, v) in shader { try? ctx.chain?.setParameter(n, value: v) }
                     }
                     if let json = perFrame.ntscJSON, let stage = ctx.ntscStage {
                         try stage.setSettingsJSON(json)
@@ -154,7 +159,7 @@ public final class GifExporter {
                 if Double(sourceIndex) >= nextWanted {
                     if let perFrame = frameParams?(written, outFrames) {
                         if let shader = perFrame.shader {
-                            for (n, v) in shader { try? ctx.chain.setParameter(n, value: v) }
+                            for (n, v) in shader { try? ctx.chain?.setParameter(n, value: v) }
                         }
                         if let json = perFrame.ntscJSON, let stage = ctx.ntscStage {
                             try stage.setSettingsJSON(json)
@@ -181,7 +186,9 @@ public final class GifExporter {
     /// Owns the per-export GPU resources and the GIF destination. Frames are
     /// streamed in one at a time, so memory stays flat regardless of length.
     private final class Context: @unchecked Sendable {
-        let chain: LRShaderChain
+        /// nil = CRT switched off (ExportFrame bypasses the shader).
+        let chain: LRShaderChain?
+        let bypass: ShaderBypass
         let ntscStage: NtscStage?
         let target: MTLTexture
         /// Set when the requested size would alias the scanlines.
@@ -208,9 +215,15 @@ public final class GifExporter {
             }
             self.ntscStage = stage
 
-            self.chain = try LRShaderChain(presetPath: settings.presetPath,
-                                           commandQueue: exporter.context.queue)
-            for (n, v) in paramValues { try? chain.setParameter(n, value: v) }
+            if settings.shaderEnabled {
+                let c = try LRShaderChain(presetPath: settings.presetPath,
+                                          commandQueue: exporter.context.queue)
+                for (n, v) in paramValues { try? c.setParameter(n, value: v) }
+                self.chain = c
+            } else {
+                self.chain = nil
+            }
+            self.bypass = ShaderBypass(context: exporter.context)
 
             guard let target = makeRenderTarget(device: exporter.context.device,
                                                 width: settings.width, height: settings.height),
@@ -223,9 +236,11 @@ public final class GifExporter {
 
             // Supersample when the shader would otherwise be squeezed into
             // too few rows per source line (see ScanlineGrid).
-            self.supersample = SupersampledPass.make(device: exporter.context.device,
-                                                     chainInput: chainInputSize,
-                                                     target: (settings.width, settings.height))
+            self.supersample = settings.shaderEnabled
+                ? SupersampledPass.make(device: exporter.context.device,
+                                        chainInput: chainInputSize,
+                                        target: (settings.width, settings.height))
+                : nil
 
             try? FileManager.default.removeItem(at: settings.outputURL)
             guard let dest = CGImageDestinationCreateWithURL(
@@ -267,15 +282,10 @@ public final class GifExporter {
             }
             // Render big and integrate down, so the scanline pattern isn't
             // aliased into bands at GIF sizes.
-            if let supersample {
-                try supersample.encode(into: cb, pipeline: pipeline, chain: chain,
-                                       inputTexture: input, outputTexture: target,
-                                       downscale: downscale, frameCount: frameIndex)
-            } else {
-                try pipeline.encode(into: cb, chain: chain,
-                                    inputTexture: input, outputTexture: target,
-                                    downscale: downscale, frameCount: frameIndex)
-            }
+            try ExportFrame.encode(into: cb, pipeline: pipeline,
+                                   chain: chain, bypass: bypass, supersample: supersample,
+                                   inputTexture: input, outputTexture: target,
+                                   downscale: downscale, frameCount: frameIndex)
 
             guard let blit = cb.makeBlitCommandEncoder() else {
                 throw Error.encodeFailed("blit encoder")

@@ -278,95 +278,22 @@ struct ExportPopover: View {
     // MARK: - PNG (image source)
 
     private func exportPNG() {
-        guard let source = state.sourceTexture, let chain = state.chain else { return }
+        guard state.sourceTexture != nil else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "crt export \(exportTimestamp).png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        let size = outputSize
-        state.exportWorking = true
-        state.exportStatus = "Rendering…"
-
-        let device = state.context.device
-        let queue = state.context.queue
-        guard let target = makeRenderTarget(device: device, width: size.width, height: size.height),
-              let staging = makeStagingTexture(device: device, width: size.width, height: size.height),
-              let cb = queue.makeCommandBuffer() else {
-            state.exportStatus = "Failed to allocate textures"
-            state.exportWorking = false
-            return
-        }
-
-        do {
-            var input = source
-            var spec = state.downscaleSpec
-            if state.ntscEnabled, let stage = state.ntscStage {
-                input = try state.pipeline.prepareChainInput(
-                    source: source, downscale: spec,
-                    ntsc: stage, frameCount: state.frameCounter)
-                spec = nil
-            }
-            // Same scanline-banding guard the video/GIF paths use.
-            if let supersample = SupersampledPass.make(device: device,
-                                                       chainInput: state.chainInputSize,
-                                                       target: (size.width, size.height)) {
-                try supersample.encode(into: cb, pipeline: state.pipeline, chain: chain,
-                                       inputTexture: input, outputTexture: target,
-                                       downscale: spec, frameCount: state.frameCounter)
-            } else {
-                try state.pipeline.encode(into: cb,
-                                          chain: chain,
-                                          inputTexture: input,
-                                          outputTexture: target,
-                                          downscale: spec,
-                                          frameCount: state.frameCounter)
-            }
-        } catch {
-            state.exportStatus = "Render failed: \(error.localizedDescription)"
-            state.exportWorking = false
-            return
-        }
-
-        guard let blit = cb.makeBlitCommandEncoder() else {
-            state.exportStatus = "Blit encoder failed"; state.exportWorking = false; return
-        }
-        blit.copy(from: target,
-                  sourceSlice: 0, sourceLevel: 0,
-                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                  sourceSize: MTLSize(width: size.width, height: size.height, depth: 1),
-                  to: staging,
-                  destinationSlice: 0, destinationLevel: 0,
-                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-        // Discrete-GPU Macs: managed staging needs an explicit synchronize
-        // for the CPU to see the GPU's blit (no-op case skipped on unified
-        // memory, where staging is .shared; synchronize is illegal there).
-        if staging.storageMode == .managed {
-            blit.synchronize(resource: staging)
-        }
-        blit.endEncoding()
-
-        cb.addCompletedHandler { _ in
-            DispatchQueue.main.async {
-                do {
-                    let cg = try makeCGImage(from: staging)
-                    try writePNG(cg, to: url)
-                    state.exportStatus = "Wrote \(url.lastPathComponent) (\(size.width) × \(size.height))"
-                } catch {
-                    state.exportStatus = "Write failed: \(error.localizedDescription)"
-                }
-                state.exportWorking = false
-            }
-        }
-        cb.commit()
+        // The render itself lives in AppState so the headless export check
+        // drives exactly what this button does.
+        state.exportPNG(to: url, size: outputSize)
     }
 
     // MARK: - GIF (still or video source)
 
     private func exportGIF() {
         guard let source = state.sourceTexture, state.chain != nil else { return }
-        let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.gif]
@@ -382,14 +309,7 @@ struct ExportPopover: View {
         state.exportInProgress = true
 
         let exporter = GifExporter(context: state.context)
-        let settings = GifExporter.Settings(
-            outputURL: outURL,
-            width: size.width,
-            height: size.height,
-            fps: state.gifFPS,
-            downscale: state.downscaleSpec,
-            presetPath: preset.path
-        )
+        let settings = state.gifExportSettings(outputURL: outURL, size: size)
         let params = state.paramValues
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON()
@@ -451,7 +371,6 @@ struct ExportPopover: View {
 
     private func exportStillVideo() {
         guard let source = state.sourceTexture, state.chain != nil else { return }
-        let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
         let codec = state.exportFormat.codec ?? .h264
 
         let panel = NSSavePanel()
@@ -467,15 +386,8 @@ struct ExportPopover: View {
         state.exportInProgress = true
 
         let exporter = Mp4Exporter(context: state.context)
-        let settings = Mp4Exporter.Settings(
-            outputURL: outURL,
-            outputWidth: size.width,
-            outputHeight: size.height,
-            downscale: state.downscaleSpec,
-            presetPath: preset.path,
-            codec: codec,
-            averageBitrate: computedBitrate
-        )
+        let settings = state.mp4ExportSettings(route: .still, outputURL: outURL, size: size,
+                                               bitrate: computedBitrate, codec: codec)
         let params = state.paramValues
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON()
@@ -549,8 +461,8 @@ struct ExportPopover: View {
         state.exportInProgress = true
 
         let exporter = Mp4Exporter(context: state.context)
-        let settings = state.videoExportSettings(outputURL: outURL, size: size,
-                                                 bitrate: computedBitrate, codec: codec)
+        let settings = state.mp4ExportSettings(route: .video, outputURL: outURL, size: size,
+                                               bitrate: computedBitrate, codec: codec)
         let params = state.paramValues
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON()

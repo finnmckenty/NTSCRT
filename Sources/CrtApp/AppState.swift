@@ -953,24 +953,132 @@ final class AppState {
     var exportProgress: Double = 0
     var exportWorking: Bool = false
 
-    /// Settings for exporting the loaded VIDEO. One builder for the Export
-    /// button and the headless loop test, so an option the popover shows
-    /// can't silently fail to reach the exporter: the Loop count once did —
-    /// the button never passed it, and the test never noticed because it
-    /// built its own settings.
-    func videoExportSettings(outputURL: URL,
-                             size: (width: Int, height: Int),
-                             bitrate: Int,
-                             codec: Mp4Exporter.Codec) -> Mp4Exporter.Settings {
+    // MARK: export settings — one builder per exporter
+    //
+    // The Export buttons AND the headless checks build their settings here,
+    // so an option the app shows can't silently fail to reach the exporter.
+    // Two did: the Loop count (the video button never passed it) and the CRT
+    // toggle (no export route looked at it). Both went unnoticed because the
+    // checks built their own settings and so never exercised the buttons'.
+
+    /// Videos loop inside the exporter (`loopCount`); a still loops by
+    /// rendering more frames, so its settings always say 1.
+    enum Mp4Route { case video, still }
+
+    func mp4ExportSettings(route: Mp4Route,
+                           outputURL: URL,
+                           size: (width: Int, height: Int),
+                           bitrate: Int,
+                           codec: Mp4Exporter.Codec) -> Mp4Exporter.Settings {
         Mp4Exporter.Settings(
             outputURL: outputURL,
             outputWidth: size.width,
             outputHeight: size.height,
             downscale: downscaleSpec,
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
+            shaderEnabled: shaderEnabled,
             codec: codec,
             averageBitrate: bitrate,
-            loopCount: max(1, exportLoopCount))
+            loopCount: route == .video ? max(1, exportLoopCount) : 1)
+    }
+
+    func gifExportSettings(outputURL: URL,
+                           size: (width: Int, height: Int)) -> GifExporter.Settings {
+        GifExporter.Settings(
+            outputURL: outputURL,
+            width: size.width,
+            height: size.height,
+            fps: gifFPS,
+            downscale: downscaleSpec,
+            presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
+            shaderEnabled: shaderEnabled)
+    }
+
+    /// Render the loaded image through the pipeline and write it as a PNG.
+    /// Here rather than in the popover so the headless export check drives
+    /// exactly what the Export button does.
+    func exportPNG(to url: URL, size: (width: Int, height: Int),
+                   completion: ((Bool) -> Void)? = nil) {
+        guard let source = sourceTexture else { completion?(false); return }
+        // The CRT toggle: a nil chain means "shader off" to ExportFrame.
+        let exportChain: LRShaderChain? = shaderEnabled ? chain : nil
+        if shaderEnabled && exportChain == nil { completion?(false); return }
+
+        exportWorking = true
+        exportStatus = "Rendering…"
+        let device = context.device
+        guard let target = makeRenderTarget(device: device, width: size.width, height: size.height),
+              let staging = makeStagingTexture(device: device, width: size.width, height: size.height),
+              let cb = context.queue.makeCommandBuffer() else {
+            exportStatus = "Failed to allocate textures"
+            exportWorking = false
+            completion?(false)
+            return
+        }
+
+        do {
+            var input = source
+            var spec = downscaleSpec
+            if ntscEnabled, let stage = ntscStage {
+                input = try pipeline.prepareChainInput(
+                    source: source, downscale: spec,
+                    ntsc: stage, frameCount: frameCounter)
+                spec = nil
+            }
+            // Same scanline-banding guard the video/GIF paths use (only the
+            // shader draws scanlines, so only it needs it).
+            let supersample = exportChain == nil ? nil
+                : SupersampledPass.make(device: device, chainInput: chainInputSize,
+                                        target: (size.width, size.height))
+            try ExportFrame.encode(into: cb, pipeline: pipeline,
+                                   chain: exportChain, bypass: ShaderBypass(context: context),
+                                   supersample: supersample,
+                                   inputTexture: input, outputTexture: target,
+                                   downscale: spec, frameCount: frameCounter)
+        } catch {
+            exportStatus = "Render failed: \(error.localizedDescription)"
+            exportWorking = false
+            completion?(false)
+            return
+        }
+
+        guard let blit = cb.makeBlitCommandEncoder() else {
+            exportStatus = "Blit encoder failed"
+            exportWorking = false
+            completion?(false)
+            return
+        }
+        blit.copy(from: target,
+                  sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: size.width, height: size.height, depth: 1),
+                  to: staging,
+                  destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        // Discrete-GPU Macs: managed staging needs an explicit synchronize
+        // for the CPU to see the GPU's blit (illegal on .shared, so skipped
+        // on unified memory).
+        if staging.storageMode == .managed {
+            blit.synchronize(resource: staging)
+        }
+        blit.endEncoding()
+
+        cb.addCompletedHandler { _ in
+            DispatchQueue.main.async {
+                var ok = false
+                do {
+                    let cg = try makeCGImage(from: staging)
+                    try writePNG(cg, to: url)
+                    self.exportStatus = "Wrote \(url.lastPathComponent) (\(size.width) × \(size.height))"
+                    ok = true
+                } catch {
+                    self.exportStatus = "Write failed: \(error.localizedDescription)"
+                }
+                self.exportWorking = false
+                completion?(ok)
+            }
+        }
+        cb.commit()
     }
 
     /// True while an MP4 export is running. The exporter drives its own frame

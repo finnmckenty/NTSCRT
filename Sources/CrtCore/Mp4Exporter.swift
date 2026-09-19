@@ -38,6 +38,11 @@ public final class Mp4Exporter {
         public var outputHeight: Int
         public var downscale: DownscaleSpec?
         public var presetPath: String           // .slangp file
+        /// The CRT toggle. false renders the chain input scaled up with hard
+        /// pixels instead of running the shader (see ShaderBypass). No
+        /// default on purpose: every caller has to decide, because every
+        /// export route once ignored the toggle.
+        public var shaderEnabled: Bool
         public var codec: Codec
         /// Target average bitrate in bits/s (H.264/HEVC only; ProRes ignores it).
         public var averageBitrate: Int?
@@ -47,9 +52,11 @@ public final class Mp4Exporter {
         public var loopCount: Int
         public init(outputURL: URL, outputWidth: Int, outputHeight: Int,
                     downscale: DownscaleSpec?, presetPath: String,
+                    shaderEnabled: Bool,
                     codec: Codec = .h264, averageBitrate: Int? = nil,
                     loopCount: Int = 1) {
             self.loopCount = max(1, loopCount)
+            self.shaderEnabled = shaderEnabled
             self.outputURL = outputURL
             self.outputWidth = outputWidth
             self.outputHeight = outputHeight
@@ -78,6 +85,16 @@ public final class Mp4Exporter {
     public init(context: MetalContext) {
         self.context = context
         self.pipeline = Pipeline(context: context)
+    }
+
+    /// The export's own shader chain — or nil with the CRT switched off, which
+    /// ExportFrame reads as "bypass the shader".
+    static func makeChain(settings: Settings, paramValues: [String: Float],
+                          queue: MTLCommandQueue) throws -> LRShaderChain? {
+        guard settings.shaderEnabled else { return nil }
+        let chain = try LRShaderChain(presetPath: settings.presetPath, commandQueue: queue)
+        for (n, v) in paramValues { try? chain.setParameter(n, value: v) }
+        return chain
     }
 
     /// Copy an audio sample buffer with its timestamps shifted — needed when
@@ -127,10 +144,10 @@ public final class Mp4Exporter {
             ntscStage = stage
         }
 
-        // Fresh chain just for this export, on the same queue.
-        let chain = try LRShaderChain(presetPath: settings.presetPath,
-                                      commandQueue: context.queue)
-        for (n, v) in paramValues { try? chain.setParameter(n, value: v) }
+        // Fresh chain just for this export, on the same queue (nil = CRT off).
+        let chain = try Self.makeChain(settings: settings, paramValues: paramValues,
+                                       queue: context.queue)
+        let bypass = ShaderBypass(context: context)
 
         // Remove any existing file at the output path.
         try? FileManager.default.removeItem(at: settings.outputURL)
@@ -237,9 +254,12 @@ public final class Mp4Exporter {
         let chainInput = ScanlineGrid.chainInputSize(width: Int(source.pixelSize.width),
                                                     height: Int(source.pixelSize.height),
                                                     downscale: settings.downscale)
-        let supersample = SupersampledPass.make(device: context.device,
-                                                chainInput: chainInput,
-                                                target: (settings.outputWidth, settings.outputHeight))
+        // (Only the shader draws scanlines, so only it needs supersampling.)
+        let supersample = settings.shaderEnabled
+            ? SupersampledPass.make(device: context.device,
+                                    chainInput: chainInput,
+                                    target: (settings.outputWidth, settings.outputHeight))
+            : nil
 
         // Render target reused across frames (private).
         guard let target = makeRenderTarget(device: context.device,
@@ -285,7 +305,7 @@ public final class Mp4Exporter {
                 }
 
                 if let perFrame = frameParams?(passFrame, totalFrames) {
-                    if let shader = perFrame.shader {
+                    if let shader = perFrame.shader, let chain {
                         for (n, v) in shader { try? chain.setParameter(n, value: v) }
                     }
                     if let json = perFrame.ntscJSON, let stage = ntscStage {
@@ -303,17 +323,10 @@ public final class Mp4Exporter {
                         ntsc: stage, frameCount: passFrame + 1)
                     frameDownscale = nil
                 }
-                if let supersample {
-                    try supersample.encode(into: cb, pipeline: self.pipeline, chain: chain,
-                                           inputTexture: frameInput, outputTexture: target,
-                                           downscale: frameDownscale, frameCount: frameIndex + 1)
-                } else {
-                    try self.pipeline.encode(into: cb, chain: chain,
-                                             inputTexture: frameInput,
-                                             outputTexture: target,
-                                             downscale: frameDownscale,
-                                             frameCount: frameIndex + 1)
-                }
+                try ExportFrame.encode(into: cb, pipeline: self.pipeline,
+                                       chain: chain, bypass: bypass, supersample: supersample,
+                                       inputTexture: frameInput, outputTexture: target,
+                                       downscale: frameDownscale, frameCount: frameIndex + 1)
 
                 var pb: CVPixelBuffer?
                 if let pool = adaptor.pixelBufferPool {
@@ -441,9 +454,9 @@ public final class Mp4Exporter {
             ntscStage = stage
         }
 
-        let chain = try LRShaderChain(presetPath: settings.presetPath,
-                                      commandQueue: context.queue)
-        for (n, v) in paramValues { try? chain.setParameter(n, value: v) }
+        let chain = try Self.makeChain(settings: settings, paramValues: paramValues,
+                                       queue: context.queue)
+        let bypass = ShaderBypass(context: context)
 
         try? FileManager.default.removeItem(at: settings.outputURL)
         let writer: AVAssetWriter
@@ -496,9 +509,11 @@ public final class Mp4Exporter {
         // bands (see ScanlineGrid); nil when the size is already fine.
         let chainInput = ScanlineGrid.chainInputSize(width: source.width, height: source.height,
                                                     downscale: settings.downscale)
-        let supersample = SupersampledPass.make(device: context.device,
-                                                chainInput: chainInput,
-                                                target: (settings.outputWidth, settings.outputHeight))
+        let supersample = settings.shaderEnabled
+            ? SupersampledPass.make(device: context.device,
+                                    chainInput: chainInput,
+                                    target: (settings.outputWidth, settings.outputHeight))
+            : nil
 
         var sharedCacheOpt: CVMetalTextureCache?
         CVMetalTextureCacheCreate(nil, nil, context.device, nil, &sharedCacheOpt)
@@ -513,7 +528,7 @@ public final class Mp4Exporter {
                 }
 
                 if let perFrame = frameParams?(frameIndex, totalFrames) {
-                    if let shader = perFrame.shader {
+                    if let shader = perFrame.shader, let chain {
                         for (n, v) in shader { try? chain.setParameter(n, value: v) }
                     }
                     if let json = perFrame.ntscJSON, let stage = ntscStage {
@@ -534,17 +549,10 @@ public final class Mp4Exporter {
                         sourceVersion: 0)
                     frameDownscale = nil
                 }
-                if let supersample {
-                    try supersample.encode(into: cb, pipeline: self.pipeline, chain: chain,
-                                           inputTexture: frameInput, outputTexture: target,
-                                           downscale: frameDownscale, frameCount: frameIndex + 1)
-                } else {
-                    try self.pipeline.encode(into: cb, chain: chain,
-                                             inputTexture: frameInput,
-                                             outputTexture: target,
-                                             downscale: frameDownscale,
-                                             frameCount: frameIndex + 1)
-                }
+                try ExportFrame.encode(into: cb, pipeline: self.pipeline,
+                                       chain: chain, bypass: bypass, supersample: supersample,
+                                       inputTexture: frameInput, outputTexture: target,
+                                       downscale: frameDownscale, frameCount: frameIndex + 1)
 
                 var pb: CVPixelBuffer?
                 if let pool = adaptor.pixelBufferPool {

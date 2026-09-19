@@ -129,7 +129,8 @@ struct ContentView: View {
                 || env["CRT_VIDEO_TL_TEST"] != nil || env["CRT_PLAY_BENCH"] != nil || env["CRT_LOOP_TEST"] != nil || env["CRT_STILL_LOOP_TEST"] != nil || env["CRT_PLAY_FRAME_CHECK"] != nil
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil
                 || env["CRT_ZOOM"] != nil
-                || env["CRT_DOWNSCALE_W"] != nil || env["CRT_CACHE_CHECK"] != nil else { return }
+                || env["CRT_DOWNSCALE_W"] != nil || env["CRT_CACHE_CHECK"] != nil
+                || env["CRT_EXPORT_TOGGLE_CHECK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -162,11 +163,10 @@ struct ContentView: View {
             let loops = env["CRT_LOOP_N"].flatMap(Int.init) ?? 3
             state.timelineDuration = 2; state.timelineFPS = 24
             let base = state.timelineTotalFrames
-            let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
-            let settings = Mp4Exporter.Settings(
-                outputURL: URL(fileURLWithPath: out), outputWidth: 480, outputHeight: 360,
-                downscale: state.downscaleSpec, presetPath: preset.path,
-                codec: .h264, averageBitrate: 6_000_000)
+            let settings = state.mp4ExportSettings(route: .still,
+                                                   outputURL: URL(fileURLWithPath: out),
+                                                   size: (480, 360), bitrate: 6_000_000,
+                                                   codec: .h264)
             do {
                 try await Mp4Exporter(context: state.context).exportStill(
                     source: src, totalFrames: base * loops, fps: state.timelineFPS,
@@ -188,9 +188,10 @@ struct ContentView: View {
             // Export button does. An earlier version handed loopCount straight
             // to the exporter and so never noticed that the button didn't.
             state.exportLoopCount = loops
-            let settings = state.videoExportSettings(outputURL: URL(fileURLWithPath: out),
-                                                     size: (480, 720), bitrate: 6_000_000,
-                                                     codec: codec)
+            let settings = state.mp4ExportSettings(route: .video,
+                                                   outputURL: URL(fileURLWithPath: out),
+                                                   size: (480, 720), bitrate: 6_000_000,
+                                                   codec: codec)
             let ntscJSON = (state.ntscEnabled && state.ntscAvailable)
                 ? state.ntscStage?.settingsJSON() : nil
             do {
@@ -270,6 +271,98 @@ struct ContentView: View {
                 try? (verdict + "\n").write(toFile: out, atomically: true, encoding: .utf8)
             }
             exit(ok ? 0 : 1)
+        }
+        // CRT_EXPORT_TOGGLE_CHECK=<dir>: export every route this source offers
+        // with the CRT toggle on and then off — through the same settings
+        // builders and methods the Export buttons use — and require the
+        // scanlines to be there with it on and gone with it off. (Every route
+        // once ignored the toggle; the exporter-level tests in the release
+        // gate can't see the buttons' wiring, this can.)
+        if let dir = env["CRT_EXPORT_TOGGLE_CHECK"] {
+            let outDir = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+            state.ntscEnabled = false          // measure the shader alone
+            let aspect = Double(state.sourceAspect)
+            let size: (width: Int, height: Int) = aspect >= 1
+                ? (960, max(64, Int((960 / aspect).rounded())) & ~1)
+                : (max(64, Int((960 * aspect).rounded())) & ~1, 960)
+            let gifSize = ((size.width / 2) & ~1, (size.height / 2) & ~1)
+            var failures = 0
+
+            func firstFrame(_ url: URL) async -> CGImage? {
+                if url.pathExtension == "mp4" || url.pathExtension == "mov" {
+                    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+                    gen.requestedTimeToleranceBefore = .zero
+                    gen.requestedTimeToleranceAfter = .zero
+                    return try? await gen.image(at: .zero).image
+                }
+                guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+                return CGImageSourceCreateImageAtIndex(src, 0, nil)
+            }
+            func run(_ route: String, ext: String,
+                     export: (URL) async throws -> Void) async {
+                var modulation: [Bool: Double] = [:]
+                for on in [true, false] {
+                    state.shaderEnabled = on
+                    let url = outDir.appendingPathComponent("\(route)-\(on ? "on" : "off").\(ext)")
+                    try? FileManager.default.removeItem(at: url)
+                    do { try await export(url) } catch {
+                        print("TOGGLECHK FAIL \(route): \(error)"); failures += 1; return
+                    }
+                    guard let image = await firstFrame(url) else {
+                        print("TOGGLECHK FAIL \(route): unreadable output"); failures += 1; return
+                    }
+                    modulation[on] = ImageStats.rowModulation(of: image)
+                }
+                let on = modulation[true] ?? 0, off = modulation[false] ?? 0
+                let ok = on > 3 * off && on - off > 2
+                print(String(format: "TOGGLECHK %@ %@  scanline modulation on=%.2f off=%.2f",
+                             ok ? "PASS" : "FAIL", route as NSString, on, off))
+                if !ok { failures += 1 }
+            }
+
+            if let vs = state.videoSource {
+                await run("video-mp4", ext: "mp4") { url in
+                    let s = state.mp4ExportSettings(route: .video, outputURL: url, size: size,
+                                                    bitrate: 8_000_000, codec: .h264)
+                    try await Mp4Exporter(context: state.context).export(
+                        source: vs, paramValues: state.paramValues, settings: s,
+                        ntscSettingsJSON: nil, progress: { _ in })
+                }
+                await run("video-gif", ext: "gif") { url in
+                    let s = state.gifExportSettings(outputURL: url, size: gifSize)
+                    try await GifExporter(context: state.context).exportVideo(
+                        source: vs, paramValues: state.paramValues, settings: s,
+                        ntscSettingsJSON: nil, progress: { _ in })
+                }
+            } else if let src = state.sourceTexture {
+                await run("png", ext: "png") { url in
+                    try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Swift.Error>) in
+                        state.exportPNG(to: url, size: size) { ok in
+                            if ok { c.resume() }
+                            else { c.resume(throwing: NSError(domain: "togglecheck", code: 1)) }
+                        }
+                    }
+                }
+                state.timelineDuration = 0.5
+                state.timelineFPS = 12
+                await run("still-mp4", ext: "mp4") { url in
+                    let s = state.mp4ExportSettings(route: .still, outputURL: url, size: size,
+                                                    bitrate: 8_000_000, codec: .h264)
+                    try await Mp4Exporter(context: state.context).exportStill(
+                        source: src, totalFrames: state.timelineTotalFrames,
+                        fps: state.timelineFPS, paramValues: state.paramValues, settings: s,
+                        ntscSettingsJSON: nil, progress: { _ in })
+                }
+                await run("still-gif", ext: "gif") { url in
+                    let s = state.gifExportSettings(outputURL: url, size: gifSize)
+                    try await GifExporter(context: state.context).exportStill(
+                        source: src, totalFrames: 4, paramValues: state.paramValues,
+                        settings: s, ntscSettingsJSON: nil, progress: { _ in })
+                }
+            }
+            print(failures == 0 ? "TOGGLECHK ALL PASS" : "TOGGLECHK \(failures) FAILED")
+            exit(failures == 0 ? 0 : 1)
         }
         // CRT_CACHE_CHECK=<out.png>: play the clip so the frame cache fills,
         // then on the second loop dump the composite at a fixed frame,
@@ -364,10 +457,9 @@ struct ContentView: View {
             let b = (ev.ntscValues(at: 1)["composite_noise_intensity"] as? NSNumber)?.doubleValue ?? -1
             check("animation spans the clip", abs(b - a) > 0.5, "\(a) -> \(b)")
 
-            let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
-            let settings = GifExporter.Settings(
-                outputURL: URL(fileURLWithPath: out), width: 240, height: 180, fps: 8,
-                downscale: state.downscaleSpec, presetPath: preset.path)
+            var settings = state.gifExportSettings(outputURL: URL(fileURLWithPath: out),
+                                                   size: (240, 180))
+            settings.fps = 8
             let ntscJSON = state.ntscStage?.settingsJSON()
             do {
                 try await GifExporter(context: state.context).exportVideo(
@@ -684,11 +776,7 @@ struct ContentView: View {
         let w = state.gifWidth & ~1
         let h = max(64, Int((Double(w) / Double(state.sourceAspect)).rounded())) & ~1
         let frames = Int((state.timelineDuration * Double(state.gifFPS)).rounded())
-        let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
-        let settings = GifExporter.Settings(outputURL: out, width: w, height: h,
-                                            fps: state.gifFPS,
-                                            downscale: state.downscaleSpec,
-                                            presetPath: preset.path)
+        let settings = state.gifExportSettings(outputURL: out, size: (w, h))
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON() : nil
         do {
@@ -749,11 +837,9 @@ struct ContentView: View {
         guard let ev = state.makeTimelineEvaluator() else {
             print("TL_SELFTEST: no evaluator"); exit(1)
         }
-        let preset = state.presetsRoot.appendingPathComponent(state.selectedPreset.relativePath)
-        let settings = Mp4Exporter.Settings(
-            outputURL: out, outputWidth: 960, outputHeight: 720,
-            downscale: state.downscaleSpec, presetPath: preset.path,
-            codec: .h264, averageBitrate: 8_000_000)
+        let settings = state.mp4ExportSettings(route: .still, outputURL: out,
+                                               size: (960, 720), bitrate: 8_000_000,
+                                               codec: .h264)
         let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
             ? state.ntscStage?.settingsJSON() : nil
         let total = state.timelineTotalFrames

@@ -69,7 +69,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CrtCoreTests",
-            dependencies: ["CrtCore"],
+            dependencies: ["CrtCore", "CrtAppBridge"],
             path: "Tests/CrtCoreTests"
         ),
         .executableTarget(
