@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import AppKit
 import Observation
 import UniformTypeIdentifiers
 import os
@@ -507,6 +508,24 @@ final class AppState {
     private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
+    // MARK: - neutral values (double-click a slider knob — NeutralValues.swift)
+
+    /// The value a shader parameter's Reset restores: the house default for
+    /// this preset, else the shader's own.
+    func shaderDefault(_ p: LRShaderParam) -> Float {
+        Self.appShaderDefaults[selectedPreset.id]?[p.name] ?? p.initial
+    }
+
+    func shaderNeutral(_ p: LRShaderParam) -> Double {
+        (Neutral.shader[p.name] ?? .defaultValue)
+            .resolve(min: Double(p.minimum), max: Double(p.maximum), default: Double(shaderDefault(p)))
+    }
+
+    func ntscNeutral(_ name: String, min lo: Double, max hi: Double) -> Double {
+        let def = (ntscDefaults[name] as? NSNumber)?.doubleValue ?? lo
+        return (Neutral.ntsc[name] ?? .defaultValue).resolve(min: lo, max: hi, default: def)
+    }
+
     func setGlitchValue(_ id: String, _ value: Double) {
         glitchValues[id] = value
         autoKeyIfParked()
@@ -823,6 +842,49 @@ final class AppState {
         timelineKeys[i].shaderParams = paramValues
         timelineKeys[i].ntscValues = ntscValues
         timelineKeys[i].glitchValues = glitchValues
+    }
+
+    // MARK: - Space: play/pause on the timeline
+
+    @ObservationIgnored private var keyMonitor: Any?
+    /// Set by the preview when a held Space was used to pan, so releasing it
+    /// doesn't also toggle playback.
+    @ObservationIgnored var spacePanned = false
+    @ObservationIgnored private var spaceDecidesOnRelease = false
+
+    /// Space toggles play/pause while the timeline is showing, as in an NLE.
+    /// It also pans the zoomed preview while held, so: zoomed out, a press
+    /// toggles at once; zoomed in, a tap toggles on release and a hold that
+    /// dragged doesn't. Typing in a text field is left alone.
+    func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self, event.keyCode == 49,
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  self.timelineEnabled, self.timelineAvailable, !self.exportInProgress
+            else { return event }
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+                return event
+            }
+            if event.type == .keyDown {
+                if event.isARepeat { return self.spaceDecidesOnRelease ? event : nil }
+                self.spacePanned = false
+                if self.zoom > 1.001 {
+                    self.spaceDecidesOnRelease = true
+                    return event                  // the preview may pan with it
+                }
+                self.spaceDecidesOnRelease = false
+                self.toggleTimelinePreview()
+                return nil
+            }
+            // keyUp
+            if self.spaceDecidesOnRelease {
+                self.spaceDecidesOnRelease = false
+                if !self.spacePanned { self.toggleTimelinePreview() }
+                return event                      // the preview ends its pan
+            }
+            return nil
+        }
     }
 
     func toggleTimelinePreview() {

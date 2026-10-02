@@ -643,6 +643,7 @@ final class PreviewMTKView: MTKView {
             return
         }
         if spaceDown && state.zoom > 1.0 {
+            state.spacePanned = true     // a pan, not a play/pause tap
             // Pan in image-uv space. Drag right → image moves right, which in
             // texture-space means panX increases.
             let dx = Float(p.x - dragStartMouse.x) / Float(bounds.width)

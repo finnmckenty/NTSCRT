@@ -91,11 +91,11 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "dropouts", label: "Dropouts", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Oxide missing from the tape: brief losses of signal along a line."),
+            help: "Oxide missing from the tape: brief losses of signal, often a few lines tall. How they look depends on Dropout compensation."),
         GlitchParam(
             id: "dropout_compensation", label: "Dropout compensation", group: .tape,
             kind: .toggle, defaultValue: 1,
-            help: "The VCR's fix for dropouts: replace the lost stretch with the same stretch of the line before. Off, they show as white streaks."),
+            help: "The VCR's fix for dropouts: replay the lost stretch from the line before. On, dropouts shrink to brief white ticks and short smears where one line repeats down a tall flaw; off, they show as long white streaks."),
     ]
 
     public static let byID: [String: GlitchParam] =

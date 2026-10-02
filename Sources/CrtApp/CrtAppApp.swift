@@ -108,7 +108,7 @@ private func dumpControls(presetsRoot: URL, context: MetalContext) {
                 kind = "slider"
             }
             let caption = pres.caption.map { "  ⌞\($0)" } ?? ""
-            print("  \(kind.padding(toLength: 30, withPad: " ", startingAt: 0)) \(p.name)  \"\(pres.title)\"\(caption)")
+            print("  \(kind.padding(toLength: 30, withPad: " ", startingAt: 0)) \(p.name)  \"\(pres.title)\"  [\(p.minimum)…\(p.maximum) default \(p.initial) step \(p.step)]\(caption)")
         }
     }
     exit(0)

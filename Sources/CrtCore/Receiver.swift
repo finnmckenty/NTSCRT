@@ -9,6 +9,11 @@ public enum NTSCTiming {
     public static let sync = 4.7
     public static let burstStart = 5.3
     public static let burstEnd = 7.8
+    /// The set's burst gate: a 4 µs window around the burst, keyed from its
+    /// own horizontal flyback — so a horizontal phase error slides it off
+    /// the burst (colour fades, then the killer cuts in) and onto picture.
+    public static let gateStart = 4.55
+    public static let gateEnd = 8.55
     public static let activeStart = 9.4
     public static let activeLength = 52.656
     public static var activeEnd: Double { activeStart + activeLength }
@@ -104,7 +109,13 @@ public struct GlitchRow: Equatable {
     /// to the demodulator's streaks, and the deck's colour killer drops
     /// chroma — unlike antenna snow, which adds to the picture.
     public var tapeLoss: Float = 0
-    var pad0: Float = 0, pad1: Float = 0, pad2: Float = 0
+    /// Where the burst gate sits relative to the scan line start (µs). The
+    /// gate is keyed from a fast phase loop that follows the incoming sync,
+    /// so it stays on the burst through a slow or standing phase error (a
+    /// sliding picture keeps its colour) but not through cycle slips (a torn
+    /// picture's colour goes wild).
+    public var gateShift: Float = 0
+    var pad1: Float = 0, pad2: Float = 0
 }
 
 /// Lost stretch of a signal line (oxide dropout). Mirrors the GPU struct.
@@ -210,10 +221,15 @@ public final class ReceiverSimulator {
     private var r: Int64 = 0                // next TV line to scan
     private var theta = 0.0                 // TV line r starts at signal time r·H + θ
     private var integ = 0.0                 // integral term, µs per line
-    // Vertical oscillator.
-    private var ramp = 0.0
+    // Vertical oscillator: lines into the set's own field, plus the sync
+    // integrator and whether it is currently above its threshold.
+    private var vPhase = 0.0
     private var vInteg = 0.0
+    private var vAbove = false
     private var triggers: [Int64] = []
+    // The burst-key loop's phase error estimate (µs), and its log.
+    private var gateErr = 0.0
+    private var gateLog: [Double]
     // Recent TV line starts, for building the displayed field.
     private var thetaLog: [Double]
     private let logCap: Int
@@ -233,6 +249,7 @@ public final class ReceiverSimulator {
         usPerSecond = NTSCTiming.line * Double(raster.totalLines) * NTSCTiming.fieldRate
         logCap = 4 * raster.totalLines + 64
         thetaLog = Array(repeating: 0, count: logCap)
+        gateLog = Array(repeating: 0, count: logCap)
         knobs = Knobs(GlitchSettings(), raster: raster)
         nominalTrigger = Self.calibrate(raster: raster, seed: seed)
         reset()
@@ -243,10 +260,12 @@ public final class ReceiverSimulator {
         r = 0
         theta = 0
         integ = 0
-        ramp = 0
+        vPhase = 0
         vInteg = 0
+        vAbove = false
+        gateErr = 0
         triggers.removeAll()
-        for i in thetaLog.indices { thetaLog[i] = 0 }
+        for i in thetaLog.indices { thetaLog[i] = 0; gateLog[i] = 0 }
     }
 
     /// Complete simulation state at a moment — small enough to keep one per
@@ -257,19 +276,24 @@ public final class ReceiverSimulator {
         fileprivate let r: Int64
         fileprivate let theta: Double
         fileprivate let integ: Double
-        fileprivate let ramp: Double
+        fileprivate let vPhase: Double
         fileprivate let vInteg: Double
+        fileprivate let vAbove: Bool
+        fileprivate let gateErr: Double
+        fileprivate let gateLog: [Double]
         fileprivate let triggers: [Int64]
         fileprivate let thetaLog: [Double]
     }
 
     public func snapshot() -> Snapshot {
-        Snapshot(time: time, r: r, theta: theta, integ: integ, ramp: ramp, vInteg: vInteg,
+        Snapshot(time: time, r: r, theta: theta, integ: integ, vPhase: vPhase, vInteg: vInteg,
+                 vAbove: vAbove, gateErr: gateErr, gateLog: gateLog,
                  triggers: triggers, thetaLog: thetaLog)
     }
 
     public func restore(_ s: Snapshot) {
-        r = s.r; theta = s.theta; integ = s.integ; ramp = s.ramp; vInteg = s.vInteg
+        r = s.r; theta = s.theta; integ = s.integ; vPhase = s.vPhase; vInteg = s.vInteg
+        vAbove = s.vAbove; gateErr = s.gateErr; gateLog = s.gateLog
         triggers = s.triggers; thetaLog = s.thetaLog
     }
 
@@ -332,8 +356,15 @@ public final class ReceiverSimulator {
         // The separator slices halfway down the 40 IRE sync pulse, after
         // a ~0.5 MHz low-pass that keeps about a third of the video noise.
         let sigmaSep = sigma * 0.35
-        let pDetect = sigmaSep > 0 ? GlitchRandom.phi(20 / sigmaSep) : 1
-        let pNoisePeak = sigmaSep > 0 ? GlitchRandom.phi(-20 / sigmaSep) : 0
+        // Hum the set's DC restoration doesn't remove shifts the whole
+        // signal against the fixed slice level: sync tips rise toward it
+        // (missed pulses) or blanking sinks toward it (false ones).
+        let humNow = hum(atSignalTime: tau)
+        let humShift = 0.4 * humNow
+        let syncMargin = 20 - humShift          // sync tip below the slice
+        let blankMargin = 20 + humShift         // blanking above the slice
+        let pDetect = sigmaSep > 0 ? GlitchRandom.phi(syncMargin / sigmaSep) : (syncMargin > 0 ? 1 : 0)
+        let pNoisePeak = sigmaSep > 0 ? GlitchRandom.phi(-blankMargin / sigmaSep) : (blankMargin > 0 ? 0 : 1)
         let syncPresent = 1 - min(1, loss * loss * 1.2)
 
         // Horizontal phase detector.
@@ -346,7 +377,7 @@ public final class ReceiverSimulator {
         } else if GlitchRandom.uniform(seed, 13, r) < pDetect * syncPresent {
             var d = edge - tau
             d += GlitchRandom.gauss(seed, 14, r) * sigmaSep * 0.0125   // edge jitter
-            d += hum(atSignalTime: tau) * 0.03                         // hum bend
+            d += humNow * 0.05                                         // hum bend
             detected = d
         }
 
@@ -375,17 +406,42 @@ public final class ReceiverSimulator {
                         + (1 - duty) * pNoisePeak * (1 - pNoisePeak)) / 60
         if variance > 0 { measured += GlitchRandom.gauss(seed, 15, r) * variance.squareRoot() }
         vInteg += (measured - vInteg) * k.vBeta
+        // A vertical sync pulse is the integrator rising through its
+        // threshold (with hysteresis, so a noisy crossing counts once).
+        var vsync = false
+        if vAbove { if vInteg < 0.25 { vAbove = false } }
+        else if vInteg >= 0.45 { vAbove = true; vsync = true }
 
-        // Vertical oscillator: a ramp the integrated sync can trigger early.
-        let lineTime = (Double(r + 1) * H + next) - tau
-        ramp += lineTime / (H * Double(L) * (1 + k.vTotal))
-        if ramp >= 0.5 && ramp + k.vGain * vInteg >= 1 {
-            ramp = 0
+        // Vertical oscillator, phase-locked to those pulses through a
+        // sinusoidal detector, as in the sync processors of later sets.
+        // Symmetric: detuned either way it holds with a standing phase error
+        // (the picture slides, revealing the blanking bar), then past the
+        // lock range rolls at a beat rising from zero as √(detuning) — slowly
+        // at first. Time advances by exactly one line per line in lock.
+        vPhase += 1 + (next - theta) / H
+        let period = Double(L) * (1 + k.vTotal)
+        if vsync {
+            var e = vPhase / period - k.vCentre
+            e -= e.rounded()                    // nearest wrap, −½…½
+            vPhase -= k.vLock * period * sin(2 * .pi * e)
+        }
+        if vPhase >= period {
+            vPhase -= period
             triggers.append(r)
             if triggers.count > 16 { triggers.removeFirst() }
         }
 
+        // Burst-key loop: a fast first-order follower of the phase error to
+        // the nearest sync edge (only when a pulse was seen). Standing and
+        // slow errors it tracks out; a slipping loop's error races past it.
+        if detected != nil {
+            var d = (edge - tau) - gateErr
+            d -= H * (d / H).rounded()
+            gateErr += k.gateAlpha * d
+            gateErr -= H * (gateErr / H).rounded()
+        }
         thetaLog[Int(posmod(r, Int64(logCap)))] = theta
+        gateLog[Int(posmod(r, Int64(logCap)))] = gateErr
         theta = next
         r += 1
     }
@@ -418,7 +474,8 @@ public final class ReceiverSimulator {
                 noiseIRE: Float(k.sigma),
                 humIRE: Float(hum(atSignalTime: tau)),
                 burstScale: Float(max(0, 1 - loss)),
-                tapeLoss: Float(min(1, max(0, loss)))))
+                tapeLoss: Float(min(1, max(0, loss))),
+                gateShift: Float(loggedGate(tvLine))))
         }
 
         // Settle the colour reference over the blanking lines just above
@@ -437,9 +494,10 @@ public final class ReceiverSimulator {
             let (j, u0) = signalLine(at: tau)
             let jf = Int(posmod(j, Int64(L)))
             var gi = 0.0, gq = 0.0
+            let g0 = u0 + loggedGate(tvLine)
             if raster.hasBurst(fieldLine: jf) {
-                let lo = max(u0 + NTSCTiming.burstStart, NTSCTiming.burstStart)
-                let hi = min(u0 + NTSCTiming.burstEnd, NTSCTiming.burstEnd)
+                let lo = max(g0 + NTSCTiming.gateStart, NTSCTiming.burstStart)
+                let hi = min(g0 + NTSCTiming.gateEnd, NTSCTiming.burstEnd)
                 let overlap = max(0, hi - lo) / (NTSCTiming.burstEnd - NTSCTiming.burstStart)
                 let amp = NTSCTiming.burstAmplitude * overlap * k.agc * max(0, 1 - signalLoss(j))
                 gi = amp * NTSCTiming.burstI
@@ -473,6 +531,11 @@ public final class ReceiverSimulator {
     private func inRetrace(_ tvLine: Int64) -> Bool {
         let retrace = Int64(max(2, (9 * raster.scale).rounded()))
         return triggers.contains { tvLine >= $0 && tvLine < $0 + retrace }
+    }
+
+    private func loggedGate(_ tvLine: Int64) -> Double {
+        guard tvLine >= 0, tvLine < r, r - tvLine <= Int64(logCap) else { return gateErr }
+        return gateLog[Int(posmod(tvLine, Int64(logCap)))]
     }
 
     private func loggedTheta(_ tvLine: Int64) -> Double {
@@ -648,8 +711,17 @@ public final class ReceiverSimulator {
                 + GlitchRandom.uniform(seed, 63, f, Int64(i)) * NTSCTiming.activeLength * 0.95
             let length = min(30, max(0.4, -log(max(1e-6, GlitchRandom.uniform(seed, 64, f, Int64(i))))
                                      * (1.5 + 5 * rate)))
-            out.append(GlitchDropout(fieldLine: Int32(min(line, raster.totalLines - 1)),
-                                     uStart: Float(start), uLength: Float(length)))
+            // An oxide flaw is usually taller than one track pitch, so it
+            // hits a few consecutive lines, shifted a little each time.
+            let span = 1 + Int(pow(GlitchRandom.uniform(seed, 65, f, Int64(i)), 2) * 4)
+            for k in 0..<span where out.count < 64 {
+                let l = line + k
+                guard l < raster.totalLines else { break }
+                let drift = GlitchRandom.gauss(seed, 66, f, Int64(i * 8 + k)) * 0.8
+                let scale = 0.7 + 0.6 * GlitchRandom.uniform(seed, 67, f, Int64(i * 8 + k))
+                out.append(GlitchDropout(fieldLine: Int32(l), uStart: Float(start + drift),
+                                         uLength: Float(length * scale)))
+            }
         }
         return out
     }
@@ -682,6 +754,7 @@ public final class ReceiverSimulator {
         usPerSecond = NTSCTiming.line * Double(raster.totalLines) * NTSCTiming.fieldRate
         logCap = 4 * raster.totalLines + 64
         thetaLog = Array(repeating: 0, count: logCap)
+        gateLog = Array(repeating: 0, count: logCap)
         knobs = Knobs(GlitchSettings(), raster: raster)
         nominalTrigger = 0
     }
@@ -697,10 +770,15 @@ struct Knobs {
     let sigma: Double
     /// Picture amplitude once the AGC runs out of gain (very weak signals).
     let agc: Double
-    /// Vertical oscillator's free-running period, as a fraction of a field
-    /// slower than the signal. Lock holds from ~0.4% to ~4%.
+    /// Vertical oscillator's free-running detuning (fraction of a field).
     let vTotal: Double
-    let vGain = 0.055
+    /// Its greatest pull per detected pulse, as a fraction of the field —
+    /// which is also the lock range: 1.5%, beyond which the picture rolls.
+    let vLock = 0.015
+    /// The set is aligned so that, at its centred hold, retrace starts at the
+    /// vertical sync pulse despite the oscillator's built-in detuning — the
+    /// standing phase error that detuning would cause, cancelled.
+    let vCentre: Double
     let vBeta: Double
     /// Horizontal oscillator's free-running offset per raster line.
     let hR: Double
@@ -717,6 +795,8 @@ struct Knobs {
     let tracking: Double
     let dropouts: Double
     let captions: Bool
+    /// Burst-key loop rate per raster line (~6 NTSC lines).
+    let gateAlpha: Double
     // Colour reference loop rates, per raster line.
     let chromaAlpha: Double
     let accGamma: Double
@@ -726,18 +806,41 @@ struct Knobs {
         self.settings = settings
         let s = raster.scale
         let strength = min(1, max(0, settings["signal_strength"]))
-        let cnr = 60 * strength
-        sigma = max(0, 100 * pow(10, -cnr / 20) - 0.1)
+        // Carrier-to-noise ratio falls linearly from 38 dB to 0 across the
+        // knob, so every part of its travel does something: faint snow just
+        // below 100%, heavy by 50%, colour and sync failing below ~30%,
+        // nothing but snow at 0. The last term takes the residual noise at
+        // 100% to exactly zero.
+        sigma = max(0, 100 * pow(10, -1.9 * strength) - 1.26 * pow(strength, 4))
         agc = min(1, strength / 0.45)
-        vTotal = 0.023 + settings["vertical_hold"] * 0.12
+        // Knob → detuning on a power curve, so the travel spreads over the
+        // range where things happen: the picture slides from the first few
+        // percent, rolls from ~25%, ~6 rolls a second at the end. A small
+        // built-in detuning (as no real oscillator is exact) makes a
+        // signal that loses its sync drift slowly instead of holding still.
+        let vKnob = settings["vertical_hold"]
+        let builtIn = 0.002
+        vTotal = builtIn + (vKnob < 0 ? -1 : 1) * 0.10 * pow(abs(vKnob), 1.37)
+        vCentre = asin(builtIn / vLock) / (2 * .pi)
         vBeta = 1 - exp(-1 / (1.5 * s))
-        hR = settings["horizontal_hold"] * 0.08 / s
-        // AFC: proportional gain 0.04–0.4 per NTSC line, damping 0.7.
+        // Horizontal: the AFC is proportional, so any detuning shows as a
+        // standing phase error — the picture slides. The knob curve is in two
+        // parts: up to the hold-in edge (~35%) the slide grows gently (under
+        // 2 µs to ~15%; the burst gate slides off the burst — colour drops
+        // out — around 20%); past it, cycle slipping starts with one or two
+        // slow bars and builds to ~11.
+        let hKnob = abs(settings["horizontal_hold"])
         let kpN = 0.04 * pow(10, min(1, max(0, settings["afc_speed"])))
+        let edge = 0.04 * pow(10, 0.5) / (2 * .pi)        // hold-in edge at the default AFC
+        let hFree = hKnob <= 0.35
+            ? edge * pow(hKnob / 0.35, 2)
+            : edge + 0.0265 * (hKnob - 0.35) / 0.65
+        hR = (settings["horizontal_hold"] < 0 ? -1 : 1) * hFree / s
+        // AFC: proportional gain 0.04–0.4 per NTSC line.
         kp = kpN / s
         ki = pow(kpN / 1.4, 2) / (s * s)
-        uMax = 0.025 * NTSCTiming.line / s
-        humIRE = settings["hum"] * 25
+        uMax = 0
+        humIRE = settings["hum"] * 60
         headSwitch = settings["head_switch"]
         jitter = settings["timebase_jitter"]
         crinkle = settings["crinkle"]
@@ -746,6 +849,7 @@ struct Knobs {
         tracking = min(1, max(0, settings["tracking"]))
         dropouts = settings["dropouts"]
         captions = settings.flag("closed_captions")
+        gateAlpha = 1 - exp(-1 / (6 * s))
         chromaAlpha = 1 - exp(-1 / (4 * s))
         accGamma = 1 - exp(-1 / (8 * s))
         killerKappa = 1 - exp(-1 / (15 * s))

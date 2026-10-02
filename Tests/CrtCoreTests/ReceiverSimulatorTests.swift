@@ -86,13 +86,33 @@ final class ReceiverSimulatorTests: XCTestCase {
         return out
     }
 
-    func testVerticalHoldNearCentreLocks() {
-        for knob in [-0.12, 0.0, 0.12] {
+    func testVerticalHoldNearCentreLocksAndSlides() {
+        // In lock the phase-locked oscillator holds with a standing phase
+        // error: the picture slides vertically as the hold is turned, then
+        // starts to roll past ±~25%.
+        var shifts: [Double: Int] = [:]
+        for knob in [-0.15, -0.05, 0.0, 0.05, 0.15] {
             let tops = topLines(plans(["vertical_hold": knob], count: 30))
             XCTAssertEqual(Set(tops).count, 1, "knob \(knob) should hold still: \(tops)")
-            XCTAssertLessThan(abs(tops[0] - raster.vbiLines), 8,
-                              "locked picture sits near its normal framing (knob \(knob))")
+            var shift = tops[0] - raster.vbiLines
+            let L = raster.totalLines
+            if shift > L / 2 { shift -= L } else if shift < -L / 2 { shift += L }
+            shifts[knob] = shift
         }
+        XCTAssertEqual(shifts[0], 0, "centred: normal framing")
+        XCTAssertGreaterThan(abs(shifts[0.05]!), 1, "the picture slides from the first few percent")
+        XCTAssertGreaterThan(abs(shifts[0.15]!), abs(shifts[0.05]!), "further the more it's turned")
+        XCTAssertTrue((shifts[0.15]! > 0) != (shifts[-0.15]! > 0), "opposite ways for opposite settings")
+    }
+
+    func testVerticalHoldRollsAboutEquallyBothWays() {
+        func rate(_ knob: Double) -> Double {
+            let t = topLines(plans(["vertical_hold": knob], count: 40))
+            return Double(t.last! - t.first!) / 39
+        }
+        let up = rate(0.5), down = rate(-0.5)
+        XCTAssertGreaterThan(abs(up), 3)
+        XCTAssertEqual(abs(up), abs(down), accuracy: abs(up) * 0.35, "±50%: \(up) vs \(down) lines/field")
     }
 
     func testVerticalHoldPastLockRollsBothWays() {
@@ -123,7 +143,7 @@ final class ReceiverSimulatorTests: XCTestCase {
     func testHorizontalHoldSlidesThePictureBeforeItTears() {
         // Past the VCO's range the loop holds lock only by a standing phase
         // error: the whole picture shifts sideways, every row alike.
-        let p = plans(["horizontal_hold": 0.42])[0]
+        let p = plans(["horizontal_hold": 0.25])[0]
         let shifts = p.rows.map { offset($0) }
         let spread = shifts.max()! - shifts.min()!
         XCTAssertLessThan(spread, 0.5, "a sliding picture is still straight")
@@ -187,7 +207,26 @@ final class ReceiverSimulatorTests: XCTestCase {
         let weak = plans(["signal_strength": 0.2])[0].rows[0].noiseIRE
         XCTAssertEqual(strong, 0)
         XCTAssertGreaterThan(medium, 1)
-        XCTAssertGreaterThan(weak, medium * 4)
+        XCTAssertGreaterThan(weak, medium * 3)
+        // And the knob's whole travel matters: some snow just below full.
+        let nearlyFull = plans(["signal_strength": 0.9])[0].rows[0].noiseIRE
+        XCTAssertGreaterThan(nearlyFull, 0.5, "snow starts just below 100%")
+    }
+
+    func testFullHumBreaksSyncInItsBarsButHalfDoesNot() {
+        func ragged(_ hum: Double) -> Double {
+            let p = plans(["hum": hum], start: 1.7)[0]
+            let u = p.rows.map { offset($0) }
+            return u.max()! - u.min()!
+        }
+        XCTAssertLessThan(ragged(0.5), 5, "half hum bends the picture gently")
+        XCTAssertGreaterThan(ragged(1.0), 10, "full hum pulls the sync separator off: tearing in the bars")
+    }
+
+    func testHorizontalHoldActsFromTheFirstFewPercent() {
+        let p = plans(["horizontal_hold": 0.08])[0]
+        XCTAssertGreaterThan(abs(offset(p.rows[raster.activeLines / 2])), 0.5,
+                             "a small turn already shifts the picture")
     }
 
     func testHeadClogDropsFieldsAtAnyFrameRate() {

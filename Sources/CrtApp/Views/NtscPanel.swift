@@ -195,7 +195,8 @@ private struct NtscControl: View {
                     NumericField(value: binding, range: min...max)
                 }
             }
-            Slider(value: binding, in: min...max)
+            PropertySlider(value: binding, range: min...max,
+                           neutral: state.ntscNeutral(setting.name, min: min, max: max))
         }
         .padding(.leading, indent)
         .help(setting.description ?? "")
@@ -219,13 +220,14 @@ private struct NtscControl: View {
                     Spacer()
                     IntField(value: intBinding, range: min...max, width: 48)
                 }
-                Slider(
+                PropertySlider(
                     value: Binding(
                         get: { state.ntscNumber(setting.name) },
                         set: { state.setNtscValue(setting.name, Int($0.rounded())) }
                     ),
-                    in: Double(min)...Double(max),
-                    step: 1
+                    range: Double(min)...Double(max),
+                    step: 1,
+                    neutral: state.ntscNeutral(setting.name, min: Double(min), max: Double(max))
                 )
             }
             .padding(.leading, indent)

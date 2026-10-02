@@ -401,7 +401,8 @@ private struct ParamControl: View {
                 Spacer()
                 NumericField(value: dBinding, range: lo...hi)
             }
-            Slider(value: dBinding, in: lo...hi, step: step)
+            PropertySlider(value: dBinding, range: lo...hi, step: step,
+                           neutral: state.shaderNeutral(param))
         }
     }
 

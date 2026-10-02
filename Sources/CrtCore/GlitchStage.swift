@@ -155,13 +155,15 @@ public final class GlitchStage {
     struct Row {
         float u0; int fieldLine; float lenPrev; float lenCur; float lenNext;
         float noiseIRE; float humIRE; float burstScale;
-        float tapeLoss; float pad0; float pad1; float pad2;
+        float tapeLoss; float gateShift; float pad1; float pad2;
     };
     struct Dropout { int fieldLine; float uStart; float uLength; float pad; };
 
     constant float SYNC_END = 4.7;
     constant float BURST_S = 5.3;
     constant float BURST_E = 7.8;
+    constant float GATE_S = 4.55;           // 4 µs gate around the burst
+    constant float GATE_E = 8.55;
     constant float ACT_S = 9.4;
     constant float ACT_L = 52.656;
     constant float EQ_PULSE = 2.3;
@@ -208,6 +210,18 @@ public final class GlitchStage {
         int iL = int(L);
         line = ((line % iL) + iL) % iL;
         return { line, u };
+    }
+
+    // Is (line, u) inside a dropout? Reports where that dropout starts.
+    inline bool inDropout(constant Dropout* drops, uint count, int line, float u, thread float& start) {
+        for (uint i = 0; i < count; i++) {
+            Dropout d = drops[i];
+            if (d.fieldLine == line && u >= d.uStart && u < d.uStart + d.uLength) {
+                start = d.uStart;
+                return true;
+            }
+        }
+        return false;
     }
 
     // Line 21: 7 cycles of clock run-in at 503.5 kHz, then 19 bits.
@@ -278,9 +292,9 @@ public final class GlitchStage {
         if (y >= U.activeLines) return;
         Row rw = rows[y];
         float2 g = float2(0.0);
-        const int N = 8;
+        const int N = 16;
         for (int i = 0; i < N; i++) {
-            float u = rw.u0 + BURST_S + (float(i) + 0.5) / float(N) * (BURST_E - BURST_S);
+            float u = rw.u0 + rw.gateShift + GATE_S + (float(i) + 0.5) / float(N) * (GATE_E - GATE_S);
             Loc l = locate(rw, u, U.totalLines);
             if (l.line >= int(U.postEqEnd) && l.u >= BURST_S && l.u < BURST_E) {
                 g += BURST_DIR * U.burstAmp * rw.burstScale;
@@ -289,7 +303,9 @@ public final class GlitchStage {
                 g += s.yiq.yz * U.pictureGain;
             }
         }
-        g /= float(N);
+        // Normalized so a centred gate (10 of its 16 samples on the burst)
+        // reads the burst at full amplitude.
+        g *= (GATE_E - GATE_S) / ((BURST_E - BURST_S) * float(N));
         float n = rw.noiseIRE / 92.5 * U.gateNoise;
         if (n > 0.0) {
             g += float2(gauss(U.seed, U.fieldIndex, y, 101u), gauss(U.seed, U.fieldIndex, y, 102u)) * n;
@@ -343,19 +359,33 @@ public final class GlitchStage {
         float u = rw.u0 + ACT_S + (float(gid.x) + 0.5) * U.usPerPixel;
         Loc l = locate(rw, u, U.totalLines);
 
-        // Oxide dropout: the VCR's compensator replays the line before;
-        // without it, the FM demodulator throws a white streak.
+        // Oxide dropout. Without compensation the FM demodulator throws a
+        // white streak with a dark tail. With it, the deck replays the
+        // stretch from its one-line delay — which, when the line above was
+        // a dropout too, is that line's own replacement, so a tall flaw
+        // repeats one line down several (a frozen smear). The detector and
+        // switch react ~0.7 µs late, so each dropout still flashes a tick.
         int sigLine = l.line;
         bool streak = false;
         float tail = 0.0;
-        for (uint i = 0; i < U.dropoutCount; i++) {
-            Dropout d = drops[i];
-            if (d.fieldLine != l.line) continue;
-            if (l.u >= d.uStart && l.u < d.uStart + d.uLength) {
-                if (U.docEnabled != 0u) sigLine = max(int(U.vbiLines), l.line - 1);
-                else streak = true;
-            } else if (U.docEnabled == 0u && l.u >= d.uStart + d.uLength && l.u < d.uStart + d.uLength + 1.5) {
-                tail = max(tail, 1.0 - (l.u - d.uStart - d.uLength) / 1.5);
+        float dStart = 0.0;
+        if (inDropout(drops, U.dropoutCount, l.line, l.u, dStart)) {
+            if (U.docEnabled != 0u && l.u - dStart >= 0.7) {
+                int src = l.line - 1;
+                float s2 = 0.0;
+                for (int k = 0; k < 6 && src > int(U.vbiLines)
+                     && inDropout(drops, U.dropoutCount, src, l.u, s2); k++) src -= 1;
+                sigLine = max(int(U.vbiLines), src);
+            } else {
+                streak = true;
+            }
+        } else if (U.docEnabled == 0u) {
+            for (uint i = 0; i < U.dropoutCount; i++) {
+                Dropout d = drops[i];
+                if (d.fieldLine == l.line && l.u >= d.uStart + d.uLength
+                    && l.u < d.uStart + d.uLength + 1.5) {
+                    tail = max(tail, 1.0 - (l.u - d.uStart - d.uLength) / 1.5);
+                }
             }
         }
 

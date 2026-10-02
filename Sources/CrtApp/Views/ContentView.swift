@@ -108,6 +108,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 1000, minHeight: 640)
         .toolbar { toolbarContent }
+        .onAppear { state.installKeyMonitor() }
         .task { await runDevHooks() }
     }
 
@@ -132,7 +133,9 @@ struct ContentView: View {
                 || env["CRT_DOWNSCALE_W"] != nil || env["CRT_CACHE_CHECK"] != nil
                 || env["CRT_EXPORT_TOGGLE_CHECK"] != nil || env["CRT_GLITCH"] != nil
                 || env["CRT_GLITCH_EXPORT_CHECK"] != nil
-                || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil else { return }
+                || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil
+                || env["CRT_SLIDER_SELFTEST"] != nil
+                || env["CRT_SPACE_SELFTEST"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -283,6 +286,123 @@ struct ContentView: View {
             }
             exit(ok ? 0 : 1)
         }
+        // CRT_SPACE_SELFTEST=1: Space through the app's own event queue (the
+        // path a real key press takes): play/pause with the timeline open,
+        // tap-vs-pan when zoomed, nothing when the timeline is closed.
+        if env["CRT_SPACE_SELFTEST"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool) {
+                print("SPACE \(ok ? "PASS" : "FAIL") \(label)")
+                if !ok { failures += 1 }
+            }
+            func key(_ type: NSEvent.EventType, repeatKey: Bool = false) async {
+                let window = NSApp.keyWindow ?? NSApp.windows.first
+                let e = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
+                                         timestamp: ProcessInfo.processInfo.systemUptime,
+                                         windowNumber: window?.windowNumber ?? 0, context: nil,
+                                         characters: " ", charactersIgnoringModifiers: " ",
+                                         isARepeat: repeatKey, keyCode: 49)!
+                NSApp.postEvent(e, atStart: false)
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            func playing() -> Bool { state.timelinePlaying || state.videoPlaying }
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            try? await Task.sleep(for: .milliseconds(300))
+
+            state.timelineEnabled = true
+            state.zoom = 1
+            let before = playing()
+            await key(.keyDown); await key(.keyUp)
+            check("Space starts playback with the timeline open", playing() != before)
+            await key(.keyDown); await key(.keyUp)
+            check("Space again pauses", playing() == before)
+
+            state.zoom = 2
+            await key(.keyDown); await key(.keyUp)
+            check("zoomed in, a tap still toggles (on release)", playing() != before)
+            await key(.keyDown); await key(.keyUp)
+            await key(.keyDown)
+            state.spacePanned = true                 // as the preview does on a drag
+            await key(.keyUp)
+            check("zoomed in, a held Space that panned doesn't toggle", playing() == before)
+
+            state.zoom = 1
+            state.timelineEnabled = false
+            await key(.keyDown); await key(.keyUp)
+            check("timeline closed: Space does nothing", playing() == before)
+            print(failures == 0 ? "SPACE-SELFTEST-PASS" : "SPACE-SELFTEST-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_SLIDER_SELFTEST=1: double-click-to-neutral, checked a level
+        // below the UI (scripts can't click the app): synthesized double-clicks
+        // on a NeutralSlider's knob and track; then every slider in every panel
+        // must have an explicit neutral value, listed for review.
+        if env["CRT_SLIDER_SELFTEST"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("SLIDER \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            let slider = NeutralSlider(frame: NSRect(x: 10, y: 10, width: 280, height: 24))
+            slider.minValue = -1; slider.maxValue = 1; slider.doubleValue = 0.6
+            window.contentView?.addSubview(slider)
+            var fired = 0
+            slider.onKnobDoubleClick = { fired += 1 }
+            let cell = slider.cell as! NSSliderCell
+            let knob = cell.knobRect(flipped: slider.isFlipped)
+            let knobInWindow = slider.convert(NSPoint(x: knob.midX, y: knob.midY), to: nil)
+            func click(_ p: NSPoint, count: Int) -> NSEvent {
+                NSEvent.mouseEvent(with: .leftMouseDown, location: p, modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: window.windowNumber, context: nil,
+                                   eventNumber: 0, clickCount: count, pressure: 1)!
+            }
+            slider.mouseDown(with: click(knobInWindow, count: 2))
+            check("double-click on the knob resets", fired == 1, "fired \(fired)")
+            let trackPoint = slider.convert(NSPoint(x: slider.bounds.minX + 6, y: knob.midY), to: nil)
+            check("a point on the track is not the knob", !slider.knobContains(trackPoint))
+            check("the knob is the knob", slider.knobContains(knobInWindow))
+
+            // Coverage: explicit neutral values for every slider.
+            var missing: [String] = []
+            func walk(_ settings: [NtscSetting]) {
+                for st in settings {
+                    switch st.kind {
+                    case .float(let lo, let hi, _):
+                        print("NEUTRAL ntsc \(st.name) → \(state.ntscNeutral(st.name, min: lo, max: hi))")
+                        if Neutral.ntsc[st.name] == nil { missing.append(st.name) }
+                    case .percentage:
+                        print("NEUTRAL ntsc \(st.name) → \(state.ntscNeutral(st.name, min: 0, max: 1))")
+                        if Neutral.ntsc[st.name] == nil { missing.append(st.name) }
+                    case .int(let lo, let hi) where hi - lo <= 10_000:
+                        print("NEUTRAL ntsc \(st.name) → \(state.ntscNeutral(st.name, min: Double(lo), max: Double(hi)))")
+                        if Neutral.ntsc[st.name] == nil { missing.append(st.name) }
+                    case .group(let kids), .section(let kids): walk(kids)
+                    default: break
+                    }
+                }
+            }
+            walk(state.ntscDescriptors)
+            for preset in Presets.all {
+                state.selectedPreset = preset
+                for _ in 0..<100 where state.paramDescriptors.isEmpty || state.chain == nil {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                try? await Task.sleep(for: .milliseconds(150))
+                for p in state.paramDescriptors {
+                    let pres = presentation(for: p)
+                    guard case .slider = pres.kind else { continue }
+                    print("NEUTRAL \(preset.id) \(p.name) [\(p.minimum)…\(p.maximum) default \(state.shaderDefault(p))] → \(state.shaderNeutral(p))")
+                    if Neutral.shader[p.name] == nil { missing.append("\(preset.id).\(p.name)") }
+                }
+            }
+            check("every slider has an explicit neutral value", missing.isEmpty, missing.joined(separator: ", "))
+            print(failures == 0 ? "SLIDER-SELFTEST-PASS" : "SLIDER-SELFTEST-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         // CRT_GLITCH_PANEL_SNAPSHOT=<out.png>: render the Glitch panel on its
         // own (it sits below the long NTSC list, out of a window capture).
         if let out = env["CRT_GLITCH_PANEL_SNAPSHOT"] {
@@ -408,6 +528,10 @@ struct ContentView: View {
                         settings: s, ntscSettingsJSON: nil, progress: { _ in })
                 }
             }
+            if state.videoSource == nil && state.sourceTexture == nil {
+                print("GLITCHCHK FAIL: no source loaded — nothing was checked")
+                failures += 1
+            }
             print(failures == 0 ? "GLITCHCHK ALL PASS" : "GLITCHCHK \(failures) FAILED")
             exit(failures == 0 ? 0 : 1)
         }
@@ -499,6 +623,10 @@ struct ContentView: View {
                         source: src, totalFrames: 4, paramValues: state.paramValues,
                         settings: s, ntscSettingsJSON: nil, progress: { _ in })
                 }
+            }
+            if state.videoSource == nil && state.sourceTexture == nil {
+                print("TOGGLECHK FAIL: no source loaded — nothing was checked")
+                failures += 1
             }
             print(failures == 0 ? "TOGGLECHK ALL PASS" : "TOGGLECHK \(failures) FAILED")
             exit(failures == 0 ? 0 : 1)

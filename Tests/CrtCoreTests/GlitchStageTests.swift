@@ -149,6 +149,25 @@ final class GlitchStageTests: XCTestCase {
                        "luma offset of half the bar's contrast")
     }
 
+    func testSlidingPictureKeepsItsColourButATornOneDoesNot() throws {
+        // The burst gate follows the incoming sync through a standing phase
+        // error, so a picture that slides with the horizontal hold stays in
+        // colour; when the loop slips cycles, it can't.
+        let input = texture { x, _ in (x / 20) % 2 == 0 ? (0.9, 0.2, 0.2) : (0.2, 0.3, 0.9) }
+        func saturation(_ px: [UInt8]) -> Double {
+            var total = 0.0
+            for y in stride(from: 20, to: A - 20, by: 4) {
+                for x in stride(from: 40, to: W - 40, by: 4) {
+                    let c = yiq(px, x, y); total += (c.1 * c.1 + c.2 * c.2).squareRoot()
+                }
+            }
+            return total
+        }
+        let reference = saturation(readback(input))
+        let sliding = saturation(try render(input, ["horizontal_hold": 0.3]))
+        XCTAssertGreaterThan(sliding, reference * 0.7, "a sliding picture keeps its colour")
+    }
+
     func testColourKillerRemovesChromaWithoutBurst() throws {
         let input = texture { x, _ in (x / 20) % 2 == 0 ? (0.9, 0.2, 0.2) : (0.2, 0.3, 0.9) }
         var plan = healthyPlan()
@@ -172,6 +191,20 @@ final class GlitchStageTests: XCTestCase {
         let x = Int((25 - NTSCTiming.activeStart) / (NTSCTiming.activeLength / Double(W)))
         for c in 0..<3 {
             XCTAssertEqual(px[(50 * W + x) * 4 + c], src[(49 * W + x) * 4 + c], "replayed from line 49")
+        }
+
+        // The compensator reacts ~0.7 µs late: the start still flashes white.
+        let tickX = Int((20.3 - NTSCTiming.activeStart) / (NTSCTiming.activeLength / Double(W)))
+        XCTAssertGreaterThan(yiq(px, tickX, 50).0, 0.95, "detector latency leaves a white tick")
+
+        // A flaw two lines tall replays the line above both — one line
+        // repeated down the flaw.
+        var tall = plan
+        tall.dropouts.append(GlitchDropout(fieldLine: Int32(raster.vbiLines + 49), uStart: 20, uLength: 10))
+        let smear = try render(input, plan: tall)
+        for c in 0..<3 {
+            XCTAssertEqual(smear[(50 * W + x) * 4 + c], src[(48 * W + x) * 4 + c], "line 48 repeated")
+            XCTAssertEqual(smear[(49 * W + x) * 4 + c], src[(48 * W + x) * 4 + c], "on both lines")
         }
 
         var off = plan

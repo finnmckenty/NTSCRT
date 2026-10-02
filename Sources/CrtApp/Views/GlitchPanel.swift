@@ -82,13 +82,18 @@ private struct GlitchControl: View {
     var body: some View {
         switch param.kind {
         case .toggle:
+            // Dropout compensation only has something to do once there are
+            // dropouts; greyed out until then, like the CRT panel's gates.
+            let idle = param.id == "dropout_compensation" && state.glitchSettings["dropouts"] == 0
             Toggle(isOn: Binding(get: { value.wrappedValue >= 0.5 },
                                  set: { value.wrappedValue = $0 ? 1 : 0 })) {
                 Text(param.label).font(.callout).lineLimit(1)
             }
             .toggleStyle(.switch)
+            .disabled(idle)
+            .opacity(idle ? 0.45 : 1)
             .padding(.leading, 12)
-            .help(param.help)
+            .help(idle ? "Turn up Dropouts first — this decides how they're concealed." : param.help)
 
         case .slider(let min, let max, let percent, let unit):
             VStack(alignment: .leading, spacing: 2) {
@@ -105,7 +110,9 @@ private struct GlitchControl: View {
                         Text(unit).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Slider(value: value, in: min...max)
+                // Every glitch knob's default is the healthy, effect-free
+                // setting, so that's where a double-click goes.
+                PropertySlider(value: value, range: min...max, neutral: param.defaultValue)
             }
             .padding(.leading, 12)
             .help(param.help)
