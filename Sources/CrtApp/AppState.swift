@@ -501,10 +501,10 @@ final class AppState {
 
     // MARK: - glitch (simulated TV receiver — CrtCore/Receiver.swift)
 
-    /// Off by default. Off, the stage isn't run at all, so output is byte-
-    /// identical to before it existed; on with every knob at its default
-    /// (a healthy set, clean signal) it is still exact.
-    var glitchEnabled: Bool = false { didSet { markChainDirty() } }
+    /// On by default, so the knobs are ready to turn. With every knob at its
+    /// default (a healthy set, clean signal) the output is byte-identical to
+    /// having the stage off — off, it isn't run at all.
+    var glitchEnabled: Bool = true { didSet { markChainDirty() } }
     private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
@@ -606,7 +606,7 @@ final class AppState {
     /// Compare mode: split the preview with a draggable vertical line —
     /// shader-on on one side, shader-off on the other.
     /// Chain-dirty: toggling on must populate the secondary target.
-    var compareEnabled: Bool = true { didSet { markChainDirty() } }
+    var compareEnabled: Bool = false { didSet { markChainDirty() } }
     /// Normalised x-position of the compare line, 0..1.
     var compareLineX: Float = 0.5 { didSet { markViewDirty() } }
 
@@ -977,11 +977,12 @@ final class AppState {
     }
 
     /// The app's house VHS look, overlaid on ntsc-rs library defaults —
-    /// Finn's dialed-in settings (2026-07-18). Reset returns here.
+    /// Finn's dialed-in settings (2026-07-18; revised 2026-10-02 to match the
+    /// look he saved as defaults.json, values exact). Reset returns here.
     private static let appNtscDefaults: [String: Any] = [
-        "filter_type": 1,                       // Butterworth (sharper)
-        "composite_preemphasis": 1.106,
-        "composite_noise_intensity": 0.204,
+        "filter_type": 0,                       // Constant K (softer)
+        "composite_preemphasis": 0.2753769054878048,
+        "composite_noise_intensity": 0.1391983173076923,
         "composite_noise_frequency": 0.8576,
         "composite_noise_detail": 2,
         "snow_intensity": 0,
@@ -998,13 +999,15 @@ final class AppState {
         "ringing_power": 5.674,
         "ringing_scale": 4.935,
         "luma_noise_intensity": 0.153,
-        "chroma_noise_intensity": 0.201,
+        "chroma_noise_intensity": 0.13054193376068376,
         "chroma_noise_frequency": 0.0777,
         "chroma_phase_error": 0.016,
         "chroma_phase_noise_intensity": 0.029,
-        "chroma_delay_horizontal": 2.667,
+        "chroma_delay_horizontal": 1.7279639582876793,
         "chroma_delay_vertical": 2,
-        "vhs_chroma_loss": 0.124,
+        "vhs_chroma_loss": 0.003639155982905983,
+        "vhs_edge_wave": 0.34226190476190477,
+        "vhs_tape_speed": 3,                    // EP (extended play)
         // Scale artifacts with the input resolution: these effects are sized
         // in signal lines/pixels, and at 1080p+ inputs they're proportionally
         // tiny (and then further diluted by the downscale) without this.
@@ -1534,15 +1537,16 @@ final class AppState {
             }
             if let v = s["enabled"] as? Bool { shaderEnabled = v }
         }
-        // Presets saved before the glitch stage existed load with it off, so
-        // they look exactly as they did.
+        // Presets saved before the glitch stage existed load it in its
+        // default state: on, every knob healthy — which renders exactly as
+        // those presets always looked.
         if let g = dict["glitch"] as? [String: Any] {
             let values = (g["values"] as? [String: Double]) ?? [:]
             glitchValues = GlitchParam.defaultValues.merging(values) { _, new in new }
-            glitchEnabled = (g["enabled"] as? Bool) ?? false
+            glitchEnabled = (g["enabled"] as? Bool) ?? true
         } else {
             glitchValues = GlitchParam.defaultValues
-            glitchEnabled = false
+            glitchEnabled = true
         }
         noteChainInputEdited()
         if let v = dict["view"] as? [String: Any] {

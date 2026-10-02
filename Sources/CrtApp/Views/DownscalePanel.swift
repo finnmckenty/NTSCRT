@@ -14,6 +14,14 @@ struct DownscalePanel: View {
         ("VGA² (640px)",   640),
     ]
 
+    /// The two sampling looks the sidebar offers. The engine also has
+    /// nearest+, bilinear, bicubic and lanczos — too close to these to earn
+    /// the clutter, but kept so looks saved with them still render.
+    private static let sampling: [(label: String, method: DownscaleMethod)] = [
+        ("Chunky", .nearest),
+        ("Smooth", .area),
+    ]
+
     @State private var expanded = true
 
     var body: some View {
@@ -58,18 +66,23 @@ struct DownscalePanel: View {
                         .help("Height follows the source's aspect ratio.")
                 }
 
-                Text("Sampling").font(.subheadline).foregroundStyle(.secondary)
-                // Menu, not segmented: six segments exceed the sidebar's
-                // width and clip the whole content column.
-                Picker("", selection: $state.downscaleMethod) {
-                    ForEach(DownscaleMethod.allCases, id: \.self) { m in
-                        Text(m.displayName).tag(m)
+                HStack {
+                    Text("Sampling").font(.subheadline).foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: samplingBinding) {
+                        ForEach(Self.sampling, id: \.method) { s in
+                            Text(s.label).tag(Optional(s.method))
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Chunky takes one source pixel per block — hard pixel edges (on detailed video they can shimmer). Smooth averages the whole block — softer, steady.")
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                if state.downscaleMethod == .nearest {
-                    Text("Tip: on video, Nearest shimmers in detailed areas — Nearest+ keeps the punch without the flicker.")
+                // The other kernels stay in the engine; a look saved with one
+                // still renders with it, and says so here.
+                if !Self.sampling.contains(where: { $0.method == state.downscaleMethod }) {
+                    Text("Using \(state.downscaleMethod.displayName), from the loaded preset.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -92,6 +105,16 @@ struct DownscalePanel: View {
                     state.downscalePreset = "Custom"
                 }
             }
+        )
+    }
+
+    /// nil — no segment lit — while a preset's other kernel is in use.
+    private var samplingBinding: Binding<DownscaleMethod?> {
+        Binding(
+            get: {
+                Self.sampling.contains { $0.method == state.downscaleMethod } ? state.downscaleMethod : nil
+            },
+            set: { if let m = $0 { state.downscaleMethod = m } }
         )
     }
 

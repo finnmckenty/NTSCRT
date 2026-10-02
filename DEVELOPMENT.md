@@ -125,13 +125,15 @@ For iteration and headless/screenshot verification:
 - `CRT_EXPORT_FORMAT=<GIF|H.264|…>` — preselect an export format at launch
 - `CRT_SNAP=1` — turn on "snap size to scanline grid" at launch
 - `CRT_NTSC_OFF=1` / `CRT_NTSC_SET="key=value,…"` — disable the VHS stage, or set individual ntsc-rs values, to bisect a rendering artifact
-- `CRT_INTEGER_OFF=1` / `CRT_COMPARE_OFF=1` — start with integer scale or compare off
+- `CRT_INTEGER_OFF=1` / `CRT_COMPARE_OFF=1` — start with integer scale or compare off (compare already starts off since 2026-10; `CRT_COMPARE_X` turns it on)
 - `CRT_WINDOW_SIZE=WxH` — force the window size, so both letterbox parities can be reproduced deliberately
 - `CRT_SCALE_LOG=1` — log drawable/target sizes and letterbox parity on each size change
 - `CRT_PANEL_BENCH=1` — time showing/hiding each VHS group's children and exit (`CRT_PANEL_BENCH_ORDER=a,b,c` picks the groups). Collapsing near the TOP of the panel costs more, since every row below is re-laid out — measured 40 ms for the first group vs ~9 ms mid-list
 - `CRT_NO_HOUSE_ORDER=1` — keep ntsc-rs's own setting order (Intensity not hoisted), for that A/B
 - `CRT_DUMP_NTSC_LAYOUT=1` — print the NTSC panel's grouping/label tree and exit (verifies `NtscSetting.houseLayout`)
 - `CRT_LOAD_BUILTIN=<name>` — list the bundled presets, load one by name, report what it restored (and whether it opened the timeline), then exit
+- `CRT_LOOK=<path>` — open with any look file loaded (not just a bundled preset), for rendering or inspecting it
+- `CRT_SAVE_LOOK=<path>` — write the state the app opened with as a look file, then exit. Changing the launch defaults: save the reference look from the app, then diff it against this output — they should be identical
 - `CRT_LOOK_PRESETS=<dir>` — override where bundled look presets are read from
 - `CRT_PLAY_BENCH=<seconds>` — play the loaded video and report displayed fps + drops (`CRT_BENCH_OUT=<file>` writes the result to a file). **Timing benches must run via `open build/NTSCRT.app --env …`**: a binary exec'd from a background shell gets a QoS clamp that throttles every main-thread timer (Task.sleep, CVDisplayLink, CADisplayLink all fire at ~15 Hz), which corrupts the numbers while leaving work-bound measurements plausible
 - `CRT_PERF_LOG=1` during playback also prints producer stage times, display-link draw gaps, frame-cache hits, and `[prerender]` completion lines

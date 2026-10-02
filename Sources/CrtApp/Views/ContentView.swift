@@ -135,7 +135,8 @@ struct ContentView: View {
                 || env["CRT_GLITCH_EXPORT_CHECK"] != nil
                 || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil
                 || env["CRT_SLIDER_SELFTEST"] != nil
-                || env["CRT_SPACE_SELFTEST"] != nil else { return }
+                || env["CRT_SPACE_SELFTEST"] != nil
+                || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -158,6 +159,12 @@ struct ContentView: View {
                     state.setNtscValue(key, raw.contains(".") ? d as Any : Int(d) as Any)
                 }
             }
+        }
+        // CRT_LOOK=<path>: open with a look file loaded (any path, not just
+        // the bundled presets) — for rendering or inspecting a saved look.
+        if let path = env["CRT_LOOK"] {
+            do { try state.loadLook(from: URL(fileURLWithPath: path)) }
+            catch { print("LOOK FAIL: \(error)") }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
         if let z = env["CRT_ZOOM"].flatMap(Float.init) { state.zoom = z }
@@ -745,6 +752,13 @@ struct ContentView: View {
             print(failures == 0 ? "VIDEOTL-ALL-PASS" : "VIDEOTL-FAILURES \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
+        // CRT_SAVE_LOOK=<path>: write the state the app opened with as a look
+        // file and quit — diff it against a reference to check the defaults.
+        if let path = env["CRT_SAVE_LOOK"] {
+            do { try state.saveLook(to: URL(fileURLWithPath: path)); print("SAVED-LOOK \(path)") }
+            catch { print("SAVE-LOOK FAIL: \(error)") }
+            exit(0)
+        }
         // CRT_LOAD_BUILTIN=<name>: load a bundled preset and report what
         // came back, including whether it opened the timeline.
         if let want = env["CRT_LOAD_BUILTIN"] {
@@ -920,7 +934,9 @@ struct ContentView: View {
             }
         }
         if env["CRT_COMPARE_OFF"] == "1" { state.compareEnabled = false }
+        // Compare starts off, so placing the divider also turns it on.
         if let cx = env["CRT_COMPARE_X"].flatMap(Float.init) {
+            state.compareEnabled = true
             state.compareLineX = cx
         }
         if env["CRT_FRONT"] == "1" {
