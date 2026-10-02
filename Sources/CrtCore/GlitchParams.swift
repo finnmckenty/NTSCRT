@@ -81,6 +81,10 @@ public struct GlitchParam: Identifiable, Sendable {
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "Debris on the video heads, lifting them off the tape: whole fields drop out to noise and lose their sync, more often as the clog worsens."),
         GlitchParam(
+            id: "tracking", label: "Tracking error", group: .tape,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "The heads drifting off the recorded tracks. Well tracked, the noise band where they cross to the next track rests in the vertical interval, out of sight; as the error grows it climbs into the picture and widens."),
+        GlitchParam(
             id: "search_speed", label: "Search", group: .tape,
             kind: .slider(min: 1, max: 9, percent: false, unit: "×"), defaultValue: 1,
             help: "Fast-forward picture search. The spinning heads cross from track to track, reading noise between them: one fewer noise bar than the speed, drifting as the tracking phase slides, with the picture jumping at each crossing."),
@@ -124,7 +128,7 @@ public struct GlitchSettings: Equatable, Sendable {
     /// never needs the history re-run.
     public static let timingIDs: Set<String> = [
         "signal_strength", "vertical_hold", "horizontal_hold", "afc_speed", "hum",
-        "head_switch", "timebase_jitter", "crinkle", "head_clog", "search_speed",
+        "head_switch", "timebase_jitter", "crinkle", "head_clog", "search_speed", "tracking",
     ]
 
     public var timing: [String: Double] { values.filter { Self.timingIDs.contains($0.key) } }

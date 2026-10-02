@@ -249,3 +249,21 @@ extension ReceiverSimulatorTests {
         XCTAssertTrue(normal.plan().rows.allSatisfy { $0.tapeLoss == 0 }, "1× is normal play")
     }
 }
+
+extension ReceiverSimulatorTests {
+    func testTrackingBandClimbsIntoThePictureAsTheErrorGrows() {
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        func noisyRows(_ e: Double) -> [Int] {
+            let sim = ReceiverSimulator(raster: raster)
+            sim.advance(to: 1.0, settings: GlitchSettings(values: ["tracking": e]))
+            return sim.plan().rows.enumerated().filter { $0.element.tapeLoss > 0.5 }.map { $0.offset }
+        }
+        XCTAssertTrue(noisyRows(0).isEmpty, "tracked: nothing visible")
+        let mild = noisyRows(0.3), bad = noisyRows(0.9)
+        XCTAssertFalse(bad.isEmpty, "bad tracking shows a noise band")
+        let mildCentre = mild.isEmpty ? Double(raster.activeLines) : Double(mild.reduce(0, +)) / Double(mild.count)
+        let badCentre = Double(bad.reduce(0, +)) / Double(bad.count)
+        XCTAssertLessThan(badCentre, mildCentre, "it climbs as the error grows")
+        XCTAssertGreaterThan(bad.count, mild.count, "and widens")
+    }
+}

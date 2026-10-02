@@ -552,7 +552,24 @@ public final class ReceiverSimulator {
         }
         if k.crinkle > 0 { loss = max(loss, crinkleAt(j).intensity) }
         if k.search > 1.05 { loss = max(loss, searchAt(j).loss) }
+        if k.tracking > 0 { loss = max(loss, trackingAt(j)) }
         return loss
+    }
+
+    /// Mistracking: the head drifts off its track, and the stretch where it
+    /// straddles the next one reads noise. With good tracking that stretch
+    /// sits at the field's start (the vertical interval); the error moves it
+    /// up into the picture and widens it. It wanders a little as tape
+    /// tension varies.
+    private func trackingAt(_ j: Int64) -> Double {
+        let e = knobs.tracking
+        let pos = Double(posmod(j, Int64(L))) / Double(L)
+        let wander = 0.03 * GlitchRandom.value(seed, 37, fieldTime(j) * 1.7)
+        let center = 1 - 0.55 * e + wander         // climbs from the bottom edge
+        let width = 0.02 + 0.10 * e
+        var d = abs(pos - center)
+        d = min(d, 1 - d)
+        return min(1, max(0, 1 - d / width) * min(1, 0.4 + e))
     }
 
     /// Picture search: at n× the heads cross n−1 track boundaries per field.
@@ -697,6 +714,7 @@ struct Knobs {
     let clog: Double
     /// Picture search multiple (1 = normal play).
     let search: Double
+    let tracking: Double
     let dropouts: Double
     let captions: Bool
     // Colour reference loop rates, per raster line.
@@ -725,6 +743,7 @@ struct Knobs {
         crinkle = settings["crinkle"]
         clog = settings["head_clog"]
         search = max(1, settings["search_speed"])
+        tracking = min(1, max(0, settings["tracking"]))
         dropouts = settings["dropouts"]
         captions = settings.flag("closed_captions")
         chromaAlpha = 1 - exp(-1 / (4 * s))
