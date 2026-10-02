@@ -134,7 +134,7 @@ struct ContentView: View {
                 || env["CRT_EXPORT_TOGGLE_CHECK"] != nil || env["CRT_GLITCH"] != nil
                 || env["CRT_GLITCH_EXPORT_CHECK"] != nil
                 || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil
-                || env["CRT_SLIDER_SELFTEST"] != nil
+                || env["CRT_SLIDER_SELFTEST"] != nil || env["CRT_SLIDER_E2E"] != nil
                 || env["CRT_SPACE_SELFTEST"] != nil
                 || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil else { return }
         var tries = 0
@@ -408,6 +408,189 @@ struct ContentView: View {
             }
             check("every slider has an explicit neutral value", missing.isEmpty, missing.joined(separator: ", "))
             print(failures == 0 ? "SLIDER-SELFTEST-PASS" : "SLIDER-SELFTEST-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_SLIDER_E2E=1: the whole double-click path on real sidebar
+        // sliders, one per panel. The double-click goes through AppKit's own
+        // event queue to whatever is under the knob (the path a mouse click
+        // takes), and what must reset is the VALUE: the app state, the number
+        // field, and the rendered picture — which must match setting the
+        // neutral value directly. The knob must follow and STAY: NSSlider's
+        // internal view puts it back ~0.3 s later unless PropertySlider holds it.
+        if env["CRT_SLIDER_E2E"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("E2E \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
+                  let content = window.contentView else { print("E2E FAIL: no window"); exit(1) }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            state.animatePreview = false            // time stands still, so renders compare
+            try? await Task.sleep(for: .milliseconds(400))
+
+            func views(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(views) }
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("slider-e2e-\(ProcessInfo.processInfo.processIdentifier)")
+            try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            func render(_ name: String) async -> [UInt8]? {
+                let url = tmp.appendingPathComponent("\(name).png")
+                let ok = await withCheckedContinuation { c in
+                    state.exportPNG(to: url, size: (480, 480)) { c.resume(returning: $0) }
+                }
+                guard ok, let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                      let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+                var px = [UInt8](repeating: 0, count: img.width * img.height * 4)
+                px.withUnsafeMutableBytes { buf in
+                    CGContext(data: buf.baseAddress, width: img.width, height: img.height,
+                              bitsPerComponent: 8, bytesPerRow: img.width * 4,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?
+                        .draw(img, in: CGRect(x: 0, y: 0, width: img.width, height: img.height))
+                }
+                return px
+            }
+            // Sweep the sidebar until the slider showing `value` exists (the
+            // NTSC and CRT lists are lazy, so the document grows as it goes),
+            // then centre it in view.
+            func findSlider(showing value: Double) async -> NeutralSlider? {
+                guard let sv = views(content).compactMap({ $0 as? NSScrollView }).first(where: { sv in
+                    sv.documentView.map { views($0).contains { $0 is NeutralSlider } } ?? false
+                }), let doc = sv.documentView else { return nil }
+                let clip = sv.contentView
+                func scroll(to y: CGFloat) async {
+                    let maxY = max(0, doc.frame.height - clip.bounds.height)
+                    clip.scroll(to: NSPoint(x: 0, y: min(max(0, y), maxY)))
+                    sv.reflectScrolledClipView(clip)
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                var y: CGFloat = 0
+                await scroll(to: y)
+                while true {
+                    let hits = views(doc).compactMap { $0 as? NeutralSlider }
+                        .filter { abs($0.doubleValue - value) < 1e-6 }
+                    if hits.count > 1 { print("E2E: \(hits.count) sliders show \(value)"); return nil }
+                    if let s = hits.first {
+                        // Rows above re-measure as they come into view and
+                        // shift it, so re-centre until the knob is in view.
+                        let knob = (s.cell as! NSSliderCell).knobRect(flipped: s.isFlipped)
+                        for _ in 0..<8 where !s.visibleRect.contains(knob) {
+                            let r = doc.convert(s.bounds, from: s)
+                            await scroll(to: r.midY - clip.bounds.height / 2)
+                        }
+                        return s
+                    }
+                    if y >= doc.frame.height - clip.bounds.height { return nil }
+                    y += clip.bounds.height * 0.6
+                    await scroll(to: y)
+                }
+            }
+            // The number field sits just above its slider, right-aligned.
+            func numberField(above slider: NSView) -> NSTextField? {
+                let s = slider.convert(slider.bounds, to: nil)
+                return views(content).compactMap { $0 as? NSTextField }
+                    .filter { $0.isEditable }
+                    .map { ($0, $0.convert($0.bounds, to: nil)) }
+                    .filter { $0.1.minY >= s.maxY - 4 && $0.1.minY <= s.maxY + 40
+                              && $0.1.midX > s.midX && $0.1.minX < s.maxX }
+                    .min { $0.1.minY < $1.1.minY }?.0
+            }
+            // NSSlider only puts the knob back when the first click moved the
+            // value. A hand drifting a pixel does that; synthesized events
+            // can't hold the button down to drag, but the NTSC case's first
+            // click nudges its value by rounding, so that case exercises it
+            // (it fails without PropertySlider's hold — checked).
+            func doubleClick(_ slider: NSSlider) {
+                let knob = (slider.cell as! NSSliderCell).knobRect(flipped: slider.isFlipped)
+                let p = slider.convert(NSPoint(x: knob.midX, y: knob.midY), to: nil)
+                for (type, count) in [(NSEvent.EventType.leftMouseDown, 1), (.leftMouseUp, 1),
+                                      (.leftMouseDown, 2), (.leftMouseUp, 2)] {
+                    let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                               timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: window.windowNumber, context: nil,
+                                               eventNumber: 0, clickCount: count,
+                                               pressure: type == .leftMouseDown ? 1 : 0)!
+                    NSApp.postEvent(e, atStart: false)
+                }
+            }
+
+            struct Case {
+                let name: String
+                let test: Double                      // distinctive, so one slider shows it
+                let percentField: Bool
+                let set: (Double) -> Void             // the setter the panel's binding uses
+                let get: () -> Double
+                let neutral: (NSSlider) -> Double     // where the app says it resets to
+            }
+            let bloom = state.paramDescriptors.first { $0.name == "BLOOM_STRENGTH" }
+            let cases = [
+                Case(name: "Glitch › Signal strength", test: 0.3137, percentField: true,
+                     set: { state.setGlitchValue("signal_strength", $0) },
+                     get: { state.glitchSettings["signal_strength"] },
+                     neutral: { _ in GlitchParam.all.first { $0.id == "signal_strength" }!.defaultValue }),
+                Case(name: "NTSC › Composite signal sharpening", test: 1.4321, percentField: false,
+                     set: { state.setNtscValue("composite_preemphasis", $0) },
+                     get: { state.ntscNumber("composite_preemphasis") },
+                     neutral: { state.ntscNeutral("composite_preemphasis", min: $0.minValue, max: $0.maxValue) }),
+                Case(name: "CRT › Glow Strength", test: Double(Float(0.65)), percentField: false,
+                     set: { state.setParam("BLOOM_STRENGTH", Float($0)) },
+                     get: { Double(state.paramValues["BLOOM_STRENGTH"] ?? -1) },
+                     neutral: { _ in bloom.map { state.shaderNeutral($0) } ?? -1 }),
+            ]
+            for c in cases {
+                c.set(c.test)
+                try? await Task.sleep(for: .milliseconds(300))
+                guard let slider = await findSlider(showing: c.test) else {
+                    check("\(c.name): slider found in the sidebar", false); continue
+                }
+                let knob = (slider.cell as! NSSliderCell).knobRect(flipped: slider.isFlipped)
+                check("\(c.name): knob in view", slider.visibleRect.contains(knob))
+                let expected = c.neutral(slider)
+                let before = await render("\(c.name)-before")
+                doubleClick(slider)
+                // Watch the knob for 1.2 s: once it reaches the reset value it
+                // must stay there (a frame or two of correction at most).
+                let t0 = ProcessInfo.processInfo.systemUptime
+                var reached: Double?, wrongSince: Double?, worst = 0.0
+                while ProcessInfo.processInfo.systemUptime - t0 < 1.2 {
+                    try? await Task.sleep(for: .milliseconds(5))
+                    let now = ProcessInfo.processInfo.systemUptime - t0
+                    let onIt = abs(slider.doubleValue - expected) < 1e-6
+                    if onIt { reached = reached ?? now; wrongSince = nil }
+                    else if reached != nil {
+                        wrongSince = wrongSince ?? now
+                        worst = max(worst, now - wrongSince!)
+                    }
+                }
+                let value = c.get()
+                check("\(c.name): stored value reset", abs(value - expected) < 1e-6,
+                      "\(c.test) → \(value), neutral \(expected)")
+                check("\(c.name): knob moved to it", reached != nil,
+                      reached.map { String(format: "after %.0f ms", $0 * 1000) } ?? "knob at \(slider.doubleValue)")
+                check("\(c.name): knob stayed there", abs(slider.doubleValue - expected) < 1e-6 && worst < 0.05,
+                      String(format: "knob at %@ after 1.2 s; longest away %.0f ms", "\(slider.doubleValue)", worst * 1000))
+                if let field = numberField(above: slider), let shown = Double(field.stringValue) {
+                    let want = c.percentField ? expected * 100 : expected
+                    check("\(c.name): number field shows it", abs(shown - want) < 1e-3,
+                          "field shows \"\(field.stringValue)\"")
+                } else {
+                    check("\(c.name): number field found", false)
+                }
+                let after = await render("\(c.name)-after")
+                // Reference: the same setter the binding calls, straight to neutral.
+                c.set(c.test); c.set(expected)
+                try? await Task.sleep(for: .milliseconds(300))
+                let reference = await render("\(c.name)-reference")
+                let again = await render("\(c.name)-reference2")
+                guard let before, let after, let reference, let again else {
+                    check("\(c.name): renders", false); continue
+                }
+                check("\(c.name): renders are repeatable", reference == again)
+                check("\(c.name): picture changed on double-click", before != after)
+                check("\(c.name): picture matches setting the neutral value directly", after == reference)
+            }
+            print(failures == 0 ? "SLIDER-E2E-PASS" : "SLIDER-E2E-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
         // CRT_GLITCH_PANEL_SNAPSHOT=<out.png>: render the Glitch panel on its
