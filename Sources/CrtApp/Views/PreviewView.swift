@@ -181,6 +181,10 @@ struct PreviewView: NSViewRepresentable {
             let animating = state.animatePreview && !state.exportInProgress
                 && !state.videoPlaying
             if animating { state.tickFrame() }
+            // A still without a timeline runs the glitch receiver on the wall
+            // clock while Animate is on (and holds it still while it's off).
+            state.advanceAnimateClock(running: animating && state.glitchEnabled
+                                      && state.videoSource == nil && !state.timelineEnabled)
 
             guard let source = state.sourceTexture else {
                 lastRenderedChainTick = nil
@@ -247,6 +251,23 @@ struct PreviewView: NSViewRepresentable {
                         spec = nil
                     } catch {
                         // Fall back to the clean path this frame.
+                    }
+                }
+
+                // Glitch stage: the simulated TV receiver, on the downscaled
+                // raster (one row per scan line), before the CRT shader.
+                if state.glitchEnabled, let glitch = state.glitchRenderer {
+                    do {
+                        let raster = try spec.map {
+                            try glitch.downscaled(chainSource, spec: $0, commandBuffer: cb)
+                        } ?? chainSource
+                        chainSource = try glitch.encode(into: cb, chainInput: raster,
+                                                        time: state.glitchTime,
+                                                        settings: state.glitchSettings,
+                                                        history: state.glitchHistory)
+                        spec = nil
+                    } catch {
+                        // Show the unglitched frame rather than nothing.
                     }
                 }
 

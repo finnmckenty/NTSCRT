@@ -70,14 +70,14 @@ final class ExportShaderToggleTests: XCTestCase {
         Mp4Exporter.Settings(outputURL: tmp.appendingPathComponent(name),
                              outputWidth: outputSize.w, outputHeight: outputSize.h,
                              downscale: downscale, presetPath: presetPath,
-                             shaderEnabled: shader, codec: .h264, averageBitrate: 8_000_000)
+                             shaderEnabled: shader, glitch: nil, codec: .h264, averageBitrate: 8_000_000)
     }
 
     private func gifSettings(_ name: String, shader: Bool) -> GifExporter.Settings {
         GifExporter.Settings(outputURL: tmp.appendingPathComponent(name),
                              width: outputSize.w, height: outputSize.h, fps: 12,
                              downscale: downscale, presetPath: presetPath,
-                             shaderEnabled: shader)
+                             shaderEnabled: shader, glitch: nil)
     }
 
     private func firstFrame(of url: URL) async throws -> CGImage {
@@ -105,7 +105,7 @@ final class ExportShaderToggleTests: XCTestCase {
             outputURL: tmp.appendingPathComponent("source-clip.mp4"),
             outputWidth: sourceSize.w, outputHeight: sourceSize.h,
             downscale: nil, presetPath: presetPath,
-            shaderEnabled: false, codec: .h264, averageBitrate: 8_000_000)
+            shaderEnabled: false, glitch: nil, codec: .h264, averageBitrate: 8_000_000)
         try await Mp4Exporter(context: context).exportStill(
             source: flatGreySource(), totalFrames: 6, fps: 12,
             paramValues: [:], settings: settings, progress: { _ in })
@@ -127,6 +127,7 @@ final class ExportShaderToggleTests: XCTestCase {
             let cb = try XCTUnwrap(context.queue.makeCommandBuffer())
             try ExportFrame.encode(into: cb, pipeline: pipeline, chain: chain,
                                    bypass: ShaderBypass(context: context), supersample: nil,
+                                   glitch: nil,
                                    inputTexture: flatGreySource(), outputTexture: target,
                                    downscale: downscale, frameCount: 1)
             let blit = try XCTUnwrap(cb.makeBlitCommandEncoder())

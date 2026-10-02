@@ -130,7 +130,9 @@ struct ContentView: View {
                 || env["CRT_COMPARE_OFF"] == "1" || env["CRT_WINDOW_SIZE"] != nil
                 || env["CRT_ZOOM"] != nil
                 || env["CRT_DOWNSCALE_W"] != nil || env["CRT_CACHE_CHECK"] != nil
-                || env["CRT_EXPORT_TOGGLE_CHECK"] != nil else { return }
+                || env["CRT_EXPORT_TOGGLE_CHECK"] != nil || env["CRT_GLITCH"] != nil
+                || env["CRT_GLITCH_EXPORT_CHECK"] != nil
+                || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -157,6 +159,15 @@ struct ContentView: View {
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
         if let z = env["CRT_ZOOM"].flatMap(Float.init) { state.zoom = z }
         if let w = env["CRT_DOWNSCALE_W"].flatMap(Int.init) { state.downscaleWidth = w }
+        // CRT_GLITCH="vertical_hold=0.6,signal_strength=0.3" — switch the
+        // glitch stage on with these knobs (GlitchParam ids).
+        if let pairs = env["CRT_GLITCH"] {
+            state.glitchEnabled = true
+            for pair in pairs.split(separator: ",") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                if kv.count == 2, let v = Double(kv[1]) { state.setGlitchValue(String(kv[0]), v) }
+            }
+        }
         // CRT_STILL_LOOP_TEST=<out.mp4>: loop a still->video export.
         if let out = env["CRT_STILL_LOOP_TEST"] {
             guard let src = state.sourceTexture else { print("SLOOP FAIL"); exit(1) }
@@ -271,6 +282,134 @@ struct ContentView: View {
                 try? (verdict + "\n").write(toFile: out, atomically: true, encoding: .utf8)
             }
             exit(ok ? 0 : 1)
+        }
+        // CRT_GLITCH_PANEL_SNAPSHOT=<out.png>: render the Glitch panel on its
+        // own (it sits below the long NTSC list, out of a window capture).
+        if let out = env["CRT_GLITCH_PANEL_SNAPSHOT"] {
+            let panel = GlitchPanel()
+                .environment(state)
+                .frame(width: 290)
+                .padding(16)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .environment(\.colorScheme, .dark)
+            let host = NSHostingView(rootView: panel)
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.frame = CGRect(x: 0, y: 0, width: 322, height: 1200)
+            host.layoutSubtreeIfNeeded()
+            host.frame.size = host.fittingSize
+            host.layoutSubtreeIfNeeded()
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+                print("PANEL-SNAPSHOT \(out) \(Int(host.bounds.width))x\(Int(host.bounds.height))")
+            }
+            exit(0)
+        }
+        // CRT_GLITCH_EXPORT_CHECK=<dir>: export every route this source offers
+        // through the Export buttons' builders with the glitch stage off, on
+        // and healthy, and on and broken; the healthy export must match the
+        // off one and the broken one must not. (The gate's exporter tests
+        // can't see whether the buttons pass the stage along; this can.)
+        if let dir = env["CRT_GLITCH_EXPORT_CHECK"] {
+            let outDir = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+            state.ntscEnabled = false
+            let size = (640, max(64, Int((640 / Double(state.sourceAspect)).rounded())) & ~1)
+            var failures = 0
+            func firstFrame(_ url: URL) async -> CGImage? {
+                if url.pathExtension == "mp4" {
+                    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+                    gen.requestedTimeToleranceBefore = .zero
+                    gen.requestedTimeToleranceAfter = .zero
+                    return try? await gen.image(at: .zero).image
+                }
+                guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+                return CGImageSourceCreateImageAtIndex(src, 0, nil)
+            }
+            func meanDiff(_ a: CGImage, _ b: CGImage) -> Double {
+                func px(_ i: CGImage) -> [UInt8] {
+                    var p = [UInt8](repeating: 0, count: i.width * i.height * 4)
+                    p.withUnsafeMutableBytes { buf in
+                        CGContext(data: buf.baseAddress, width: i.width, height: i.height,
+                                  bitsPerComponent: 8, bytesPerRow: i.width * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?
+                            .draw(i, in: CGRect(x: 0, y: 0, width: i.width, height: i.height))
+                    }
+                    return p
+                }
+                let pa = px(a), pb = px(b)
+                let n = min(pa.count, pb.count)
+                var t = 0
+                for k in 0..<n where k % 4 != 3 { t += abs(Int(pa[k]) - Int(pb[k])) }
+                return Double(t) / Double(max(1, n * 3 / 4))
+            }
+            func route(_ name: String, ext: String, export: (URL) async throws -> Void) async {
+                var frames: [String: CGImage] = [:]
+                for (label, enabled, values) in [("off", false, [String: Double]()),
+                                                 ("healthy", true, [:]),
+                                                 ("broken", true, ["vertical_hold": 0.7,
+                                                                   "horizontal_hold": 0.9])] {
+                    state.glitchEnabled = enabled
+                    state.resetGlitch()
+                    for (k, v) in values { state.setGlitchValue(k, v) }
+                    let url = outDir.appendingPathComponent("\(name)-\(label).\(ext)")
+                    try? FileManager.default.removeItem(at: url)
+                    do { try await export(url) } catch {
+                        print("GLITCHCHK FAIL \(name): \(error)"); failures += 1; return
+                    }
+                    frames[label] = await firstFrame(url)
+                }
+                guard let off = frames["off"], let healthy = frames["healthy"], let broken = frames["broken"] else {
+                    print("GLITCHCHK FAIL \(name): unreadable output"); failures += 1; return
+                }
+                let same = meanDiff(off, healthy), changed = meanDiff(off, broken)
+                let ok = same < 0.5 && changed > 10
+                print(String(format: "GLITCHCHK %@ %@  healthy-vs-off %.2f  broken-vs-off %.2f",
+                             ok ? "PASS" : "FAIL", name as NSString, same, changed))
+                if !ok { failures += 1 }
+            }
+            if let vs = state.videoSource {
+                await route("video-mp4", ext: "mp4") { url in
+                    let s = state.mp4ExportSettings(route: .video, outputURL: url, size: size,
+                                                    bitrate: 10_000_000, codec: .h264)
+                    try await Mp4Exporter(context: state.context).export(
+                        source: vs, paramValues: state.paramValues, settings: s,
+                        ntscSettingsJSON: nil, progress: { _ in })
+                }
+                await route("video-gif", ext: "gif") { url in
+                    let s = state.gifExportSettings(outputURL: url, size: (320, size.1 / 2 & ~1))
+                    try await GifExporter(context: state.context).exportVideo(
+                        source: vs, paramValues: state.paramValues, settings: s,
+                        ntscSettingsJSON: nil, progress: { _ in })
+                }
+            } else if let src = state.sourceTexture {
+                await route("png", ext: "png") { url in
+                    try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Swift.Error>) in
+                        state.exportPNG(to: url, size: size) { ok in
+                            if ok { c.resume() } else { c.resume(throwing: NSError(domain: "glitchcheck", code: 1)) }
+                        }
+                    }
+                }
+                state.timelineDuration = 0.5
+                state.timelineFPS = 12
+                await route("still-mp4", ext: "mp4") { url in
+                    let s = state.mp4ExportSettings(route: .still, outputURL: url, size: size,
+                                                    bitrate: 10_000_000, codec: .h264)
+                    try await Mp4Exporter(context: state.context).exportStill(
+                        source: src, totalFrames: state.timelineTotalFrames, fps: state.timelineFPS,
+                        paramValues: state.paramValues, settings: s, ntscSettingsJSON: nil,
+                        progress: { _ in })
+                }
+                await route("still-gif", ext: "gif") { url in
+                    let s = state.gifExportSettings(outputURL: url, size: (320, size.1 / 2 & ~1))
+                    try await GifExporter(context: state.context).exportStill(
+                        source: src, totalFrames: 3, paramValues: state.paramValues,
+                        settings: s, ntscSettingsJSON: nil, progress: { _ in })
+                }
+            }
+            print(failures == 0 ? "GLITCHCHK ALL PASS" : "GLITCHCHK \(failures) FAILED")
+            exit(failures == 0 ? 0 : 1)
         }
         // CRT_EXPORT_TOGGLE_CHECK=<dir>: export every route this source offers
         // with the CRT toggle on and then off — through the same settings
@@ -467,7 +606,7 @@ struct ContentView: View {
                     ntscSettingsJSON: ntscJSON,
                     frameParams: { i, total in
                         let t = total > 1 ? Double(i) / Double(total - 1) : 0
-                        return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+                        return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t), glitch: nil)
                     },
                     progress: { _ in })
                 let bytes = (try? FileManager.default.attributesOfItem(atPath: out)[.size] as? Int) ?? 0
@@ -511,12 +650,16 @@ struct ContentView: View {
             state.timelineEnabled = true
             state.timelineDuration = 7.5
             state.timelineFPS = 12
+            state.glitchEnabled = true
             state.scrubTimeline(to: 0.25)
             state.setNtscValue("composite_preemphasis", 1.75)
+            state.setGlitchValue("vertical_hold", 0.1)
             state.setKeyframeAtPlayhead()
             state.scrubTimeline(to: 0.9)
             state.setNtscValue("composite_preemphasis", 0.5)
+            state.setGlitchValue("vertical_hold", 0.8)
             state.setKeyframeAtPlayhead()
+            state.setGlitchValue("ghost_level", -0.4)
             state.setKeyframeEasing(id: state.timelineKeys[0].id, .easeInOut)
             let before = state.timelineKeys
             let firstParam = state.paramDescriptors.first?.name
@@ -527,6 +670,8 @@ struct ContentView: View {
                 print("PRESET FAIL save: \(error)"); exit(1)
             }
             // Wipe, so anything that survives really came from the file.
+            state.glitchEnabled = false
+            state.resetGlitch()
             state.timelineKeys = []
             state.timelineDuration = 1
             state.timelineFPS = 60
@@ -548,6 +693,9 @@ struct ContentView: View {
                     let ntsc = (k.ntscValues["composite_preemphasis"] as? NSNumber)?.doubleValue
                     let want = (before[i].ntscValues["composite_preemphasis"] as? NSNumber)?.doubleValue
                     check("key \(i) VHS value", ntsc == want, "\(ntsc ?? -1) vs \(want ?? -1)")
+                    check("key \(i) glitch value",
+                          k.glitchValues["vertical_hold"] == before[i].glitchValues["vertical_hold"],
+                          "\(k.glitchValues["vertical_hold"] ?? -1) vs \(before[i].glitchValues["vertical_hold"] ?? -1)")
                     check("key \(i) shader param count",
                           k.shaderParams.count == before[i].shaderParams.count,
                           "\(k.shaderParams.count) vs \(before[i].shaderParams.count)")
@@ -558,6 +706,16 @@ struct ContentView: View {
                           "\(firstParam)")
                 }
             }
+            check("glitch stage re-enabled", state.glitchEnabled)
+            // The ghost edit came while parked on the second key, so auto-key
+            // wrote it there; loading reopens the timeline at the first key,
+            // whose snapshot the knobs then show.
+            check("auto-key captured the glitch edit",
+                  state.timelineKeys.last?.glitchValues["ghost_level"] == -0.4,
+                  "\(state.timelineKeys.last?.glitchValues["ghost_level"] ?? 99)")
+            check("knobs show the first key after load",
+                  state.glitchSettings["vertical_hold"] == 0.1 && state.glitchSettings["ghost_level"] == 0,
+                  "vhold \(state.glitchSettings["vertical_hold"]) ghost \(state.glitchSettings["ghost_level"])")
             print(failures == 0 ? "PRESET-ROUNDTRIP-PASS" : "PRESET-ROUNDTRIP-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
@@ -795,7 +953,7 @@ struct ContentView: View {
                 frameParams: ev.map { e in
                     { i, n in
                         let t = n > 1 ? Double(i) / Double(n - 1) : 0
-                        return (shader: e.shaderParams(at: t), ntscJSON: e.ntscJSON(at: t))
+                        return (shader: e.shaderParams(at: t), ntscJSON: e.ntscJSON(at: t), glitch: nil)
                     }
                 },
                 progress: { _ in })
@@ -851,7 +1009,7 @@ struct ContentView: View {
                 ntscSettingsJSON: ntscJSON,
                 frameParams: { i, n in
                     let t = n > 1 ? Double(i) / Double(n - 1) : 0
-                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t), glitch: nil)
                 },
                 progress: { _ in })
             print("TL_SELFTEST wrote \(out.path) frames=\(total) fps=\(fps)")
@@ -994,6 +1152,8 @@ private struct Sidebar: View {
                 DownscalePanel()
                 Divider()
                 NtscPanel()
+                Divider()
+                GlitchPanel()
                 Divider()
                 ShaderPanel()
             }

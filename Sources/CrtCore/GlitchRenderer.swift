@@ -6,9 +6,14 @@ import Metal
 public struct GlitchHistory {
     public let frameDuration: Double
     public let settingsAt: (Double) -> GlitchSettings
-    public init(frameDuration: Double, settingsAt: @escaping (Double) -> GlitchSettings) {
+    /// Changes whenever the history would (keyframes, timing, base values),
+    /// so checkpoints taken under one history are never reused for another.
+    public let id: Int
+    public init(frameDuration: Double, id: Int,
+                settingsAt: @escaping (Double) -> GlitchSettings) {
         self.frameDuration = frameDuration
         self.settingsAt = settingsAt
+        self.id = id
     }
 }
 
@@ -26,6 +31,14 @@ public final class GlitchRenderer {
     private let stage: GlitchStage
     private var simulator: ReceiverSimulator?
     private var lastSettings: GlitchSettings?
+    /// Snapshots from deterministic runs, about one per simulated second,
+    /// valid for re-simulating the same history (`checkpointKey`).
+    private var checkpoints: [ReceiverSimulator.Snapshot] = []
+    private var checkpointKey: CheckpointKey?
+    private enum CheckpointKey: Equatable {
+        case constant([String: Double])        // the timing knobs
+        case history(Int, Double)
+    }
     private var output: MTLTexture?
     private var scratch: MTLTexture?
     public private(set) var lastPlan: GlitchFieldPlan?
@@ -45,7 +58,7 @@ public final class GlitchRenderer {
                        chainInput: MTLTexture,
                        time: Double,
                        settings: GlitchSettings,
-                       history: GlitchHistory? = nil) throws -> MTLTexture {
+                       history: @autoclosure () -> GlitchHistory? = nil) throws -> MTLTexture {
         let raster = ReceiverRaster(width: chainInput.width, activeLines: chainInput.height)
         let sim: ReceiverSimulator
         var fresh = false
@@ -55,28 +68,60 @@ public final class GlitchRenderer {
             sim = ReceiverSimulator(raster: raster)
             simulator = sim
             fresh = true
+            checkpoints = []
+            checkpointKey = nil
         }
         // One scan line of tolerance: after an advance the simulation sits
         // up to a line past the requested time.
         let lineTime = 1 / (Double(raster.totalLines) * NTSCTiming.fieldRate)
         let standingStill = abs(time - sim.time) <= 2 * lineTime
         let jumped = time < sim.time - 2 * lineTime || time - sim.time > Self.maxStep
-        let retuned = standingStill && lastSettings != nil && lastSettings != settings
+        let retuned = standingStill && lastSettings != nil && lastSettings?.timing != settings.timing
         if fresh || jumped || retuned {
-            if let history {
-                sim.resimulate(to: time, frameDuration: history.frameDuration,
-                               settingsAt: history.settingsAt)
-            } else {
-                sim.reset()
-                sim.advance(to: time, settings: settings)
-            }
+            resimulate(sim, to: time, settings: settings, history: history())
         } else {
             sim.advance(to: time, settings: settings)
+            // Playing on under the same constant settings extends the
+            // checkpoints, so scrubbing back over played time stays quick.
+            if checkpointKey == .constant(settings.timing),
+               sim.time >= (checkpoints.last?.time ?? 0) + 1 {
+                checkpoints.append(sim.snapshot())
+            }
         }
         lastSettings = settings
         let plan = sim.plan()
         lastPlan = plan
         return try render(into: cb, chainInput: chainInput, plan: plan)
+    }
+
+    /// Deterministic re-run to `time`, resuming from the latest checkpoint
+    /// of the same history when there is one.
+    private func resimulate(_ sim: ReceiverSimulator, to time: Double,
+                            settings: GlitchSettings, history: GlitchHistory?) {
+        let key: CheckpointKey = history.map { .history($0.id, $0.frameDuration) } ?? .constant(settings.timing)
+        if key != checkpointKey {
+            checkpoints = []
+            checkpointKey = key
+        }
+        let resume = checkpoints.last(where: { $0.time <= time })
+        if let history {
+            sim.resimulate(to: time, frameDuration: history.frameDuration,
+                           settingsAt: history.settingsAt, resumeFrom: resume) { [weak self] snap in
+                guard let self, snap.time > (self.checkpoints.last?.time ?? -1) else { return }
+                self.checkpoints.append(snap)
+            }
+            return
+        }
+        // Constant settings: the state at any moment is a pure function of
+        // time, so checkpoints can sit on whole seconds.
+        if let resume { sim.restore(resume) } else { sim.reset() }
+        var next = max(1, ((resume?.time ?? 0) + 1).rounded(.down))
+        while next < time {
+            sim.advance(to: next, settings: settings)
+            if sim.time > (checkpoints.last?.time ?? -1) { checkpoints.append(sim.snapshot()) }
+            next += 1
+        }
+        sim.advance(to: time, settings: settings)
     }
 
     /// Draw a plan again without moving time (a still export of exactly what

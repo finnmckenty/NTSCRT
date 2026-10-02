@@ -205,3 +205,50 @@ final class GlitchStageTests: XCTestCase {
                        "with brightness up, blanking (0 IRE) shows above the lowered cutoff")
     }
 }
+
+/// Seeking restores the nearest checkpoint instead of re-running from zero;
+/// it must land on exactly the state a full re-run would.
+final class GlitchCheckpointTests: XCTestCase {
+    private var context: MetalContext!
+    override func setUpWithError() throws { context = try MetalContext() }
+
+    private func input() -> MTLTexture {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 320,
+                                                         height: 240, mipmapped: false)
+        d.usage = [.shaderRead]
+        d.storageMode = .private
+        return context.device.makeTexture(descriptor: d)!
+    }
+
+    private func plan(_ r: GlitchRenderer, _ t: Double, _ s: GlitchSettings,
+                      _ h: GlitchHistory? = nil) throws -> GlitchFieldPlan {
+        let cb = context.queue.makeCommandBuffer()!
+        _ = try r.encode(into: cb, chainInput: input(), time: t, settings: s, history: h)
+        cb.commit(); cb.waitUntilCompleted()
+        return r.lastPlan!
+    }
+
+    func testSeekingBackMatchesAFullRerunWithConstantSettings() throws {
+        let s = GlitchSettings(values: ["vertical_hold": 0.5, "horizontal_hold": 0.65,
+                                        "signal_strength": 0.3, "crinkle": 0.7, "head_switch": 3])
+        let seeker = try GlitchRenderer(context: context)
+        _ = try plan(seeker, 9.0, s)                      // records checkpoints
+        let viaCheckpoint = try plan(seeker, 4.37, s)     // jumps back
+        let fresh = try plan(try GlitchRenderer(context: context), 4.37, s)
+        XCTAssertEqual(viaCheckpoint.rows, fresh.rows)
+        XCTAssertEqual(viaCheckpoint.dropouts, fresh.dropouts)
+        XCTAssertEqual(viaCheckpoint.chromaPhase, fresh.chromaPhase)
+    }
+
+    func testSeekingBackMatchesAFullRerunWithKeyframedSettings() throws {
+        let history = GlitchHistory(frameDuration: 1.0 / 24, id: 7) { t in
+            GlitchSettings(values: ["vertical_hold": min(0.9, t / 6), "horizontal_hold": t > 3 ? 0.7 : 0])
+        }
+        let seeker = try GlitchRenderer(context: context)
+        _ = try plan(seeker, 7.0, history.settingsAt(7.0), history)
+        let t = 100.0 / 24                                 // a frame time
+        let viaCheckpoint = try plan(seeker, t, history.settingsAt(t), history)
+        let fresh = try plan(try GlitchRenderer(context: context), t, history.settingsAt(t), history)
+        XCTAssertEqual(viaCheckpoint.rows, fresh.rows)
+    }
+}

@@ -198,10 +198,10 @@ final class ReceiverSimulatorTests: XCTestCase {
             let s = GlitchSettings(values: ["head_clog": 0.7])
             let losses = (0..<24).map { i -> Float in
                 sim.advance(to: 1 + Double(i) / fps, settings: s)
-                return sim.plan().rows[raster.activeLines / 2].burstScale
+                return sim.plan().rows[raster.activeLines / 2].tapeLoss
             }
-            XCTAssertTrue(losses.contains { $0 < 0.3 }, "\(fps) fps: some fields lost \(losses)")
-            XCTAssertTrue(losses.contains { $0 > 0.7 }, "\(fps) fps: others play \(losses)")
+            XCTAssertTrue(losses.contains { $0 > 0.7 }, "\(fps) fps: some fields lost \(losses)")
+            XCTAssertTrue(losses.contains { $0 < 0.3 }, "\(fps) fps: others play \(losses)")
         }
     }
 
@@ -227,5 +227,25 @@ final class ReceiverSimulatorTests: XCTestCase {
         XCTAssertEqual(pa.rows, pc.rows)
         XCTAssertEqual(pa.dropouts, pb.dropouts)
         XCTAssertEqual(pa.ccBits, pc.ccBits)
+    }
+}
+
+extension ReceiverSimulatorTests {
+    func testSearchShowsOneFewerNoiseBarThanTheSpeed() {
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        for speed in [3.0, 5.0] {
+            let sim = ReceiverSimulator(raster: raster)
+            sim.advance(to: 1.0, settings: GlitchSettings(values: ["search_speed": speed]))
+            let noisy = sim.plan().rows.map { $0.tapeLoss > 0.5 }
+            // Count noise bands down the screen (a band split by the top or
+            // bottom edge counts once at each edge).
+            var bands = 0
+            for y in 1..<noisy.count where noisy[y] && !noisy[y - 1] { bands += 1 }
+            if noisy[0] { bands += 1 }
+            XCTAssertEqual(Double(bands), speed - 1, accuracy: 1, "\(speed)× search")
+        }
+        let normal = ReceiverSimulator(raster: raster)
+        normal.advance(to: 1.0, settings: GlitchSettings(values: ["search_speed": 1]))
+        XCTAssertTrue(normal.plan().rows.allSatisfy { $0.tapeLoss == 0 }, "1× is normal play")
     }
 }

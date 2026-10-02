@@ -155,6 +155,7 @@ public final class GlitchStage {
     struct Row {
         float u0; int fieldLine; float lenPrev; float lenCur; float lenNext;
         float noiseIRE; float humIRE; float burstScale;
+        float tapeLoss; float pad0; float pad1; float pad2;
     };
     struct Dropout { int fieldLine; float uStart; float uLength; float pad; };
 
@@ -360,7 +361,7 @@ public final class GlitchStage {
 
         Sig s = signalAt(src, U, sigLine, l.u);
         bool plain = s.picture && s.exact && sigLine == l.line && !streak && tail == 0.0
-            && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0
+            && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0 && rw.tapeLoss == 0.0
             && U.pictureGain == 1.0 && U.brightness == 0.0
             && rc.x == 1.0 && rc.y == 0.0 && rc.z == 1.0;
         if (plain) { dst.write(float4(s.rgb, 1.0), gid); return; }
@@ -382,6 +383,21 @@ public final class GlitchStage {
             yiq.yz += U.ghostLevel * iq;
         }
 
+        // Tape signal loss: past the FM threshold the deck's demodulator
+        // outputs streaks instead of picture — black and white dashes a
+        // fraction of a microsecond to a couple long — and its colour
+        // killer drops chroma with the signal.
+        if (rw.tapeLoss > 0.0) {
+            float seg = 0.5 + 1.6 * uni(U.seed, U.fieldIndex, gid.y, 201u);
+            float pos = l.u + uni(U.seed, U.fieldIndex, gid.y, 202u) * seg;
+            uint run = uint(max(0.0, pos) / seg);
+            float g = gauss(U.seed ^ 0xF00Du, U.fieldIndex, run, gid.y);
+            float sparkle = uni(U.seed ^ 0xBEEFu, U.fieldIndex, run, gid.y) > 0.93 ? 0.6 : 0.0;
+            float streak = clamp(0.35 + 0.32 * g + sparkle, -0.08, 1.05);
+            yiq.x = mix(yiq.x, streak, rw.tapeLoss);
+            yiq.yz *= 1.0 - rw.tapeLoss;
+        }
+
         // AGC running out of gain: everything shrinks toward blanking.
         if (U.pictureGain != 1.0) {
             float ire = 7.5 + 92.5 * yiq.x;
@@ -401,8 +417,10 @@ public final class GlitchStage {
                 ni += gauss(U.seed ^ 0x1234u, U.fieldIndex, gid.x + k, gid.y * 3u + 1u);
             for (uint k = 0; k < U.tapsQ; k++)
                 nq += gauss(U.seed ^ 0x4321u, U.fieldIndex, gid.x + k, gid.y * 3u + 2u);
-            yiq.y += ni / sqrt(float(U.tapsI)) * n * 0.7;
-            yiq.z += nq / sqrt(float(U.tapsQ)) * n * 0.5;
+            // Chroma noise carries the I and Q channels' share of the
+            // noise power (1.3 and 0.6 MHz of the 4.2 MHz video band).
+            yiq.y += ni / sqrt(float(U.tapsI)) * n * 0.35;
+            yiq.z += nq / sqrt(float(U.tapsQ)) * n * 0.25;
         }
 
         // Decode chroma against the row's reference: a phase error rotates

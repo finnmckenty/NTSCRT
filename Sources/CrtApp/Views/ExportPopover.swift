@@ -194,11 +194,13 @@ struct ExportPopover: View {
 
     /// Per-frame keyframe values for a video export, or nil when nothing is
     /// keyed (then the whole clip uses the current settings, as before).
-    private var videoFrameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? {
+    private var videoFrameParams: FrameParams? {
         guard hasKeyframes, let ev = state.makeTimelineEvaluator() else { return nil }
+        let glitchBase = state.glitchValues
         return { i, total in
             let t = total > 1 ? Double(i) / Double(total - 1) : 0
-            return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+            return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
+                    glitch: ev.glitchSettings(at: t, base: glitchBase))
         }
     }
 
@@ -319,11 +321,13 @@ struct ExportPopover: View {
         // file rather than repeating in passes.
         let totalFrames = gifFrameCount
         let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
-        let frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? =
+        let glitchBase = state.glitchValues
+        let frameParams: FrameParams? =
             evaluator.map { ev in
                 { i, total in
                     let t = total > 1 ? Double(i) / Double(total - 1) : 0
-                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
+                            glitch: ev.glitchSettings(at: t, base: glitchBase))
                 }
             }
         let state = state
@@ -400,14 +404,16 @@ struct ExportPopover: View {
         // Keyframes drive per-frame parameters; without keys the params hold
         // and only the frame-seeded VHS noise animates.
         let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
-        let frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? =
+        let glitchBase = state.glitchValues
+        let frameParams: FrameParams? =
             evaluator.map { ev in
                 { i, _ in
                     // Phase within the pass, so each loop replays the
                     // animation instead of stretching it across all passes.
                     let within = i % baseFrames
                     let t = baseFrames > 1 ? Double(within) / Double(baseFrames - 1) : 0
-                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t))
+                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
+                            glitch: ev.glitchSettings(at: t, base: glitchBase))
                 }
             }
         let state = state

@@ -82,7 +82,7 @@ public struct ReceiverRaster: Equatable, Sendable {
 }
 
 /// One screen row of the field to display: where the TV's horizontal scan
-/// started relative to the signal. Mirrors the GPU struct (8 × 4 bytes).
+/// started relative to the signal. Mirrors the GPU struct (12 × 4 bytes).
 public struct GlitchRow: Equatable {
     /// µs from the sync edge of signal line `fieldLine` to the start of the
     /// TV's line (its flyback). 0 when locked.
@@ -94,12 +94,17 @@ public struct GlitchRow: Equatable {
     public var lenPrev: Float
     public var lenCur: Float
     public var lenNext: Float
-    /// Noise on this line, IRE RMS.
+    /// Reception (antenna) noise on this line, IRE RMS.
     public var noiseIRE: Float
     /// Mains hum on this line, IRE.
     public var humIRE: Float
     /// Fraction of the burst surviving tape signal loss.
     public var burstScale: Float
+    /// Tape signal loss (0–1): past the FM threshold the picture gives way
+    /// to the demodulator's streaks, and the deck's colour killer drops
+    /// chroma — unlike antenna snow, which adds to the picture.
+    public var tapeLoss: Float = 0
+    var pad0: Float = 0, pad1: Float = 0, pad2: Float = 0
 }
 
 /// Lost stretch of a signal line (oxide dropout). Mirrors the GPU struct.
@@ -244,6 +249,30 @@ public final class ReceiverSimulator {
         for i in thetaLog.indices { thetaLog[i] = 0 }
     }
 
+    /// Complete simulation state at a moment — small enough to keep one per
+    /// second of a clip, so seeking restores the nearest instead of
+    /// re-running from zero.
+    public struct Snapshot {
+        public let time: Double
+        fileprivate let r: Int64
+        fileprivate let theta: Double
+        fileprivate let integ: Double
+        fileprivate let ramp: Double
+        fileprivate let vInteg: Double
+        fileprivate let triggers: [Int64]
+        fileprivate let thetaLog: [Double]
+    }
+
+    public func snapshot() -> Snapshot {
+        Snapshot(time: time, r: r, theta: theta, integ: integ, ramp: ramp, vInteg: vInteg,
+                 triggers: triggers, thetaLog: thetaLog)
+    }
+
+    public func restore(_ s: Snapshot) {
+        r = s.r; theta = s.theta; integ = s.integ; ramp = s.ramp; vInteg = s.vInteg
+        triggers = s.triggers; thetaLog = s.thetaLog
+    }
+
     /// Run the set forward to `time` with `settings` in force since the
     /// previous call.
     public func advance(to time: Double, settings: GlitchSettings) {
@@ -255,17 +284,32 @@ public final class ReceiverSimulator {
     /// Simulate from a fresh start to `time`, with settings that may vary:
     /// `settingsAt` is sampled once per `frameDuration` exactly as a frame-
     /// by-frame advance would, so the result matches one bit for bit.
+    ///
+    /// `resumeFrom` continues from a snapshot taken during an earlier run of
+    /// the same history; `checkpoint` is handed a snapshot about once a
+    /// second (on the frame grid, so resuming from it is exact).
     public func resimulate(to time: Double, frameDuration: Double,
-                           settingsAt: (Double) -> GlitchSettings) {
-        reset()
-        let first = settingsAt(0)
-        advance(to: 0, settings: first)
-        guard time > 0, frameDuration > 0 else { return }
+                           settingsAt: (Double) -> GlitchSettings,
+                           resumeFrom: Snapshot? = nil,
+                           checkpoint: ((Snapshot) -> Void)? = nil) {
         var k = 1
+        if let snap = resumeFrom, frameDuration > 0 {
+            restore(snap)
+            k = Int((snap.time / frameDuration).rounded()) + 1
+        } else {
+            reset()
+            advance(to: 0, settings: settingsAt(0))
+        }
+        guard time > 0, frameDuration > 0 else { return }
+        var nextCheckpoint = (self.time + 1).rounded(.down)
         while true {
             let t = min(time, Double(k) * frameDuration)
             advance(to: t, settings: settingsAt(t))
             if t >= time { break }
+            if let checkpoint, t >= nextCheckpoint, t == Double(k) * frameDuration {
+                checkpoint(snapshot())
+                nextCheckpoint = t.rounded(.down) + 1
+            }
             k += 1
         }
     }
@@ -306,15 +350,22 @@ public final class ReceiverSimulator {
             detected = d
         }
 
-        // AFC: PI loop around a VCO of limited range. The detector's
-        // restoring force peaks a quarter line off and falls beyond it, so
-        // a strained loop slips cycles rather than holding indefinitely.
+        // AFC: PI loop around a VCO of limited range, with a sinusoidal
+        // phase detector — the Adler-equation behaviour of real AFC and
+        // injection-locked oscillators. Its restoring force peaks a quarter
+        // line off, so past the hold range the loop slips cycles at a beat
+        // rate rising from zero as √(detuning): a few slow bars first, more
+        // as the hold is turned further.
         var next = theta + H * k.hR + integ
         if let d0 = detected {
-            var d = d0
-            if d > H / 4 { d = H / 2 - d } else if d < -H / 4 { d = -H / 2 - d }
+            let linear = abs(d0) <= H / 4
+            let d = (H / (2 * .pi)) * sin(2 * .pi * d0 / H)
             next += k.kp * d
-            integ = min(k.uMax, max(-k.uMax, integ + k.ki * d))
+            // The integral (the frequency correction) only moves on a
+            // credible phase reading. While the loop slips cycles the
+            // detector sweeps its whole range; integrating that would unwind
+            // the correction and turn a slow beat into a sudden shred.
+            if linear { integ = min(k.uMax, max(-k.uMax, integ + k.ki * d)) }
         }
 
         // Vertical sync integrator, fed by the separator's output.
@@ -364,9 +415,10 @@ public final class ReceiverSimulator {
                 lenPrev: Float(H + timebaseError(j) - timebaseError(j - 1)),
                 lenCur: Float(H + timebaseError(j + 1) - timebaseError(j)),
                 lenNext: Float(H + timebaseError(j + 2) - timebaseError(j + 1)),
-                noiseIRE: Float(noiseSigma(loss: loss)),
+                noiseIRE: Float(k.sigma),
                 humIRE: Float(hum(atSignalTime: tau)),
-                burstScale: Float(max(0, 1 - loss))))
+                burstScale: Float(max(0, 1 - loss)),
+                tapeLoss: Float(min(1, max(0, loss)))))
         }
 
         // Settle the colour reference over the blanking lines just above
@@ -469,6 +521,11 @@ public final class ReceiverSimulator {
             let fast = GlitchRandom.gauss(seed, 33, j) * 0.35
             e += k.jitter * (slow + fast)
         }
+        if k.search > 1.05 {
+            let crossing = Int64(searchAt(j).crossings)
+            let f = floordiv(j, Int64(L))
+            e += 1.2 * GlitchRandom.gauss(seed, 36, f, crossing)
+        }
         if k.crinkle > 0 {
             let c = crinkleAt(j)
             if c.intensity > 0 {
@@ -494,7 +551,26 @@ public final class ReceiverSimulator {
             loss = max(loss, min(1, level))
         }
         if k.crinkle > 0 { loss = max(loss, crinkleAt(j).intensity) }
+        if k.search > 1.05 { loss = max(loss, searchAt(j).loss) }
         return loss
+    }
+
+    /// Picture search: at n× the heads cross n−1 track boundaries per field.
+    /// Between tracks they read the guard band and the neighbouring
+    /// azimuth's track — noise; on a track, picture. The bars drift as the
+    /// heads' phase against the tracks slides. Returns the loss at line j and
+    /// how many crossings precede it in the field (for the timing jumps).
+    private func searchAt(_ j: Int64) -> (loss: Double, crossings: Int) {
+        let bars = knobs.search - 1
+        let pos = Double(posmod(j, Int64(L))) / Double(L)
+        let drift = (fieldTime(j) * 0.23).truncatingRemainder(dividingBy: 1)
+        let x = pos * bars + drift
+        let phase = x - floor(x)
+        // Noise where the head straddles a boundary: a band ~30% of the
+        // spacing, soft-edged as the signal fades between tracks.
+        let d = min(phase, 1 - phase)
+        let loss = min(1, max(0, 1 - d / 0.15) * 1.2)
+        return (loss, Int(floor(x)))
     }
 
     private func noiseSigma(loss: Double) -> Double {
@@ -619,6 +695,8 @@ struct Knobs {
     let jitter: Double
     let crinkle: Double
     let clog: Double
+    /// Picture search multiple (1 = normal play).
+    let search: Double
     let dropouts: Double
     let captions: Bool
     // Colour reference loop rates, per raster line.
@@ -632,10 +710,10 @@ struct Knobs {
         let strength = min(1, max(0, settings["signal_strength"]))
         let cnr = 60 * strength
         sigma = max(0, 100 * pow(10, -cnr / 20) - 0.1)
-        agc = min(1, strength / 0.35)
+        agc = min(1, strength / 0.45)
         vTotal = 0.023 + settings["vertical_hold"] * 0.12
         vBeta = 1 - exp(-1 / (1.5 * s))
-        hR = settings["horizontal_hold"] * 0.10 / s
+        hR = settings["horizontal_hold"] * 0.08 / s
         // AFC: proportional gain 0.04–0.4 per NTSC line, damping 0.7.
         let kpN = 0.04 * pow(10, min(1, max(0, settings["afc_speed"])))
         kp = kpN / s
@@ -646,6 +724,7 @@ struct Knobs {
         jitter = settings["timebase_jitter"]
         crinkle = settings["crinkle"]
         clog = settings["head_clog"]
+        search = max(1, settings["search_speed"])
         dropouts = settings["dropouts"]
         captions = settings.flag("closed_captions")
         chromaAlpha = 1 - exp(-1 / (4 * s))

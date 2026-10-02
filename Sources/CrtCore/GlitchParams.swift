@@ -81,6 +81,10 @@ public struct GlitchParam: Identifiable, Sendable {
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "Debris on the video heads, lifting them off the tape: whole fields drop out to noise and lose their sync, more often as the clog worsens."),
         GlitchParam(
+            id: "search_speed", label: "Search", group: .tape,
+            kind: .slider(min: 1, max: 9, percent: false, unit: "×"), defaultValue: 1,
+            help: "Fast-forward picture search. The spinning heads cross from track to track, reading noise between them: one fewer noise bar than the speed, drifting as the tracking phase slides, with the picture jumping at each crossing."),
+        GlitchParam(
             id: "dropouts", label: "Dropouts", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "Oxide missing from the tape: brief losses of signal along a line."),
@@ -113,4 +117,15 @@ public struct GlitchSettings: Equatable, Sendable {
     }
 
     public func flag(_ id: String) -> Bool { self[id] >= 0.5 }
+
+    /// Knobs that change the receiver's evolving state (anything touching
+    /// sync, timing or signal level). The rest — ghost, brightness, caption
+    /// data, dropouts — are applied when the field is drawn, so changing them
+    /// never needs the history re-run.
+    public static let timingIDs: Set<String> = [
+        "signal_strength", "vertical_hold", "horizontal_hold", "afc_speed", "hum",
+        "head_switch", "timebase_jitter", "crinkle", "head_clog", "search_speed",
+    ]
+
+    public var timing: [String: Double] { values.filter { Self.timingIDs.contains($0.key) } }
 }

@@ -498,6 +498,92 @@ final class AppState {
     /// (or downscaled source) without any CRT shader applied.
     var shaderEnabled: Bool = true { didSet { markChainDirty() } }
 
+    // MARK: - glitch (simulated TV receiver — CrtCore/Receiver.swift)
+
+    /// Off by default. Off, the stage isn't run at all, so output is byte-
+    /// identical to before it existed; on with every knob at its default
+    /// (a healthy set, clean signal) it is still exact.
+    var glitchEnabled: Bool = false { didSet { markChainDirty() } }
+    private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
+    var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
+
+    func setGlitchValue(_ id: String, _ value: Double) {
+        glitchValues[id] = value
+        autoKeyIfParked()
+        markChainDirty()
+    }
+
+    func resetGlitch() {
+        glitchValues = GlitchParam.defaultValues
+        autoKeyIfParked()
+        markChainDirty()
+    }
+
+    /// Timeline scrub/playback: merge keyed values without auto-keying.
+    private func applyGlitchValues(_ values: [String: Double]) {
+        guard !values.isEmpty else { return }
+        glitchValues = glitchValues.merging(values) { _, new in new }
+        markChainDirty()
+    }
+
+    /// The preview's receiver. Exports run their own from time zero; PNG
+    /// export reuses this one so a still is exactly what's on screen.
+    @ObservationIgnored private(set) lazy var glitchRenderer: GlitchRenderer? = try? GlitchRenderer(context: context)
+
+    /// The receiver's clock for the frame on screen: a video's own time, the
+    /// timeline's playhead on a still, or wall-clock time while Animate runs
+    /// on a still without a timeline. Exports use the same mapping.
+    var glitchTime: Double {
+        if let vs = videoSource { return Double(currentFrameIndex) / Double(max(1, vs.frameRate)) }
+        if timelineEnabled {
+            let frame = (playheadT * Double(max(1, timelineTotalFrames - 1))).rounded()
+            return frame / Double(max(1, timelineFPS))
+        }
+        return animateClock
+    }
+
+    // Per-frame bookkeeping: kept out of observation so it never
+    // invalidates views.
+    @ObservationIgnored private(set) var animateClock: Double = 0
+    @ObservationIgnored private var animateClockLast: ContinuousClock.Instant?
+
+    /// Called each preview draw. Steps are capped so a stall doesn't read as
+    /// a jump (which would re-simulate instead of continuing).
+    func advanceAnimateClock(running: Bool) {
+        let now = ContinuousClock.now
+        defer { animateClockLast = running ? now : nil }
+        guard running, let last = animateClockLast else { return }
+        let d = last.duration(to: now)
+        let secs = Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+        animateClock += min(0.1, max(0, secs))
+    }
+
+    /// Frame duration of the glitch clock's frame grid.
+    private var glitchFrameRate: Double {
+        if let vs = videoSource { return Double(max(1, vs.frameRate)) }
+        return Double(max(1, timelineFPS))
+    }
+
+    /// How the glitch knobs vary over the timeline, so a seek re-simulates
+    /// the history an export would have run through. nil without keyframes.
+    var glitchHistory: GlitchHistory? {
+        guard timelineEnabled, !timelineKeys.isEmpty, let ev = makeTimelineEvaluator() else { return nil }
+        let fps = glitchFrameRate
+        let total = timelineTotalFrames
+        let base = glitchValues
+        // ntscGeneration moves with every timeline edit; the base values
+        // matter for keyframes saved without glitch values.
+        var hasher = Hasher()
+        hasher.combine(ntscGeneration)
+        hasher.combine(total)
+        for k in base.keys.sorted() { hasher.combine(k); hasher.combine(base[k]) }
+        return GlitchHistory(frameDuration: 1 / fps, id: hasher.finalize()) { t in
+            let frame = (t * fps).rounded()
+            let nt = total > 1 ? min(1, max(0, frame / Double(total - 1))) : 0
+            return ev.glitchSettings(at: nt, base: base)
+        }
+    }
+
     /// Compare mode: split the preview with a draggable vertical line —
     /// shader-on on one side, shader-off on the other.
     /// Chain-dirty: toggling on must populate the secondary target.
@@ -640,6 +726,7 @@ final class AppState {
         withAutoKeySuppressed {
             setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
             applyNtscValues(ev.ntscValues(at: playheadT))
+            applyGlitchValues(ev.glitchValues(at: playheadT))
         }
     }
 
@@ -653,11 +740,13 @@ final class AppState {
     func setKeyframeAtPlayhead() {
         let snapshot = Keyframe(t: playheadT,
                                 shaderParams: paramValues,
-                                ntscValues: ntscValues)
+                                ntscValues: ntscValues,
+                                glitchValues: glitchValues)
         if let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < max(0.005, parkedTolerance) }) {
             var k = timelineKeys[i]
             k.shaderParams = snapshot.shaderParams
             k.ntscValues = snapshot.ntscValues
+            k.glitchValues = snapshot.glitchValues
             timelineKeys[i] = k
         } else {
             timelineKeys.append(snapshot)
@@ -704,6 +793,7 @@ final class AppState {
         withAutoKeySuppressed {
             setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
             applyNtscValues(ev.ntscValues(at: playheadT))
+            applyGlitchValues(ev.glitchValues(at: playheadT))
         }
     }
 
@@ -732,6 +822,7 @@ final class AppState {
         else { return }
         timelineKeys[i].shaderParams = paramValues
         timelineKeys[i].ntscValues = ntscValues
+        timelineKeys[i].glitchValues = glitchValues
     }
 
     func toggleTimelinePreview() {
@@ -977,6 +1068,7 @@ final class AppState {
             downscale: downscaleSpec,
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
             shaderEnabled: shaderEnabled,
+            glitch: glitchEnabled ? glitchSettings : nil,
             codec: codec,
             averageBitrate: bitrate,
             loopCount: route == .video ? max(1, exportLoopCount) : 1)
@@ -991,7 +1083,8 @@ final class AppState {
             fps: gifFPS,
             downscale: downscaleSpec,
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
-            shaderEnabled: shaderEnabled)
+            shaderEnabled: shaderEnabled,
+            glitch: glitchEnabled ? glitchSettings : nil)
     }
 
     /// Render the loaded image through the pipeline and write it as a PNG.
@@ -1030,9 +1123,13 @@ final class AppState {
             let supersample = exportChain == nil ? nil
                 : SupersampledPass.make(device: device, chainInput: chainInputSize,
                                         target: (size.width, size.height))
+            let glitchFrame = (glitchEnabled ? glitchRenderer : nil).map {
+                GlitchFrame(renderer: $0, time: glitchTime, settings: glitchSettings,
+                            history: glitchHistory)
+            }
             try ExportFrame.encode(into: cb, pipeline: pipeline,
                                    chain: exportChain, bypass: ShaderBypass(context: context),
-                                   supersample: supersample,
+                                   supersample: supersample, glitch: glitchFrame,
                                    inputTexture: input, outputTexture: target,
                                    downscale: spec, frameCount: frameCounter)
         } catch {
@@ -1302,6 +1399,10 @@ final class AppState {
                 "preset": selectedPreset.id,
                 "params": paramValues.mapValues { Double($0) },
             ],
+            "glitch": [
+                "enabled": glitchEnabled,
+                "values": glitchValues,
+            ],
             "view": [
                 "integerScale": integerScale,
                 "animate": animatePreview,
@@ -1317,6 +1418,7 @@ final class AppState {
                         "easing": k.easing.rawValue,
                         "shader": k.shaderParams.mapValues { Double($0) },
                         "ntsc": k.ntscValues,
+                        "glitch": k.glitchValues,
                     ] as [String: Any]
                 },
             ],
@@ -1370,6 +1472,16 @@ final class AppState {
             }
             if let v = s["enabled"] as? Bool { shaderEnabled = v }
         }
+        // Presets saved before the glitch stage existed load with it off, so
+        // they look exactly as they did.
+        if let g = dict["glitch"] as? [String: Any] {
+            let values = (g["values"] as? [String: Double]) ?? [:]
+            glitchValues = GlitchParam.defaultValues.merging(values) { _, new in new }
+            glitchEnabled = (g["enabled"] as? Bool) ?? false
+        } else {
+            glitchValues = GlitchParam.defaultValues
+            glitchEnabled = false
+        }
         noteChainInputEdited()
         if let v = dict["view"] as? [String: Any] {
             if let b = v["integerScale"] as? Bool { integerScale = b }
@@ -1385,7 +1497,9 @@ final class AppState {
                     let easing = (k["easing"] as? String).flatMap(KeyEasing.init(rawValue:)) ?? .linear
                     let shader = (k["shader"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
                     let ntsc = k["ntsc"] as? [String: Any] ?? [:]
-                    return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc)
+                    let glitch = k["glitch"] as? [String: Double] ?? [:]
+                    return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc,
+                                    glitchValues: glitch)
                 }.sorted { $0.t < $1.t }
             }
             if let e = t["enabled"] as? Bool { timelineEnabled = e && timelineAvailable }

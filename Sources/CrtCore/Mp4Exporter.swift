@@ -43,6 +43,9 @@ public final class Mp4Exporter {
         /// default on purpose: every caller has to decide, because every
         /// export route once ignored the toggle.
         public var shaderEnabled: Bool
+        /// The glitch stage (simulated TV receiver), nil when it's off.
+        /// Required for the same reason as `shaderEnabled`.
+        public var glitch: GlitchSettings?
         public var codec: Codec
         /// Target average bitrate in bits/s (H.264/HEVC only; ProRes ignores it).
         public var averageBitrate: Int?
@@ -53,10 +56,12 @@ public final class Mp4Exporter {
         public init(outputURL: URL, outputWidth: Int, outputHeight: Int,
                     downscale: DownscaleSpec?, presetPath: String,
                     shaderEnabled: Bool,
+                    glitch: GlitchSettings?,
                     codec: Codec = .h264, averageBitrate: Int? = nil,
                     loopCount: Int = 1) {
             self.loopCount = max(1, loopCount)
             self.shaderEnabled = shaderEnabled
+            self.glitch = glitch
             self.outputURL = outputURL
             self.outputWidth = outputWidth
             self.outputHeight = outputHeight
@@ -132,7 +137,7 @@ public final class Mp4Exporter {
                        paramValues: [String: Float],
                        settings: Settings,
                        ntscSettingsJSON: String? = nil,
-                       frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? = nil,
+                       frameParams: FrameParams? = nil,
                        progress: @escaping @Sendable (Double) -> Void) async throws {
 
         var ntscStage: NtscStage? = nil
@@ -148,6 +153,7 @@ public final class Mp4Exporter {
         let chain = try Self.makeChain(settings: settings, paramValues: paramValues,
                                        queue: context.queue)
         let bypass = ShaderBypass(context: context)
+        let glitchRenderer = try settings.glitch.map { _ in try GlitchRenderer(context: context) }
 
         // Remove any existing file at the output path.
         try? FileManager.default.removeItem(at: settings.outputURL)
@@ -304,7 +310,9 @@ public final class Mp4Exporter {
                     return
                 }
 
+                var frameGlitch = settings.glitch
                 if let perFrame = frameParams?(passFrame, totalFrames) {
+                    if settings.glitch != nil, let g = perFrame.glitch { frameGlitch = g }
                     if let shader = perFrame.shader, let chain {
                         for (n, v) in shader { try? chain.setParameter(n, value: v) }
                     }
@@ -323,8 +331,13 @@ public final class Mp4Exporter {
                         ntsc: stage, frameCount: passFrame + 1)
                     frameDownscale = nil
                 }
+                let glitchFrame = zip(glitchRenderer, frameGlitch).map { pair in
+                    GlitchFrame(renderer: pair.0, time: Double(frameIndex) / Double(max(1, source.frameRate)),
+                                settings: pair.1)
+                }
                 try ExportFrame.encode(into: cb, pipeline: self.pipeline,
                                        chain: chain, bypass: bypass, supersample: supersample,
+                                       glitch: glitchFrame,
                                        inputTexture: frameInput, outputTexture: target,
                                        downscale: frameDownscale, frameCount: frameIndex + 1)
 
@@ -442,7 +455,7 @@ public final class Mp4Exporter {
                             paramValues: [String: Float],
                             settings: Settings,
                             ntscSettingsJSON: String? = nil,
-                            frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? = nil,
+                            frameParams: FrameParams? = nil,
                             progress: @escaping @Sendable (Double) -> Void) async throws {
 
         var ntscStage: NtscStage? = nil
@@ -457,6 +470,7 @@ public final class Mp4Exporter {
         let chain = try Self.makeChain(settings: settings, paramValues: paramValues,
                                        queue: context.queue)
         let bypass = ShaderBypass(context: context)
+        let glitchRenderer = try settings.glitch.map { _ in try GlitchRenderer(context: context) }
 
         try? FileManager.default.removeItem(at: settings.outputURL)
         let writer: AVAssetWriter
@@ -527,7 +541,9 @@ public final class Mp4Exporter {
                     Thread.sleep(forTimeInterval: 0.005)
                 }
 
+                var frameGlitch = settings.glitch
                 if let perFrame = frameParams?(frameIndex, totalFrames) {
+                    if settings.glitch != nil, let g = perFrame.glitch { frameGlitch = g }
                     if let shader = perFrame.shader, let chain {
                         for (n, v) in shader { try? chain.setParameter(n, value: v) }
                     }
@@ -549,8 +565,13 @@ public final class Mp4Exporter {
                         sourceVersion: 0)
                     frameDownscale = nil
                 }
+                let glitchFrame = zip(glitchRenderer, frameGlitch).map { pair in
+                    GlitchFrame(renderer: pair.0, time: Double(frameIndex) / Double(max(1, fps)),
+                                settings: pair.1)
+                }
                 try ExportFrame.encode(into: cb, pipeline: self.pipeline,
                                        chain: chain, bypass: bypass, supersample: supersample,
+                                       glitch: glitchFrame,
                                        inputTexture: frameInput, outputTexture: target,
                                        downscale: frameDownscale, frameCount: frameIndex + 1)
 
@@ -602,4 +623,11 @@ public final class Mp4Exporter {
         }
         progress(1.0)
     }
+}
+
+
+/// Both values, or nil if either is missing.
+func zip<A, B>(_ a: A?, _ b: B?) -> (A, B)? {
+    guard let a, let b else { return nil }
+    return (a, b)
 }

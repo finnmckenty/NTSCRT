@@ -73,6 +73,7 @@ struct VideoSmoke {
                 downscale: downscale,
                 presetPath: presetPath,
                 shaderEnabled: true,
+                glitch: nil,
                 codec: codec,
                 averageBitrate: bitrate
             )

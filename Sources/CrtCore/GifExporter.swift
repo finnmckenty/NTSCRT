@@ -25,10 +25,13 @@ public final class GifExporter {
         /// The CRT toggle (see Mp4Exporter.Settings.shaderEnabled). No
         /// default on purpose.
         public var shaderEnabled: Bool
+        /// The glitch stage, nil when off. Required, like `shaderEnabled`.
+        public var glitch: GlitchSettings?
         public init(outputURL: URL, width: Int, height: Int, fps: Int,
                     downscale: DownscaleSpec?, presetPath: String,
-                    shaderEnabled: Bool) {
+                    shaderEnabled: Bool, glitch: GlitchSettings?) {
             self.shaderEnabled = shaderEnabled
+            self.glitch = glitch
             self.outputURL = outputURL
             self.width = width
             self.height = height
@@ -101,7 +104,7 @@ public final class GifExporter {
                             paramValues: [String: Float],
                             settings: Settings,
                             ntscSettingsJSON: String? = nil,
-                            frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? = nil,
+                            frameParams: FrameParams? = nil,
                             progress: @escaping @Sendable (Double) -> Void) async throws {
         let ctx = try Context(exporter: self, settings: settings,
                               paramValues: paramValues, ntscSettingsJSON: ntscSettingsJSON,
@@ -110,7 +113,9 @@ public final class GifExporter {
                                                                  downscale: settings.downscale))
         try await Task.detached { [pipeline = self.pipeline] in
             for i in 0..<totalFrames {
+                var glitch = settings.glitch
                 if let perFrame = frameParams?(i, totalFrames) {
+                    if settings.glitch != nil, let g = perFrame.glitch { glitch = g }
                     if let shader = perFrame.shader {
                         for (n, v) in shader { try? ctx.chain?.setParameter(n, value: v) }
                     }
@@ -119,7 +124,9 @@ public final class GifExporter {
                     }
                 }
                 let image = try ctx.renderFrame(source: source, frameIndex: i + 1,
-                                                pipeline: pipeline, sourceVersion: 0)
+                                                pipeline: pipeline, sourceVersion: 0,
+                                                time: Double(i) / Double(max(1, settings.fps)),
+                                                glitch: glitch)
                 ctx.add(image)
                 progress(Double(i + 1) / Double(totalFrames))
             }
@@ -135,7 +142,7 @@ public final class GifExporter {
                             paramValues: [String: Float],
                             settings: Settings,
                             ntscSettingsJSON: String? = nil,
-                            frameParams: (@Sendable (Int, Int) -> (shader: [String: Float]?, ntscJSON: String?))? = nil,
+                            frameParams: FrameParams? = nil,
                             progress: @escaping @Sendable (Double) -> Void) async throws {
         let sourceFPS = Double(max(1, source.frameRate))
         let step = max(1.0, sourceFPS / Double(max(1, settings.fps)))
@@ -157,7 +164,9 @@ public final class GifExporter {
             while written < outFrames, let frame = reader.nextFrame() {
                 // Keep the frame nearest each output timestamp.
                 if Double(sourceIndex) >= nextWanted {
+                    var glitch = settings.glitch
                     if let perFrame = frameParams?(written, outFrames) {
+                        if settings.glitch != nil, let g = perFrame.glitch { glitch = g }
                         if let shader = perFrame.shader {
                             for (n, v) in shader { try? ctx.chain?.setParameter(n, value: v) }
                         }
@@ -168,7 +177,9 @@ public final class GifExporter {
                     let image = try ctx.renderFrame(source: frame.texture,
                                                     frameIndex: written + 1,
                                                     pipeline: pipeline,
-                                                    sourceVersion: nil)   // new pixels each frame
+                                                    sourceVersion: nil,   // new pixels each frame
+                                                    time: Double(sourceIndex) / sourceFPS,
+                                                    glitch: glitch)
                     ctx.add(image)
                     written += 1
                     nextWanted += step
@@ -189,6 +200,7 @@ public final class GifExporter {
         /// nil = CRT switched off (ExportFrame bypasses the shader).
         let chain: LRShaderChain?
         let bypass: ShaderBypass
+        let glitchRenderer: GlitchRenderer?
         let ntscStage: NtscStage?
         let target: MTLTexture
         /// Set when the requested size would alias the scanlines.
@@ -224,6 +236,7 @@ public final class GifExporter {
                 self.chain = nil
             }
             self.bypass = ShaderBypass(context: exporter.context)
+            self.glitchRenderer = try settings.glitch.map { _ in try GlitchRenderer(context: exporter.context) }
 
             guard let target = makeRenderTarget(device: exporter.context.device,
                                                 width: settings.width, height: settings.height),
@@ -268,7 +281,8 @@ public final class GifExporter {
         ///   passing a constant there would freeze frame one for the whole
         ///   clip.
         func renderFrame(source: MTLTexture, frameIndex: Int, pipeline: Pipeline,
-                         sourceVersion: Int?) throws -> CGImage {
+                         sourceVersion: Int?, time: Double,
+                         glitch: GlitchSettings?) throws -> CGImage {
             guard let cb = queue.makeCommandBuffer() else {
                 throw Error.encodeFailed("command buffer")
             }
@@ -282,8 +296,12 @@ public final class GifExporter {
             }
             // Render big and integrate down, so the scanline pattern isn't
             // aliased into bands at GIF sizes.
+            let glitchFrame = zip(glitchRenderer, glitch).map { pair in
+                GlitchFrame(renderer: pair.0, time: time, settings: pair.1)
+            }
             try ExportFrame.encode(into: cb, pipeline: pipeline,
                                    chain: chain, bypass: bypass, supersample: supersample,
+                                   glitch: glitchFrame,
                                    inputTexture: input, outputTexture: target,
                                    downscale: downscale, frameCount: frameIndex)
 

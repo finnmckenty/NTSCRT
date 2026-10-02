@@ -88,15 +88,31 @@ public final class ShaderBypass {
 /// the shader is off. The routes used to call the chain directly, and none of
 /// them looked at the CRT toggle, so exports always had the shader on.
 public enum ExportFrame {
+    /// `glitch` is required (nil = stage off) for the same reason
+    /// `shaderEnabled` is: a route that could leave it out silently would
+    /// export without it.
     public static func encode(into cb: MTLCommandBuffer,
                               pipeline: Pipeline,
                               chain: LRShaderChain?,
                               bypass: ShaderBypass,
                               supersample: SupersampledPass?,
+                              glitch: GlitchFrame?,
                               inputTexture: MTLTexture,
                               outputTexture: MTLTexture,
                               downscale: DownscaleSpec?,
                               frameCount: Int) throws {
+        var inputTexture = inputTexture
+        var downscale = downscale
+        // The receiver works on scan lines, so it sees the downscaled raster:
+        // after NTSC and downscale, before the CRT shader (or its bypass).
+        if let g = glitch {
+            let chainInput = try downscale.map {
+                try g.renderer.downscaled(inputTexture, spec: $0, commandBuffer: cb)
+            } ?? inputTexture
+            inputTexture = try g.renderer.encode(into: cb, chainInput: chainInput, time: g.time,
+                                                 settings: g.settings, history: g.history)
+            downscale = nil
+        }
         guard let chain else {
             try bypass.encode(into: cb, inputTexture: inputTexture,
                               outputTexture: outputTexture, downscale: downscale)
@@ -113,3 +129,26 @@ public enum ExportFrame {
         }
     }
 }
+
+
+/// The glitch stage's inputs for one export frame.
+public struct GlitchFrame {
+    public let renderer: GlitchRenderer
+    /// Seconds from the start of the export (or the clip).
+    public let time: Double
+    public let settings: GlitchSettings
+    public let history: GlitchHistory?
+    public init(renderer: GlitchRenderer, time: Double, settings: GlitchSettings,
+                history: GlitchHistory? = nil) {
+        self.renderer = renderer
+        self.time = time
+        self.settings = settings
+        self.history = history
+    }
+}
+
+/// Per-frame values from the keyframe timeline: shader parameters, NTSC
+/// settings JSON, glitch settings. Called with (frame index, frame count) on
+/// the export thread; nil fields leave that stage's settings as they were.
+public typealias FrameOverrides = (shader: [String: Float]?, ntscJSON: String?, glitch: GlitchSettings?)
+public typealias FrameParams = @Sendable (Int, Int) -> FrameOverrides

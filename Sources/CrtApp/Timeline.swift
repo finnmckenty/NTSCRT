@@ -1,4 +1,5 @@
 import Foundation
+import CrtCore
 
 /// Segment easing, carried per keyframe and applied to the segment leaving
 /// that keyframe (CSS semantics: ease-in = slow start of the segment).
@@ -32,6 +33,9 @@ struct Keyframe: Identifiable {
     var easing: KeyEasing = .linear
     var shaderParams: [String: Float]
     var ntscValues: [String: Any]
+    /// Glitch-stage knobs (GlitchParam ids). Empty in keyframes saved
+    /// before the stage existed: they then leave the knobs alone.
+    var glitchValues: [String: Double] = [:]
 }
 
 /// Value-captured interpolation engine, safe to hand to the exporter's
@@ -123,6 +127,24 @@ struct TimelineEvaluator: @unchecked Sendable {
             out[name] = interp == .lerpInt ? Int(v.rounded()) as Any : v as Any
         }
         return out
+    }
+
+    /// Sliders interpolate; toggles hold until the next keyframe.
+    func glitchValues(at t: Double) -> [String: Double] {
+        let (a, b, u) = segment(at: t)
+        if u == 0 { return a.glitchValues }
+        var out: [String: Double] = [:]
+        for (id, va) in a.glitchValues {
+            let vb = b.glitchValues[id] ?? va
+            out[id] = (GlitchParam.byID[id]?.isToggle ?? false) ? va : va + (vb - va) * u
+        }
+        return out
+    }
+
+    /// The glitch settings at `t`, starting from `base` for knobs the
+    /// keyframes don't carry.
+    func glitchSettings(at t: Double, base: [String: Double]) -> GlitchSettings {
+        GlitchSettings(values: base.merging(glitchValues(at: t)) { _, new in new })
     }
 
     func ntscJSON(at t: Double) -> String? {
