@@ -73,8 +73,10 @@ PRESETS_ABS="$(cd Vendor/slang-shaders && pwd)"
 
 # Stamp the git version so the window title says exactly which code this
 # is (e.g. "0.10.1-2-g41a5813-dirty"). A dev bundle that silently reports
-# a stale version once cost an afternoon.
-VERSION="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || true)"
+# a stale version once cost an afternoon. Release tags only: a rollback tag
+# like `pre-glitch` sharing a commit with a release would otherwise win and
+# title a new build "pre-glitch-4-g…".
+VERSION="$(git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null | sed 's/^v//' || true)"
 /usr/bin/sed -i '' "s|REPLACE_VERSION|${VERSION:-dev}|" "$APP/Contents/Info.plist"
 
 # Ad-hoc sign so Gatekeeper lets it run.
