@@ -11,9 +11,8 @@ struct ContentView: View {
     // screenshot verification (see DEVELOPMENT.md).
     @State private var showExport =
         ProcessInfo.processInfo.environment["CRT_SHOW_EXPORT"] == "1"
-    // CRT_SHOW_HOWL=1 opens the Howlaround panel at launch.
-    @State private var showHowlaround =
-        ProcessInfo.processInfo.environment["CRT_SHOW_HOWL"] == "1"
+    // CRT_SHOW_HOWL=1 opens the Howlaround panel once the source has loaded.
+    @State private var showHowlaround = false
     private let paletteFadeSeconds =
         ProcessInfo.processInfo.environment["CRT_PALETTE_FADE"].flatMap(Double.init) ?? 2.0
     @State private var paletteVisible = true
@@ -141,7 +140,7 @@ struct ContentView: View {
                 || env["CRT_SPACE_SELFTEST"] != nil
                 || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil
                 || env["CRT_HOWL_RENDER"] != nil || env["CRT_HOWL_DRAFT_CHECK"] != nil
-                || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil else { return }
+                || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1" else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -183,6 +182,7 @@ struct ContentView: View {
                 if kv.count == 2, let v = Double(kv[1]) { state.setGlitchValue(String(kv[0]), v) }
             }
         }
+        if env["CRT_SHOW_HOWL"] == "1" { showHowlaround = true }
         // CRT_HOWL_PANEL_SNAPSHOT=<out.png>: draw the Howlaround panel off
         // screen (the draft video itself doesn't draw this way).
         if let out = env["CRT_HOWL_PANEL_SNAPSHOT"] {

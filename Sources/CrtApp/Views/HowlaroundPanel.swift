@@ -33,6 +33,9 @@ struct HowlaroundPanel: View {
             // Your look may have changed since the last draft.
             state.scheduleHowlaroundDraft(delay: .zero)
         }
+        .onChange(of: state.sourceTexture != nil || state.videoSource != nil) { _, hasSource in
+            if hasSource { state.scheduleHowlaroundDraft(delay: .zero) }
+        }
         .onDisappear {
             state.howlPanelOpen = false
             Task { @MainActor in
