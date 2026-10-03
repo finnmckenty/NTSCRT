@@ -508,6 +508,34 @@ final class AppState {
     private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
+    // MARK: - howlaround (video feedback render — CrtCore/Howlaround.swift)
+
+    /// The howlaround camera's knobs (the Howlaround panel).
+    var howlaroundValues: [String: Double] = HowlaroundParam.defaultValues
+    /// Length of a howlaround made from a still, in seconds.
+    var howlaroundSeconds: Double = 5
+    /// Render a GIF instead of a video.
+    var howlaroundGIF: Bool = false
+    /// The latest draft (a short, small render of the current settings).
+    var howlDraftURL: URL?
+    var howlDraftWorking = false
+    var howlDraftStatus = ""
+    var howlRenderWorking = false
+    var howlRenderProgress: Double = 0
+    var howlRenderStatus = ""
+    /// The last finished render, for the panel's Open button.
+    var howlLastOutput: URL?
+    @ObservationIgnored var howlDraftCancel: HowlaroundCancel?
+    @ObservationIgnored var howlDraftTask: Task<Void, Never>?
+    @ObservationIgnored var howlDraftGeneration = 0
+    /// Renders in flight — must never exceed one (shared Metal queue,
+    /// librashader not thread-safe); checked by CRT_HOWL_DRAFT_CHECK.
+    @ObservationIgnored var howlRenderCancel: HowlaroundCancel?
+    /// The panel is showing (the preview stays paused while it is).
+    @ObservationIgnored var howlPanelOpen = false
+    @ObservationIgnored var howlActiveRenders = 0
+    @ObservationIgnored var howlOverlapSeen = false
+
     // MARK: - neutral values (double-click a slider knob — NeutralValues.swift)
 
     /// The value a shader parameter's Reset restores: the house default for

@@ -32,38 +32,10 @@ struct ExportPopover: View {
 
     private var isVideo: Bool { state.videoSource != nil }
 
-    private var computedBitrate: Int {
-        let size = outputSize
-        let fps = state.videoSource.map { Double($0.frameRate) } ?? Double(state.timelineFPS)
-        return max(2_000_000, Int(Double(size.width * size.height) * fps * state.exportQuality.bitsPerPixel))
-    }
+    // Sizes and bitrate come from AppState, shared with the Howlaround panel.
+    private var computedBitrate: Int { state.exportBitrate(for: outputSize) }
+    private var outputSize: (width: Int, height: Int) { state.exportVideoSize }
 
-    /// Output size derived from the requested long edge and the source aspect.
-    /// Even values are required by H.264; the rounding clamps that.
-    private var outputSize: (width: Int, height: Int) {
-        let aspect = state.sourceAspect
-        let longEdge = state.exportLongEdge
-        let w: Int, h: Int
-        if aspect >= 1 {
-            w = longEdge
-            h = max(64, Int((Double(longEdge) / Double(aspect)).rounded()))
-        } else {
-            h = longEdge
-            w = max(64, Int((Double(longEdge) * Double(aspect)).rounded()))
-        }
-        return snapped(width: w & ~1, height: h & ~1)
-    }
-
-    /// With snapping on, round onto the scanline grid (see ScanlineGrid).
-    private func snapped(width: Int, height: Int) -> (width: Int, height: Int) {
-        guard state.snapExportToScanlineGrid else { return (width, height) }
-        let input = state.chainInputSize
-        guard input.width > 0, input.height > 0 else { return (width, height) }
-        let s = ScanlineGrid.snappedSize(inputWidth: input.width,
-                                         inputHeight: input.height,
-                                         targetHeight: height)
-        return (s.width & ~1, s.height & ~1)
-    }
 
     var body: some View {
         @Bindable var state = state
@@ -263,11 +235,7 @@ struct ExportPopover: View {
     }
 
     /// GIF output size: chosen width, height from the source aspect, both even.
-    private var gifSize: (width: Int, height: Int) {
-        let w = max(64, state.gifWidth)
-        let h = max(64, Int((Double(w) / Double(state.sourceAspect)).rounded()))
-        return snapped(width: w & ~1, height: h & ~1)
-    }
+    private var gifSize: (width: Int, height: Int) { state.exportGifSize }
 
     private var gifFrameCount: Int {
         if let vs = state.videoSource {

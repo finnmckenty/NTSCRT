@@ -27,11 +27,15 @@ public final class GifExporter {
         public var shaderEnabled: Bool
         /// The glitch stage, nil when off. Required, like `shaderEnabled`.
         public var glitch: GlitchSettings?
+        /// Video feedback (a camera filming the TV), nil for a normal export.
+        public var howlaround: HowlaroundRender?
         public init(outputURL: URL, width: Int, height: Int, fps: Int,
                     downscale: DownscaleSpec?, presetPath: String,
-                    shaderEnabled: Bool, glitch: GlitchSettings?) {
+                    shaderEnabled: Bool, glitch: GlitchSettings?,
+                    howlaround: HowlaroundRender? = nil) {
             self.shaderEnabled = shaderEnabled
             self.glitch = glitch
+            self.howlaround = howlaround
             self.outputURL = outputURL
             self.width = width
             self.height = height
@@ -112,17 +116,13 @@ public final class GifExporter {
                               chainInputSize: Self.chainInputSize(source: source,
                                                                  downscale: settings.downscale))
         try await Task.detached { [pipeline = self.pipeline] in
+            if ctx.howl != nil {
+                try ctx.runUp(scene: source, glitch: ctx.applyFrameParams(frameParams?(0, totalFrames)),
+                              pipeline: pipeline)
+            }
             for i in 0..<totalFrames {
-                var glitch = settings.glitch
-                if let perFrame = frameParams?(i, totalFrames) {
-                    if settings.glitch != nil, let g = perFrame.glitch { glitch = g }
-                    if let shader = perFrame.shader {
-                        for (n, v) in shader { try? ctx.chain?.setParameter(n, value: v) }
-                    }
-                    if let json = perFrame.ntscJSON, let stage = ctx.ntscStage {
-                        try stage.setSettingsJSON(json)
-                    }
-                }
+                if ctx.howl?.isCancelled == true { throw CancellationError() }
+                let glitch = try ctx.applyFrameParams(frameParams?(i, totalFrames))
                 let image = try ctx.renderFrame(source: source, frameIndex: i + 1,
                                                 pipeline: pipeline, sourceVersion: 0,
                                                 time: Double(i) / Double(max(1, settings.fps)),
@@ -161,18 +161,14 @@ public final class GifExporter {
             var sourceIndex = 0
             var written = 0
             var nextWanted = 0.0
-            while written < outFrames, let frame = reader.nextFrame() {
+            let limit = min(outFrames, settings.howlaround?.frameLimit ?? outFrames)
+            while written < limit, let frame = reader.nextFrame() {
                 // Keep the frame nearest each output timestamp.
                 if Double(sourceIndex) >= nextWanted {
-                    var glitch = settings.glitch
-                    if let perFrame = frameParams?(written, outFrames) {
-                        if settings.glitch != nil, let g = perFrame.glitch { glitch = g }
-                        if let shader = perFrame.shader {
-                            for (n, v) in shader { try? ctx.chain?.setParameter(n, value: v) }
-                        }
-                        if let json = perFrame.ntscJSON, let stage = ctx.ntscStage {
-                            try stage.setSettingsJSON(json)
-                        }
+                    if ctx.howl?.isCancelled == true { throw CancellationError() }
+                    let glitch = try ctx.applyFrameParams(frameParams?(written, outFrames))
+                    if written == 0, ctx.howl != nil {
+                        try ctx.runUp(scene: frame.texture, glitch: glitch, pipeline: pipeline)
                     }
                     let image = try ctx.renderFrame(source: frame.texture,
                                                     frameIndex: written + 1,
@@ -183,7 +179,7 @@ public final class GifExporter {
                     ctx.add(image)
                     written += 1
                     nextWanted += step
-                    progress(Double(written) / Double(outFrames))
+                    progress(Double(written) / Double(limit))
                 }
                 sourceIndex += 1
             }
@@ -210,12 +206,20 @@ public final class GifExporter {
         let settings: Settings
         let destination: CGImageDestination
         let frameProperties: CFDictionary
+        let howl: HowlaroundLoop?
+        let chainInputSize: (width: Int, height: Int)
 
         init(exporter: GifExporter, settings: Settings, paramValues: [String: Float],
              ntscSettingsJSON: String?, frameCount: Int,
              chainInputSize: (width: Int, height: Int)) throws {
             self.settings = settings
             self.queue = exporter.context.queue
+            self.chainInputSize = chainInputSize
+            self.howl = try settings.howlaround.map {
+                try HowlaroundLoop(context: exporter.context, render: $0, presetPath: settings.presetPath,
+                                   shaderEnabled: settings.shaderEnabled, paramValues: paramValues,
+                                   chainInputSize: chainInputSize)
+            }
 
             var stage: NtscStage? = nil
             if let json = ntscSettingsJSON {
@@ -283,15 +287,18 @@ public final class GifExporter {
         func renderFrame(source: MTLTexture, frameIndex: Int, pipeline: Pipeline,
                          sourceVersion: Int?, time: Double,
                          glitch: GlitchSettings?) throws -> CGImage {
+            // With a howlaround the camera's picture replaces the source, and
+            // it's new every frame.
+            let scene = try howl?.cameraImage(scene: source, time: time) ?? source
             guard let cb = queue.makeCommandBuffer() else {
                 throw Error.encodeFailed("command buffer")
             }
-            var input = source
+            var input = scene
             var downscale = settings.downscale
             if let stage = ntscStage {
-                input = try pipeline.prepareChainInput(source: source, downscale: downscale,
+                input = try pipeline.prepareChainInput(source: scene, downscale: downscale,
                                                        ntsc: stage, frameCount: frameIndex,
-                                                       sourceVersion: sourceVersion)
+                                                       sourceVersion: howl == nil ? sourceVersion : nil)
                 downscale = nil
             }
             // Render big and integrate down, so the scanline pattern isn't
@@ -303,7 +310,8 @@ public final class GifExporter {
                                    chain: chain, bypass: bypass, supersample: supersample,
                                    glitch: glitchFrame,
                                    inputTexture: input, outputTexture: target,
-                                   downscale: downscale, frameCount: frameIndex)
+                                   downscale: downscale, frameCount: frameIndex,
+                                   feedback: howl?.feedback)
 
             guard let blit = cb.makeBlitCommandEncoder() else {
                 throw Error.encodeFailed("blit encoder")
@@ -322,10 +330,41 @@ public final class GifExporter {
             blit.endEncoding()
             cb.commit()
             cb.waitUntilCompleted()
+            howl?.advance()
 
             // makeCGImage copies the pixels out, so reusing `staging` for the
             // next frame can't disturb one already handed to the encoder.
             return try makeCGImage(from: staging)
+        }
+
+        /// One frame's keyframed values, applied to every copy of each stage;
+        /// returns the frame's glitch settings.
+        func applyFrameParams(_ perFrame: FrameOverrides?) throws -> GlitchSettings? {
+            var glitch = settings.glitch
+            if let perFrame {
+                if settings.glitch != nil, let g = perFrame.glitch { glitch = g }
+                if let shader = perFrame.shader {
+                    for (n, v) in shader { try? chain?.setParameter(n, value: v) }
+                    howl?.setShaderParams(shader)
+                }
+                if let json = perFrame.ntscJSON, let stage = ntscStage {
+                    try stage.setSettingsJSON(json)
+                }
+            }
+            return glitch
+        }
+
+        /// Build the howlaround's tunnel before the first frame is written.
+        func runUp(scene: MTLTexture, glitch: GlitchSettings?, pipeline: Pipeline) throws {
+            guard let howl else { return }
+            let aspect = Double(scene.width) / Double(max(1, scene.height))
+            try howl.runUp(frames: howl.settings.runUpFrames(aspect: aspect,
+                                                             chainHeight: chainInputSize.height),
+                           scene: scene, pipeline: pipeline, ntsc: ntscStage,
+                           glitch: zip(glitchRenderer, glitch).map {
+                               GlitchFrame(renderer: $0.0, time: 0, settings: $0.1)
+                           },
+                           downscale: settings.downscale)
         }
 
         func add(_ image: CGImage) {

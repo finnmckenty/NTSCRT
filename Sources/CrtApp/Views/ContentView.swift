@@ -11,6 +11,9 @@ struct ContentView: View {
     // screenshot verification (see DEVELOPMENT.md).
     @State private var showExport =
         ProcessInfo.processInfo.environment["CRT_SHOW_EXPORT"] == "1"
+    // CRT_SHOW_HOWL=1 opens the Howlaround panel at launch.
+    @State private var showHowlaround =
+        ProcessInfo.processInfo.environment["CRT_SHOW_HOWL"] == "1"
     private let paletteFadeSeconds =
         ProcessInfo.processInfo.environment["CRT_PALETTE_FADE"].flatMap(Double.init) ?? 2.0
     @State private var paletteVisible = true
@@ -136,7 +139,9 @@ struct ContentView: View {
                 || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil
                 || env["CRT_SLIDER_SELFTEST"] != nil || env["CRT_SLIDER_E2E"] != nil
                 || env["CRT_SPACE_SELFTEST"] != nil
-                || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil else { return }
+                || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil
+                || env["CRT_HOWL_RENDER"] != nil || env["CRT_HOWL_DRAFT_CHECK"] != nil
+                || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -176,6 +181,107 @@ struct ContentView: View {
             for pair in pairs.split(separator: ",") {
                 let kv = pair.split(separator: "=", maxSplits: 1)
                 if kv.count == 2, let v = Double(kv[1]) { state.setGlitchValue(String(kv[0]), v) }
+            }
+        }
+        // CRT_HOWL_PANEL_SNAPSHOT=<out.png>: draw the Howlaround panel off
+        // screen (the draft video itself doesn't draw this way).
+        if let out = env["CRT_HOWL_PANEL_SNAPSHOT"] {
+            let host = NSHostingView(rootView: HowlaroundPanel().environment(state)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .environment(\.colorScheme, .dark))
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.frame = CGRect(x: 0, y: 0, width: 1040, height: 700)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            try? await Task.sleep(for: .seconds(3))
+            host.layoutSubtreeIfNeeded()
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+                print("HOWL-PANEL-SNAPSHOT \(out)")
+            }
+            exit(0)
+        }
+        // CRT_HOWL_DRAFT_CHECK=1: the panel's draft logic — a first draft;
+        // knob turns in quick succession render only the last setting; a
+        // knob turned mid-render cancels it; never two renders at once.
+        if env["CRT_HOWL_DRAFT_CHECK"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("HOWLDRAFT \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            func settle(_ seconds: Double = 30) async {
+                let end = Date().addingTimeInterval(seconds)
+                try? await Task.sleep(for: .milliseconds(600))   // past the 350 ms debounce
+                while Date() < end && (state.howlDraftWorking || state.howlActiveRenders > 0) {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            state.stopPlayback()
+            state.exportInProgress = true
+            state.scheduleHowlaroundDraft(delay: .zero)
+            await settle()
+            let first = state.howlDraftURL
+            check("first draft written", first.map { FileManager.default.fileExists(atPath: $0.path) } ?? false,
+                  state.howlDraftStatus)
+            // Three turns 100 ms apart: one render, of the last value.
+            state.setHowlaroundValue("zoom", 0.6)
+            try? await Task.sleep(for: .milliseconds(100))
+            state.setHowlaroundValue("roll", 10)
+            try? await Task.sleep(for: .milliseconds(100))
+            state.setHowlaroundValue("roll", 20)
+            let last = state.howlDraftGeneration
+            await settle()
+            check("quick turns render once, the last setting",
+                  state.howlDraftURL?.lastPathComponent == "ntscrt-howlaround-draft-\(last).mp4",
+                  state.howlDraftURL?.lastPathComponent ?? "no draft")
+            check("the old draft file is gone", first.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false)
+            // A turn while a draft is rendering cancels it.
+            state.setHowlaroundValue("zoom", 0.7)
+            var sawWorking = false
+            for _ in 0..<100 where !sawWorking {
+                try? await Task.sleep(for: .milliseconds(10))
+                sawWorking = state.howlActiveRenders > 0
+            }
+            state.setHowlaroundValue("zoom", 0.75)
+            let final = state.howlDraftGeneration
+            await settle()
+            check("a turn mid-render cancels it and renders the new setting",
+                  sawWorking && state.howlDraftURL?.lastPathComponent == "ntscrt-howlaround-draft-\(final).mp4",
+                  "saw render: \(sawWorking), draft: \(state.howlDraftURL?.lastPathComponent ?? "none")")
+            check("never two renders at once", !state.howlOverlapSeen)
+            print(failures == 0 ? "HOWLDRAFT-PASS" : "HOWLDRAFT-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_HOWL="zoom=0.8,roll=10" sets howlaround knobs; CRT_HOWL_RENDER=
+        // <out.mp4|out.gif> renders one through the panel's own render call
+        // and exits (CRT_HOWL_DRAFT=1: the draft's length and size instead).
+        if let out = env["CRT_HOWL_RENDER"] {
+            if let pairs = env["CRT_HOWL"] {
+                for pair in pairs.split(separator: ",") {
+                    let kv = pair.split(separator: "=", maxSplits: 1)
+                    if kv.count == 2, let v = Double(kv[1]) { state.howlaroundValues[String(kv[0])] = v }
+                }
+            }
+            if let secs = env["CRT_HOWL_SECONDS"].flatMap(Double.init) { state.howlaroundSeconds = secs }
+            let draft = env["CRT_HOWL_DRAFT"] == "1"
+            let gif = out.hasSuffix(".gif")
+            let size = draft ? state.howlDraftSize : (gif ? state.exportGifSize : state.exportVideoSize)
+            state.stopPlayback()
+            state.exportInProgress = true
+            let started = Date()
+            do {
+                try await state.renderHowlaround(to: URL(fileURLWithPath: out), gif: gif, size: size,
+                                                 draftSeconds: draft ? AppState.howlDraftSeconds : nil,
+                                                 cancel: nil, progress: { _ in })
+                print(String(format: "HOWL wrote %@ %dx%d in %.1f s (copies %@)", out, size.width, size.height,
+                             Date().timeIntervalSince(started),
+                             state.howlaroundCopies.map(String.init) ?? "growing"))
+                exit(0)
+            } catch {
+                print("HOWL FAIL: \(error)")
+                exit(1)
             }
         }
         // CRT_STILL_LOOP_TEST=<out.mp4>: loop a still->video export.
@@ -1385,6 +1491,18 @@ struct ContentView: View {
                     .labelStyle(.titleAndIcon)
             }
             .help("Save or load the whole configuration (downscale + VHS + shader + view) as a JSON file")
+
+            Button {
+                showHowlaround = true
+            } label: {
+                Label("Howlaround", systemImage: "camera.viewfinder")
+                    .labelStyle(.titleAndIcon)
+            }
+            .disabled(state.sourceTexture == nil && state.videoSource == nil || state.exportWorking)
+            .sheet(isPresented: $showHowlaround) {
+                HowlaroundPanel().environment(state)
+            }
+            .help("Point a camcorder at the TV showing its own picture — video feedback, rendered with your look on every pass")
 
             Button {
                 showExport.toggle()

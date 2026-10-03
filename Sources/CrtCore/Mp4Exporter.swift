@@ -53,13 +53,17 @@ public final class Mp4Exporter {
         /// Written as repeated passes so the file itself is longer — for
         /// places that don't loop a video on playback.
         public var loopCount: Int
+        /// Video feedback (a camera filming the TV), nil for a normal export.
+        public var howlaround: HowlaroundRender?
         public init(outputURL: URL, outputWidth: Int, outputHeight: Int,
                     downscale: DownscaleSpec?, presetPath: String,
                     shaderEnabled: Bool,
                     glitch: GlitchSettings?,
                     codec: Codec = .h264, averageBitrate: Int? = nil,
-                    loopCount: Int = 1) {
+                    loopCount: Int = 1,
+                    howlaround: HowlaroundRender? = nil) {
             self.loopCount = max(1, loopCount)
+            self.howlaround = howlaround
             self.shaderEnabled = shaderEnabled
             self.glitch = glitch
             self.outputURL = outputURL
@@ -216,7 +220,8 @@ public final class Mp4Exporter {
             r.startReading()
             return (r, out)
         }
-        if let audioTrack = audioTracks.first {
+        // A howlaround draft stops early, so it goes without the clip's sound.
+        if let audioTrack = audioTracks.first, settings.howlaround?.frameLimit == nil {
             let aReader = try AVAssetReader(asset: source.asset)
             let lpcmSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
@@ -266,6 +271,12 @@ public final class Mp4Exporter {
                                     chainInput: chainInput,
                                     target: (settings.outputWidth, settings.outputHeight))
             : nil
+        let howl = try settings.howlaround.map {
+            try HowlaroundLoop(context: context, render: $0, presetPath: settings.presetPath,
+                               shaderEnabled: settings.shaderEnabled, paramValues: paramValues,
+                               chainInputSize: chainInput)
+        }
+        let aspect = Double(source.pixelSize.width) / Double(max(1, source.pixelSize.height))
 
         // Render target reused across frames (private).
         guard let target = makeRenderTarget(device: context.device,
@@ -291,10 +302,16 @@ public final class Mp4Exporter {
             var pass = 0
             var reader = videoReader
             var passFrame = 0
+            var ranUp = false
             while true {
                 if !videoInput.isReadyForMoreMediaData {
                     Thread.sleep(forTimeInterval: 0.005)
                     continue
+                }
+                if howl?.isCancelled == true { throw CancellationError() }
+                if let limit = settings.howlaround?.frameLimit, frameIndex >= limit {
+                    videoInput.markAsFinished()
+                    return
                 }
                 guard let frame = reader.nextFrame() else {
                     // End of this pass. Loop again from the top if asked,
@@ -313,33 +330,47 @@ public final class Mp4Exporter {
                 var frameGlitch = settings.glitch
                 if let perFrame = frameParams?(passFrame, totalFrames) {
                     if settings.glitch != nil, let g = perFrame.glitch { frameGlitch = g }
-                    if let shader = perFrame.shader, let chain {
-                        for (n, v) in shader { try? chain.setParameter(n, value: v) }
+                    if let shader = perFrame.shader {
+                        if let chain { for (n, v) in shader { try? chain.setParameter(n, value: v) } }
+                        howl?.setShaderParams(shader)
                     }
                     if let json = perFrame.ntscJSON, let stage = ntscStage {
                         try stage.setSettingsJSON(json)
                     }
                 }
+                let seconds = Double(frameIndex) / Double(max(1, source.frameRate))
+                if let howl, !ranUp {
+                    // Build the tunnel on the first frame before writing it.
+                    ranUp = true
+                    try howl.runUp(frames: howl.settings.runUpFrames(aspect: aspect,
+                                                                     chainHeight: chainInput.height),
+                                   scene: frame.texture, pipeline: self.pipeline, ntsc: ntscStage,
+                                   glitch: zip(glitchRenderer, frameGlitch).map {
+                                       GlitchFrame(renderer: $0.0, time: 0, settings: $0.1)
+                                   },
+                                   downscale: settings.downscale)
+                }
+                let scene = try howl?.cameraImage(scene: frame.texture, time: seconds) ?? frame.texture
                 guard let cb = self.context.queue.makeCommandBuffer() else {
                     throw Error.encodeFailed("commandBuffer")
                 }
-                var frameInput = frame.texture
+                var frameInput = scene
                 var frameDownscale = settings.downscale
                 if let stage = ntscStage {
                     frameInput = try self.pipeline.prepareChainInput(
-                        source: frame.texture, downscale: frameDownscale,
+                        source: scene, downscale: frameDownscale,
                         ntsc: stage, frameCount: passFrame + 1)
                     frameDownscale = nil
                 }
                 let glitchFrame = zip(glitchRenderer, frameGlitch).map { pair in
-                    GlitchFrame(renderer: pair.0, time: Double(frameIndex) / Double(max(1, source.frameRate)),
-                                settings: pair.1)
+                    GlitchFrame(renderer: pair.0, time: seconds, settings: pair.1)
                 }
                 try ExportFrame.encode(into: cb, pipeline: self.pipeline,
                                        chain: chain, bypass: bypass, supersample: supersample,
                                        glitch: glitchFrame,
                                        inputTexture: frameInput, outputTexture: target,
-                                       downscale: frameDownscale, frameCount: frameIndex + 1)
+                                       downscale: frameDownscale, frameCount: frameIndex + 1,
+                                       feedback: howl?.feedback)
 
                 var pb: CVPixelBuffer?
                 if let pool = adaptor.pixelBufferPool {
@@ -372,6 +403,7 @@ public final class Mp4Exporter {
                 blit.endEncoding()
                 cb.commit()
                 cb.waitUntilCompleted()
+                howl?.advance()
 
                 let pts = pass == 0
                     ? frame.presentationTime
@@ -386,7 +418,8 @@ public final class Mp4Exporter {
 
                     frameIndex += 1
                     passFrame += 1
-                    let p = min(1.0, Double(frameIndex) / Double(totalFrames * loops))
+                    let planned = min(totalFrames * loops, settings.howlaround?.frameLimit ?? Int.max)
+                    let p = min(1.0, Double(frameIndex) / Double(max(1, planned)))
                     progress(p)
                 }
                 }.value
@@ -471,6 +504,15 @@ public final class Mp4Exporter {
                                        queue: context.queue)
         let bypass = ShaderBypass(context: context)
         let glitchRenderer = try settings.glitch.map { _ in try GlitchRenderer(context: context) }
+        // Small outputs would otherwise alias the shader's scanlines into
+        // bands (see ScanlineGrid); nil when the size is already fine.
+        let chainInput = ScanlineGrid.chainInputSize(width: source.width, height: source.height,
+                                                    downscale: settings.downscale)
+        let howl = try settings.howlaround.map {
+            try HowlaroundLoop(context: context, render: $0, presetPath: settings.presetPath,
+                               shaderEnabled: settings.shaderEnabled, paramValues: paramValues,
+                               chainInputSize: chainInput)
+        }
 
         try? FileManager.default.removeItem(at: settings.outputURL)
         let writer: AVAssetWriter
@@ -518,11 +560,6 @@ public final class Mp4Exporter {
                                             height: settings.outputHeight) else {
             throw Error.encodeFailed("makeRenderTarget")
         }
-
-        // Small outputs would otherwise alias the shader's scanlines into
-        // bands (see ScanlineGrid); nil when the size is already fine.
-        let chainInput = ScanlineGrid.chainInputSize(width: source.width, height: source.height,
-                                                    downscale: settings.downscale)
         let supersample = settings.shaderEnabled
             ? SupersampledPass.make(device: context.device,
                                     chainInput: chainInput,
@@ -536,44 +573,66 @@ public final class Mp4Exporter {
         }
 
         try await Task.detached { () throws -> Void in
-            for frameIndex in 0..<totalFrames {
-                while !videoInput.isReadyForMoreMediaData {
-                    Thread.sleep(forTimeInterval: 0.005)
-                }
-
+            /// The keyframed values for one frame, applied to every copy of
+            /// each stage; returns the frame's glitch settings.
+            func applyFrameParams(_ frameIndex: Int) throws -> GlitchSettings? {
                 var frameGlitch = settings.glitch
                 if let perFrame = frameParams?(frameIndex, totalFrames) {
                     if settings.glitch != nil, let g = perFrame.glitch { frameGlitch = g }
-                    if let shader = perFrame.shader, let chain {
-                        for (n, v) in shader { try? chain.setParameter(n, value: v) }
+                    if let shader = perFrame.shader {
+                        if let chain { for (n, v) in shader { try? chain.setParameter(n, value: v) } }
+                        howl?.setShaderParams(shader)
                     }
                     if let json = perFrame.ntscJSON, let stage = ntscStage {
                         try stage.setSettingsJSON(json)
                     }
                 }
+                return frameGlitch
+            }
+            if let howl {
+                // Build the tunnel before the first written frame.
+                let g = try applyFrameParams(0)
+                try howl.runUp(frames: howl.settings.runUpFrames(
+                                   aspect: Double(source.width) / Double(max(1, source.height)),
+                                   chainHeight: chainInput.height),
+                               scene: source, pipeline: self.pipeline, ntsc: ntscStage,
+                               glitch: zip(glitchRenderer, g).map { GlitchFrame(renderer: $0.0, time: 0, settings: $0.1) },
+                               downscale: settings.downscale)
+            }
+            for frameIndex in 0..<totalFrames {
+                while !videoInput.isReadyForMoreMediaData {
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                if howl?.isCancelled == true { throw CancellationError() }
+
+                let frameGlitch = try applyFrameParams(frameIndex)
+                let seconds = Double(frameIndex) / Double(max(1, fps))
+                // With a howlaround the camera's picture replaces the still,
+                // and it's new every frame.
+                let scene = try howl?.cameraImage(scene: source, time: seconds) ?? source
 
                 guard let cb = self.context.queue.makeCommandBuffer() else {
                     throw Error.encodeFailed("commandBuffer")
                 }
-                var frameInput = source
+                var frameInput = scene
                 var frameDownscale = settings.downscale
                 if let stage = ntscStage {
                     frameInput = try self.pipeline.prepareChainInput(
-                        source: source, downscale: frameDownscale,
+                        source: scene, downscale: frameDownscale,
                         ntsc: stage, frameCount: frameIndex + 1,
                         // Stills: one fixed image for every frame.
-                        sourceVersion: 0)
+                        sourceVersion: howl == nil ? 0 : nil)
                     frameDownscale = nil
                 }
                 let glitchFrame = zip(glitchRenderer, frameGlitch).map { pair in
-                    GlitchFrame(renderer: pair.0, time: Double(frameIndex) / Double(max(1, fps)),
-                                settings: pair.1)
+                    GlitchFrame(renderer: pair.0, time: seconds, settings: pair.1)
                 }
                 try ExportFrame.encode(into: cb, pipeline: self.pipeline,
                                        chain: chain, bypass: bypass, supersample: supersample,
                                        glitch: glitchFrame,
                                        inputTexture: frameInput, outputTexture: target,
-                                       downscale: frameDownscale, frameCount: frameIndex + 1)
+                                       downscale: frameDownscale, frameCount: frameIndex + 1,
+                                       feedback: howl?.feedback)
 
                 var pb: CVPixelBuffer?
                 if let pool = adaptor.pixelBufferPool {
@@ -606,6 +665,8 @@ public final class Mp4Exporter {
                 blit.endEncoding()
                 cb.commit()
                 cb.waitUntilCompleted()
+
+                howl?.advance()
 
                 let time = CMTime(value: CMTimeValue(frameIndex), timescale: CMTimeScale(fps))
                 if !adaptor.append(pb, withPresentationTime: time) {

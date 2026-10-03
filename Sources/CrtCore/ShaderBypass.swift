@@ -100,19 +100,13 @@ public enum ExportFrame {
                               inputTexture: MTLTexture,
                               outputTexture: MTLTexture,
                               downscale: DownscaleSpec?,
-                              frameCount: Int) throws {
-        var inputTexture = inputTexture
-        var downscale = downscale
-        // The receiver works on scan lines, so it sees the downscaled raster:
-        // after NTSC and downscale, before the CRT shader (or its bypass).
-        if let g = glitch {
-            let chainInput = try downscale.map {
-                try g.renderer.downscaled(inputTexture, spec: $0, commandBuffer: cb)
-            } ?? inputTexture
-            inputTexture = try g.renderer.encode(into: cb, chainInput: chainInput, time: g.time,
-                                                 settings: g.settings, history: g.history)
-            downscale = nil
-        }
+                              frameCount: Int,
+                              feedback: HowlaroundFeedback? = nil) throws {
+        let (inputTexture, downscale) = try chainInput(into: cb, glitch: glitch,
+                                                       inputTexture: inputTexture, downscale: downscale)
+        // A howlaround also draws this frame's TV picture for the camera.
+        try feedback?.render(into: cb, pipeline: pipeline, input: inputTexture,
+                             downscale: downscale, frameCount: frameCount)
         guard let chain else {
             try bypass.encode(into: cb, inputTexture: inputTexture,
                               outputTexture: outputTexture, downscale: downscale)
@@ -130,6 +124,24 @@ public enum ExportFrame {
     }
 }
 
+
+extension ExportFrame {
+    /// What the CRT shader is given: the glitch stage's output when it's on
+    /// (the receiver works on scan lines, so it sees the downscaled raster —
+    /// after NTSC and downscale, before the shader or its bypass), otherwise
+    /// the input and downscale as they came.
+    public static func chainInput(into cb: MTLCommandBuffer, glitch: GlitchFrame?,
+                                  inputTexture: MTLTexture,
+                                  downscale: DownscaleSpec?) throws -> (MTLTexture, DownscaleSpec?) {
+        guard let g = glitch else { return (inputTexture, downscale) }
+        let raster = try downscale.map {
+            try g.renderer.downscaled(inputTexture, spec: $0, commandBuffer: cb)
+        } ?? inputTexture
+        let out = try g.renderer.encode(into: cb, chainInput: raster, time: g.time,
+                                        settings: g.settings, history: g.history)
+        return (out, nil)
+    }
+}
 
 /// The glitch stage's inputs for one export frame.
 public struct GlitchFrame {

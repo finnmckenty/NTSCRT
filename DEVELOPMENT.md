@@ -132,6 +132,9 @@ For iteration and headless/screenshot verification:
 - `CRT_NO_HOUSE_ORDER=1` — keep ntsc-rs's own setting order (Intensity not hoisted), for that A/B
 - `CRT_DUMP_NTSC_LAYOUT=1` — print the NTSC panel's grouping/label tree and exit (verifies `NtscSetting.houseLayout`)
 - `CRT_LOAD_BUILTIN=<name>` — list the bundled presets, load one by name, report what it restored (and whether it opened the timeline), then exit
+- `CRT_HOWL="zoom=0.8,roll=10"` + `CRT_HOWL_RENDER=<out.mp4|out.gif>` — render a howlaround through the panel's own render call (`AppState.renderHowlaround`, settings from the Export builders) and exit; `CRT_HOWL_SECONDS` sets a still's length, `CRT_HOWL_DRAFT=1` makes it the draft (2 s, 480 px)
+- `CRT_HOWL_DRAFT_CHECK=1` — the panel's draft logic: a first draft; quick knob turns render only the last setting; a turn mid-render cancels it; never two renders at once
+- `CRT_SHOW_HOWL=1` opens the Howlaround panel at launch; `CRT_HOWL_PANEL_SNAPSHOT=<out.png>` draws it off screen (the draft video itself doesn't draw that way)
 - `CRT_LOOK=<path>` — open with any look file loaded (not just a bundled preset), for rendering or inspecting it
 - `CRT_SAVE_LOOK=<path>` — write the state the app opened with as a look file, then exit. Changing the launch defaults: save the reference look from the app, then diff it against this output — they should be identical
 - `CRT_LOOK_PRESETS=<dir>` — override where bundled look presets are read from
@@ -277,6 +280,15 @@ The librashader Metal runtime is **not thread-safe**. All chain calls must happe
 
 - **Phase 2**: SwiftUI app shell (sidebar with shader picker / params / downscale / export, MTKView preview). Needs full Xcode.
 - **Phase 3**: video. `AVAssetReader` for input, `AVAssetWriterInputPixelBufferAdaptor` for MP4 export, scrub-only preview.
+
+## Howlaround (video feedback)
+
+`CrtCore/Howlaround.swift`: a camcorder pointed at the TV that shows the camcorder's picture. Each frame `HowlaroundLoop.cameraImage` films the scene (the room) with the TV in it — a ray/plane intersection per pixel against the turned, rolled, aimed screen — showing the TV picture from `delay` frames ago, with the camera's softness, brightness, contrast, white balance and hue applied to the TV's light only (the room is lit differently, which is why the tint compounds), the optional mixer, auto exposure (an MPS mean, applied a frame late — that's what makes it hunt) and the counter. That image replaces the source for the frame, so it goes through the whole chain — NTSC (with `sourceVersion: nil`: it's new every frame), downscale, glitch — and `ExportFrame.encode(feedback:)` renders the same chain input through the loop's own copy of the CRT chain into a ring of fixed-size textures (an even multiple of the chain input, ~1280 wide), which the camera films next time. Depth comes from time: one chain pass per frame, the nth copy has been through it n times. Fixed-size feedback makes the loop independent of the output size, so the panel's 480 px draft shows the same tunnel as the full render.
+
+- Render only (no live preview): the history dependence that would break scrubbing and the RAM cache never arises. `runUp` runs the loop before the first written frame (copies × delay + margin) so frame 1 already shows the whole tunnel.
+- Zoom 0 = the camera doesn't see the TV: the output is byte-identical to a normal export (test).
+- The panel's drafts debounce 350 ms, cancel the running one (`HowlaroundCancel`) and wait for it to wind down before starting — two renders must never drive the shared queue/librashader at once (`howlOverlapSeen`, checked by `CRT_HOWL_DRAFT_CHECK`).
+- The first version treated the picture purely as the room: with a centred TV the subject is hidden at every level (only the picture's edges recurse). Hence the default framing (TV in the upper-right corner) and the Picture mix knob.
 
 ## Glitch stage (simulated TV receiver)
 
