@@ -311,8 +311,8 @@ private struct HowlaroundControl: View {
 
     private var copiesCaption: String {
         guard state.howlaroundSettings.tvInView else { return "The camera doesn't see the TV — no feedback." }
-        guard let n = state.howlaroundCopies else { return "The screen overfills the frame: copies grow and swirl." }
-        return n >= 200 ? "200+ copies" : "≈ \(n) cop\(n == 1 ? "y" : "ies") visible"
+        guard let n = state.howlaroundCopies else { return "Copies grow instead of shrinking — the feedback swirls." }
+        return n >= 200 ? "200+ copies deep" : "≈ \(n) cop\(n == 1 ? "y" : "ies") deep"
     }
 }
 

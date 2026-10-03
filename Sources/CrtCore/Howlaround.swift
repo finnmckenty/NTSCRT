@@ -80,20 +80,20 @@ public struct HowlaroundParam: Identifiable, Sendable {
         HowlaroundParam(
             id: "zoom", label: "Zoom", group: .framing,
             kind: .slider(min: 0, max: 1.4, percent: true, unit: "", step: nil),
-            defaultValue: 0.5, neutralValue: 0, ends: Ends(low: "Wide", high: "Close"),
-            help: "How big the TV's screen is in the camera's frame. Below 100% each copy of the picture is smaller than the last — a tunnel, with more copies the closer you get to 100%. Above 100% the screen overfills the frame and every pass grows instead, into the swirling patterns feedback is known for. 0% points the camera away from the TV."),
+            defaultValue: 0.87, neutralValue: 0, ends: Ends(low: "Wide", high: "Close"),
+            help: "How big the TV's screen is in the camera's frame — each copy is this size of the one around it. Below 100% the copies shrink into a tunnel, more of them the closer you get to 100%. Above 100% every pass grows instead, into the swirling patterns feedback is known for. 0% points the camera away from the TV."),
         HowlaroundParam(
-            id: "aim_x", label: "Left – right", group: .framing,
+            id: "centre_x", label: "Centre left – right", group: .framing,
             kind: .slider(min: -0.5, max: 0.5, percent: true, unit: "", step: nil),
-            defaultValue: 0.2, neutralValue: 0,
-            sides: Sides(negative: "left", positive: "right", zero: "centre"),
-            help: "Where the TV sits across the camera's frame. Off-centre, every pass shifts the picture again, so the tunnel recedes to that side."),
+            defaultValue: -0.2, neutralValue: 0,
+            sides: Sides(negative: "left", positive: "right", zero: "middle"),
+            help: "Where the tunnel converges across the frame — the point the copies shrink towards (past 100% zoom, the point they grow away from). It stays put as you change the zoom and angles; the camera is re-aimed at the TV to keep it there."),
         HowlaroundParam(
-            id: "aim_y", label: "Up – down", group: .framing,
+            id: "centre_y", label: "Centre up – down", group: .framing,
             kind: .slider(min: -0.5, max: 0.5, percent: true, unit: "", step: nil),
-            defaultValue: -0.18, neutralValue: 0,
-            sides: Sides(negative: "up", positive: "down", zero: "centre"),
-            help: "Where the TV sits up and down the camera's frame."),
+            defaultValue: -0.22, neutralValue: 0,
+            sides: Sides(negative: "up", positive: "down", zero: "middle"),
+            help: "Where the tunnel converges up and down the frame."),
         HowlaroundParam(
             id: "roll", label: "Roll", group: .framing,
             kind: .slider(min: -45, max: 45, percent: false, unit: "°", step: nil),
@@ -103,9 +103,9 @@ public struct HowlaroundParam: Identifiable, Sendable {
         HowlaroundParam(
             id: "turn", label: "Side angle", group: .framing,
             kind: .slider(min: -45, max: 45, percent: false, unit: "°", step: nil),
-            defaultValue: -10, neutralValue: 0,
+            defaultValue: -4, neutralValue: 0,
             sides: Sides(negative: "from the left", positive: "from the right", zero: "straight on"),
-            help: "The camera looking at the screen from one side, so the screen's far edge is narrower. Every pass skews the picture again."),
+            help: "The camera looking at the screen from one side, so the screen's far edge is narrower. Every pass skews the picture again. At high zoom a steep angle magnifies the near side of the screen enough that part of the picture smears outward instead of forming copies."),
         HowlaroundParam(
             id: "tilt", label: "Vertical angle", group: .framing,
             kind: .slider(min: -45, max: 45, percent: false, unit: "°", step: nil),
@@ -127,12 +127,12 @@ public struct HowlaroundParam: Identifiable, Sendable {
             id: "drift_dir", label: "Drift direction", group: .movement,
             kind: .direction,
             defaultValue: 0, neutralValue: 0,
-            help: "Which way the TV slides across the frame over the render."),
+            help: "Which way the tunnel's centre slides across the frame over the render."),
         HowlaroundParam(
             id: "drift", label: "Drift", group: .movement,
             kind: .slider(min: 0, max: 0.5, percent: true, unit: "", step: nil),
             defaultValue: 0, neutralValue: 0, ends: Ends(low: "None", high: "Half the frame"),
-            help: "How far the TV slides across the frame over the render, easing in and out — from where the framing knobs put it."),
+            help: "How far the tunnel's centre slides across the frame over the render, easing in and out — from where you put it."),
         HowlaroundParam(
             id: "push", label: "Push", group: .movement,
             kind: .slider(min: -0.5, max: 0.5, percent: true, unit: "", step: nil),
@@ -209,8 +209,10 @@ public struct HowlaroundParam: Identifiable, Sendable {
 /// the operator's hands. Angles in degrees.
 public struct HowlaroundPose: Equatable, Sendable {
     public var zoom: Double
-    public var aimX: Double
-    public var aimY: Double
+    /// Where the tunnel converges, from the middle of the frame (fractions
+    /// of its height and width).
+    public var centreX: Double
+    public var centreY: Double
     public var roll: Double
     public var turn: Double
     public var tilt: Double
@@ -240,7 +242,7 @@ public struct HowlaroundSettings: Equatable, Sendable {
 
     /// The framing knobs alone, before any movement.
     public var basePose: HowlaroundPose {
-        HowlaroundPose(zoom: zoom, aimX: self["aim_x"], aimY: self["aim_y"],
+        HowlaroundPose(zoom: zoom, centreX: self["centre_x"], centreY: self["centre_y"],
                        roll: self["roll"], turn: self["turn"], tilt: self["tilt"])
     }
 
@@ -263,15 +265,15 @@ public struct HowlaroundSettings: Equatable, Sendable {
             m = x * x * (3 - 2 * x)
         }
         let dir = self["drift_dir"] * Double.pi / 180
-        p.aimX += self["drift"] * m * cos(dir)
-        p.aimY -= self["drift"] * m * sin(dir)          // up is towards −y
+        p.centreX += self["drift"] * m * cos(dir)
+        p.centreY -= self["drift"] * m * sin(dir)          // up is towards −y
         p.zoom *= max(0.05, 1 + self["push"] * m)
         p.roll += self["spin"] * m
         let shake = self["shake"]
         if shake > 0 {
             let hands = HowlaroundHands(take: take, period: loop ? L : nil)
-            p.aimX += shake * 0.050 * hands.value(0, t)
-            p.aimY += shake * 0.045 * hands.value(1, t)
+            p.centreX += shake * 0.050 * hands.value(0, t)
+            p.centreY += shake * 0.045 * hands.value(1, t)
             p.turn += shake * 6.0 * hands.value(2, t)
             p.tilt += shake * 4.5 * hands.value(3, t)
             p.roll += shake * 3.5 * hands.value(4, t)
@@ -284,6 +286,15 @@ public struct HowlaroundSettings: Equatable, Sendable {
     /// frame height 1 and width `aspect`, y down) for a pose. The camera
     /// stays put and the TV turns, so the room — the scene — always fills
     /// the frame.
+    ///
+    /// The pose says where the tunnel converges, not where the screen is:
+    /// the screen is placed so that the point of the TV picture at the
+    /// tunnel's centre is filmed exactly there, so that point maps to itself
+    /// pass after pass — the fixed point the copies shrink towards. With the
+    /// screen placed directly the fixed point sits at position ÷ (1 − zoom),
+    /// eight times the position at 87% zoom: the tunnel ran out of the frame
+    /// and a 1% nudge moved it 8% (found in GPT Astra's "Tunnel Lab"
+    /// experiment, 2026-10-03, whose solve this is).
     static func screen(_ pose: HowlaroundPose, aspect: Double)
         -> (ax: SIMD3<Double>, ay: SIMD3<Double>, n: SIMD3<Double>, c: SIMD3<Double>) {
         let deg = Double.pi / 180
@@ -300,8 +311,18 @@ public struct HowlaroundSettings: Equatable, Sendable {
             SIMD3(cos(roll) * v.x - sin(roll) * v.y, sin(roll) * v.x + cos(roll) * v.y, v.z)
         }
         func r(_ v: SIMD3<Double>) -> SIMD3<Double> { ry(rx(rz(v))) }
-        let centre = SIMD3(pose.aimX * aspect, pose.aimY, 1)
-        return (r(SIMD3(1, 0, 0)), r(SIMD3(0, 1, 0)), r(SIMD3(0, 0, 1)), centre)
+        let ax = r(SIMD3(1, 0, 0)), ay = r(SIMD3(0, 1, 0))
+        // The ray through the tunnel's centre, and the picture point that
+        // must land on it, offset from the screen's centre.
+        let q = SIMD3(pose.centreX * aspect, pose.centreY, 1)
+        let offset = pose.zoom * (pose.centreX * aspect * ax + pose.centreY * ay)
+        // Any distance along the ray keeps the fixed point; 1 + offset.z keeps
+        // the screen's centre at depth 1, where zoom means what it says. At
+        // the knobs' extremes (big zoom, a corner, steep angles) that would put
+        // the point behind the camera, so it's held in front — the fixed point
+        // stays exact and the screen just sits a little further away.
+        let along = max(0.25, 1 + offset.z)
+        return (ax, ay, r(SIMD3(0, 0, 1)), q * along - offset)
     }
 
     /// Where a point of the TV picture (0…1 each way) lands in the camera's
@@ -317,29 +338,43 @@ public struct HowlaroundSettings: Equatable, Sendable {
         Self.cameraPoint(tv: s, pose: basePose, aspect: aspect)
     }
 
-    /// How many nested copies of the picture are visible at the framing
-    /// knobs' pose: the frame mapped through the camera again and again until
-    /// the copy is smaller than a couple of scan lines or out of frame. nil
-    /// when the copies grow instead (the screen overfills the frame).
+    /// How the camera stretches the picture at a point of the TV picture
+    /// (both 0…1): the map's Jacobian, columns = d/dx, d/dy. nil where the
+    /// point or its neighbours land behind the camera.
+    func stretch(at s: SIMD2<Double>, aspect: Double) -> (SIMD2<Double>, SIMD2<Double>)? {
+        let e = 1e-4
+        guard let px = cameraPoint(tv: s + SIMD2(e, 0), aspect: aspect),
+              let mx = cameraPoint(tv: s - SIMD2(e, 0), aspect: aspect),
+              let py = cameraPoint(tv: s + SIMD2(0, e), aspect: aspect),
+              let my = cameraPoint(tv: s - SIMD2(0, e), aspect: aspect) else { return nil }
+        return ((px - mx) / (2 * e), (py - my) / (2 * e))
+    }
+
+    /// The largest factor a pass scales things by at a point (the Jacobian's
+    /// spectral radius): below 1 the copies shrink towards there.
+    func shrink(at s: SIMD2<Double>, aspect: Double) -> Double? {
+        guard let (jx, jy) = stretch(at: s, aspect: aspect) else { return nil }
+        let tr = jx.x + jy.y, det = jx.x * jy.y - jy.x * jx.y
+        let disc = tr * tr / 4 - det
+        if disc >= 0 {
+            let r = disc.squareRoot()
+            return max(abs(tr / 2 + r), abs(tr / 2 - r))
+        }
+        return abs(det).squareRoot()          // a spiral: complex pair
+    }
+
+    /// How deep the tunnel goes: passes until something at its centre is
+    /// smaller than a couple of scan lines, from how much each pass shrinks
+    /// it there. nil when the copies grow instead. (Measured at the centre,
+    /// not on whole copies: with the camera off to one side, the copies'
+    /// near edges run out of the frame while the tunnel still converges.)
     public func visibleCopies(aspect: Double, chainHeight: Int) -> Int? {
         guard tvInView else { return 0 }
-        var quad = [SIMD2<Double>(0, 0), SIMD2(1, 0), SIMD2(1, 1), SIMD2(0, 1)]
-        var lastSize = 1.0
-        for level in 1...200 {
-            var next: [SIMD2<Double>] = []
-            for p in quad {
-                guard let q = cameraPoint(tv: p, aspect: aspect) else { return level - 1 }
-                next.append(q)
-            }
-            quad = next
-            let xs = quad.map(\.x), ys = quad.map(\.y)
-            let size = max((xs.max()! - xs.min()!) * aspect, ys.max()! - ys.min()!)
-            if level > 3 && size > lastSize * 0.995 { return nil }
-            lastSize = size
-            let outside = xs.max()! < 0 || xs.min()! > 1 || ys.max()! < 0 || ys.min()! > 1
-            if outside || size * Double(chainHeight) < 2 { return level - 1 }
-        }
-        return 200
+        let p = basePose
+        guard let rate = shrink(at: SIMD2(p.centreX + 0.5, p.centreY + 0.5), aspect: aspect),
+              rate < 0.995 else { return nil }
+        let n = log(2 / Double(max(16, chainHeight))) / log(rate)
+        return max(1, min(200, Int(n.rounded(.down))))
     }
 
     /// Passes to run before the first frame is written, so it already shows

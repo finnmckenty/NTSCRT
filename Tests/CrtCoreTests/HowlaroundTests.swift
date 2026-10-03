@@ -17,7 +17,7 @@ final class HowlaroundTests: XCTestCase {
 
     private func settings(_ values: [String: Double]) -> HowlaroundSettings {
         // A plain centred camera unless a test says otherwise.
-        HowlaroundSettings(values: ["zoom": 0.5, "aim_x": 0, "aim_y": 0, "roll": 0, "turn": 0, "tilt": 0,
+        HowlaroundSettings(values: ["zoom": 0.5, "centre_x": 0, "centre_y": 0, "roll": 0, "turn": 0, "tilt": 0,
                                     "shake": 0, "take": 1, "drift": 0, "drift_dir": 0, "push": 0,
                                     "spin": 0, "loop": 0,
                                     "focus": 0, "brightness": 1, "contrast": 1, "colour_drift": 0,
@@ -33,8 +33,48 @@ final class HowlaroundTests: XCTestCase {
         let b = try XCTUnwrap(s.cameraPoint(tv: SIMD2(1, 1), aspect: 1))
         XCTAssertEqual(a.x, 0.25, accuracy: 1e-9); XCTAssertEqual(a.y, 0.25, accuracy: 1e-9)
         XCTAssertEqual(b.x, 0.75, accuracy: 1e-9); XCTAssertEqual(b.y, 0.75, accuracy: 1e-9)
-        let c = try XCTUnwrap(settings(["aim_x": 0.1]).cameraPoint(tv: SIMD2(0.5, 0.5), aspect: 1.5))
+        // The tunnel's centre is a fixed point: that point of the picture is
+        // filmed exactly where it is. At half zoom the screen sits halfway.
+        let c = try XCTUnwrap(settings(["centre_x": 0.1]).cameraPoint(tv: SIMD2(0.6, 0.5), aspect: 1.5))
         XCTAssertEqual(c.x, 0.6, accuracy: 1e-9)
+        let middle = try XCTUnwrap(settings(["centre_x": 0.1]).cameraPoint(tv: SIMD2(0.5, 0.5), aspect: 1.5))
+        XCTAssertEqual(middle.x, 0.55, accuracy: 1e-9)
+    }
+
+    func testTheTunnelCentreStaysPutAsTheCameraChanges() throws {
+        // Any zoom, angle, frame shape or moment of the movement: the centre
+        // maps to itself (GPT Astra's test, kept).
+        for aspect in [1.0, 4.0 / 3.0, 16.0 / 9.0] {
+            for zoom in [0.5, 0.87, 0.97, 1.0, 1.2] {
+                let s = settings(["centre_x": 0.2, "centre_y": -0.15, "zoom": zoom, "turn": -25, "tilt": 15,
+                                  "roll": 12, "shake": 0.4, "drift": 0.1, "push": 0.1])
+                for t in [-1.0, 0, 1, 3, 5] {
+                    let pose = s.pose(at: t, length: 5)
+                    let centre = SIMD2(pose.centreX + 0.5, pose.centreY + 0.5)
+                    let filmed = try XCTUnwrap(HowlaroundSettings.cameraPoint(tv: centre, pose: pose, aspect: aspect))
+                    XCTAssertEqual(filmed.x, centre.x, accuracy: 1e-10)
+                    XCTAssertEqual(filmed.y, centre.y, accuracy: 1e-10)
+                }
+            }
+        }
+    }
+
+    func testEvenTheKnobsExtremesKeepTheCentreInFront() throws {
+        // Big zoom, a corner, steep angles on the same side: the solve alone
+        // put the screen behind the camera here.
+        for zoom in [1.2, 1.3, 1.4] {
+            for (cx, cy) in [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)] {
+                for (turn, tilt, roll) in [(-45.0, -45.0, -45.0), (-45, 45, 45), (45, -45, 45), (45, 45, -45)] {
+                    let s = settings(["zoom": zoom, "centre_x": cx, "centre_y": cy,
+                                      "turn": turn, "tilt": tilt, "roll": roll])
+                    let p = s.basePose
+                    let centre = SIMD2(cx + 0.5, cy + 0.5)
+                    let filmed = try XCTUnwrap(HowlaroundSettings.cameraPoint(tv: centre, pose: p, aspect: 16.0 / 9))
+                    XCTAssertEqual(filmed.x, centre.x, accuracy: 1e-9)
+                    XCTAssertEqual(filmed.y, centre.y, accuracy: 1e-9)
+                }
+            }
+        }
     }
 
     func testCopiesFollowTheZoom() {
@@ -48,9 +88,24 @@ final class HowlaroundTests: XCTestCase {
         XCTAssertLessThan(z3, z6); XCTAssertLessThan(z6, z8)
         // Past 100% the copies grow instead of shrinking.
         XCTAssertNil(settings(["zoom": 1.2]).visibleCopies(aspect: 1, chainHeight: 240))
-        // Aimed far off-centre the tunnel runs out of the frame sooner.
-        let off = settings(["zoom": 0.8, "aim_x": 0.45]).visibleCopies(aspect: 1, chainHeight: 240)!
-        XCTAssertLessThan(off, z8)
+        // A tunnel converging near the edge still keeps its copies: zooming
+        // doesn't push it out of the frame.
+        let edge = settings(["zoom": 0.8, "centre_x": 0.45]).visibleCopies(aspect: 1, chainHeight: 240)!
+        XCTAssertGreaterThanOrEqual(edge, z8 - 2)
+    }
+
+    func testTheDefaultTunnelConvergesOnEveryFrameShape() throws {
+        // Every point of the frame shrinks a little on every pass, portrait
+        // to widescreen — a steeper side angle smears the near side outward.
+        for aspect in [9.0 / 16, 3.0 / 4, 1, 4.0 / 3, 3.0 / 2, 16.0 / 9] {
+            let s = HowlaroundSettings(values: ["shake": 0])
+            for i in 0...8 { for j in 0...8 {
+                let rate = try XCTUnwrap(s.shrink(at: SIMD2(Double(i) / 8, Double(j) / 8), aspect: aspect))
+                XCTAssertLessThan(rate, 0.99, "aspect \(aspect) at (\(i), \(j))")
+            } }
+            let copies = try XCTUnwrap(s.visibleCopies(aspect: aspect, chainHeight: 240))
+            XCTAssertGreaterThan(copies, 25, "a deep tunnel, like the reference")
+        }
     }
 
     func testRunUpCoversTheTunnel() {
@@ -64,7 +119,7 @@ final class HowlaroundTests: XCTestCase {
     // MARK: movement
 
     func testAStillCameraHoldsItsFraming() {
-        let s = settings(["aim_x": 0.1, "roll": 5])
+        let s = settings(["centre_x": 0.1, "roll": 5])
         for t in [-1.0, 0, 0.7, 3.3] {
             XCTAssertEqual(s.pose(at: t, length: 4), s.basePose)
         }
@@ -85,13 +140,13 @@ final class HowlaroundTests: XCTestCase {
     }
 
     func testHandsSwayGentlyAndStayInRange() {
-        // At full shake the aim wanders a few percent of the frame and
+        // At full shake the tunnel centre wanders a few percent of the frame and
         // changes smoothly from frame to frame (30 fps).
         let s = settings(["shake": 1, "take": 7])
         var biggest = 0.0, fastest = 0.0
-        var last = s.pose(at: 0, length: 10).aimX
+        var last = s.pose(at: 0, length: 10).centreX
         for i in 1...300 {
-            let x = s.pose(at: Double(i) / 30, length: 10).aimX
+            let x = s.pose(at: Double(i) / 30, length: 10).centreX
             biggest = max(biggest, abs(x))
             fastest = max(fastest, abs(x - last))
             last = x
@@ -105,13 +160,13 @@ final class HowlaroundTests: XCTestCase {
         let s = settings(["drift": 0.3, "drift_dir": 90, "push": 0.2, "spin": 30])
         let start = s.pose(at: 0, length: 5), end = s.pose(at: 5, length: 5)
         XCTAssertEqual(start, s.basePose)
-        XCTAssertEqual(end.aimX, 0, accuracy: 1e-9)
-        XCTAssertEqual(end.aimY, -0.3, accuracy: 1e-9)      // up
+        XCTAssertEqual(end.centreX, 0, accuracy: 1e-9)
+        XCTAssertEqual(end.centreY, -0.3, accuracy: 1e-9)      // up
         XCTAssertEqual(end.zoom, 0.5 * 1.2, accuracy: 1e-9)
         XCTAssertEqual(end.roll, 30, accuracy: 1e-9)
         // Eased: slow at the ends, halfway at the middle.
-        XCTAssertEqual(s.pose(at: 2.5, length: 5).aimY, -0.15, accuracy: 1e-9)
-        XCTAssertLessThan(abs(s.pose(at: 0.25, length: 5).aimY), 0.3 * 0.05)
+        XCTAssertEqual(s.pose(at: 2.5, length: 5).centreY, -0.15, accuracy: 1e-9)
+        XCTAssertLessThan(abs(s.pose(at: 0.25, length: 5).centreY), 0.3 * 0.05)
         // Before the first frame (the run-up) it holds its start.
         XCTAssertEqual(s.pose(at: -0.5, length: 5), s.basePose)
     }
@@ -121,8 +176,8 @@ final class HowlaroundTests: XCTestCase {
                           "shake": 0.8, "take": 5, "loop": 1])
         let L = 4.0
         let a = s.pose(at: 0, length: L), b = s.pose(at: L, length: L)
-        XCTAssertEqual(a.aimX, b.aimX, accuracy: 1e-9)
-        XCTAssertEqual(a.aimY, b.aimY, accuracy: 1e-9)
+        XCTAssertEqual(a.centreX, b.centreX, accuracy: 1e-9)
+        XCTAssertEqual(a.centreY, b.centreY, accuracy: 1e-9)
         XCTAssertEqual(a.zoom, b.zoom, accuracy: 1e-9)
         XCTAssertEqual(a.roll, b.roll, accuracy: 1e-9)
         XCTAssertEqual(a.turn, b.turn, accuracy: 1e-9)
@@ -131,16 +186,16 @@ final class HowlaroundTests: XCTestCase {
         XCTAssertGreaterThan(abs(mid.roll - a.roll), 30)
         // The run-up wraps round: just before the start is the end of the loop.
         let before = s.pose(at: -0.1, length: L), nearEnd = s.pose(at: L - 0.1, length: L)
-        XCTAssertEqual(before.aimX, nearEnd.aimX, accuracy: 1e-9)
+        XCTAssertEqual(before.centreX, nearEnd.centreX, accuracy: 1e-9)
     }
 
     func testKnobsReadInWords() {
-        let aim = HowlaroundParam.all.first { $0.id == "aim_x" }!
-        XCTAssertEqual(aim.reading(-0.2).side, "left")
-        XCTAssertEqual(aim.reading(-0.2).magnitude, 0.2, accuracy: 1e-12)
-        XCTAssertEqual(aim.reading(0.15).side, "right")
-        XCTAssertEqual(aim.reading(0).side, "centre")
-        let up = HowlaroundParam.all.first { $0.id == "aim_y" }!
+        let across = HowlaroundParam.all.first { $0.id == "centre_x" }!
+        XCTAssertEqual(across.reading(-0.2).side, "left")
+        XCTAssertEqual(across.reading(-0.2).magnitude, 0.2, accuracy: 1e-12)
+        XCTAssertEqual(across.reading(0.15).side, "right")
+        XCTAssertEqual(across.reading(0).side, "middle")
+        let up = HowlaroundParam.all.first { $0.id == "centre_y" }!
         XCTAssertEqual(up.reading(-0.1).side, "up")
         XCTAssertEqual(HowlaroundParam.all.first { $0.id == "roll" }!.reading(10).side, "clockwise")
         XCTAssertEqual(HowlaroundParam.compass(0), "right")
@@ -149,9 +204,9 @@ final class HowlaroundTests: XCTestCase {
         XCTAssertEqual(HowlaroundParam.compass(180), "left")
         XCTAssertEqual(HowlaroundParam.compass(270), "down")
         XCTAssertEqual(HowlaroundParam.compass(350), "right")
-        // Up on the knob is up in the picture: a drift "up" raises the TV.
+        // Up on the knob is up in the picture: a drift "up" raises the tunnel.
         let s = settings(["drift": 0.2, "drift_dir": 90])
-        XCTAssertLessThan(s.pose(at: 1, length: 1).aimY, 0)
+        XCTAssertLessThan(s.pose(at: 1, length: 1).centreY, 0)
     }
 
     // MARK: the loop, end to end
