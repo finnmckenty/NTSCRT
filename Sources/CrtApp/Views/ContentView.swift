@@ -140,7 +140,8 @@ struct ContentView: View {
                 || env["CRT_SPACE_SELFTEST"] != nil
                 || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil
                 || env["CRT_HOWL_RENDER"] != nil || env["CRT_HOWL_DRAFT_CHECK"] != nil
-                || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1" else { return }
+                || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1"
+                || env["CRT_FEEDBACK_PRESET_CHECK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -183,6 +184,40 @@ struct ContentView: View {
             }
         }
         if env["CRT_SHOW_HOWL"] == "1" { showHowlaround = true }
+        // CRT_FEEDBACK_PRESET_CHECK=1: a Video Feedback preset saves and loads
+        // back exactly, and the look presets refuse one with a pointer to the
+        // panel (the two kinds live apart).
+        if env["CRT_FEEDBACK_PRESET_CHECK"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("FBPRESET \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("fb-preset-check.json")
+            var wanted = state.howlaroundValues
+            wanted["zoom"] = 0.71; wanted["key"] = 0.4; wanted["delay"] = 13; wanted["seed"] = 42; wanted["spin"] = -30
+            state.howlaroundValues = wanted
+            state.howlaroundSeconds = 7.5
+            do { try state.saveFeedbackPreset(to: url) } catch { check("save", false, "\(error)") }
+            state.howlaroundValues = HowlaroundParam.defaultValues
+            state.howlaroundSeconds = 5
+            do { try state.loadFeedbackPreset(from: url) } catch { check("load", false, "\(error)") }
+            check("values come back exactly", state.howlaroundValues == wanted)
+            check("a still's length comes back", state.howlaroundSeconds == 7.5)
+            do {
+                try state.loadLook(from: url)
+                check("the look presets refuse a Video Feedback preset", false)
+            } catch {
+                check("the look presets refuse a Video Feedback preset",
+                      error.localizedDescription.contains("Video Feedback panel"), error.localizedDescription)
+            }
+            check("its folder is separate from the look presets",
+                  FeedbackPresets.saveFolder().lastPathComponent == FeedbackPresets.folderName,
+                  FeedbackPresets.saveFolder().path)
+            try? FileManager.default.removeItem(at: url)
+            print(failures == 0 ? "FBPRESET-PASS" : "FBPRESET-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         // CRT_HOWL_PANEL_SNAPSHOT=<out.png>: draw the Howlaround panel off
         // screen (the draft video itself doesn't draw this way).
         if let out = env["CRT_HOWL_PANEL_SNAPSHOT"] {
@@ -235,7 +270,7 @@ struct ContentView: View {
             let last = state.howlDraftGeneration
             await settle()
             check("quick turns render once, the last setting",
-                  state.howlDraftURL?.lastPathComponent == "ntscrt-howlaround-draft-\(last).mp4",
+                  state.howlDraftURL?.lastPathComponent == "ntscrt-feedback-draft-\(last).mp4",
                   state.howlDraftURL?.lastPathComponent ?? "no draft")
             check("the old draft file is gone", first.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false)
             // A turn while a draft is rendering cancels it.
@@ -249,7 +284,7 @@ struct ContentView: View {
             let final = state.howlDraftGeneration
             await settle()
             check("a turn mid-render cancels it and renders the new setting",
-                  sawWorking && state.howlDraftURL?.lastPathComponent == "ntscrt-howlaround-draft-\(final).mp4",
+                  sawWorking && state.howlDraftURL?.lastPathComponent == "ntscrt-feedback-draft-\(final).mp4",
                   "saw render: \(sawWorking), draft: \(state.howlDraftURL?.lastPathComponent ?? "none")")
             check("never two renders at once", !state.howlOverlapSeen)
             print(failures == 0 ? "HOWLDRAFT-PASS" : "HOWLDRAFT-FAIL \(failures)")
@@ -268,6 +303,7 @@ struct ContentView: View {
             if let secs = env["CRT_HOWL_SECONDS"].flatMap(Double.init) { state.howlaroundSeconds = secs }
             let draft = env["CRT_HOWL_DRAFT"] == "1"
             let gif = out.hasSuffix(".gif")
+            if gif { state.exportFormat = .gif } else if state.exportFormat.isGIF { state.exportFormat = .h264 }
             let size = draft ? state.howlDraftSize : (gif ? state.exportGifSize : state.exportVideoSize)
             state.stopPlayback()
             state.exportInProgress = true
@@ -1496,14 +1532,14 @@ struct ContentView: View {
             Button {
                 showHowlaround = true
             } label: {
-                Label("Howlaround", systemImage: "camera.viewfinder")
+                Label("Feedback", systemImage: "camera.viewfinder")
                     .labelStyle(.titleAndIcon)
             }
             .disabled(state.sourceTexture == nil && state.videoSource == nil || state.exportWorking)
             .sheet(isPresented: $showHowlaround) {
                 HowlaroundPanel().environment(state)
             }
-            .help("Point a camcorder at the TV showing its own picture — video feedback, rendered with your look on every pass")
+            .help("Video Feedback: point a camcorder at the TV that's showing its own picture — a tunnel of copies, with your look on every pass")
 
             Button {
                 showExport.toggle()

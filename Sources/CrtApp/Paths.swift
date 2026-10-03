@@ -68,6 +68,19 @@ enum Paths {
         throw Error.notFound("slang-shaders (set CRT_PRESETS or init the Vendor/slang-shaders submodule)")
     }
 
+    /// The checkout's presets/ folder when running from a source tree (the
+    /// dev build or the bare binary) — nil for an installed app.
+    static func projectPresetsFolder() -> URL? {
+        for base in candidates(suffix: "") {
+            let presets = base.appendingPathComponent("presets")
+            if FileManager.default.fileExists(atPath: base.appendingPathComponent("Package.swift").path),
+               FileManager.default.fileExists(atPath: presets.path) {
+                return presets
+            }
+        }
+        return nil
+    }
+
     /// Folder of bundled look presets (the JSON files the Preset menu lists).
     /// Shipped in Resources/presets; in dev it's the repo's presets/ folder.
     /// Optional — the menu just shows Save/Load without it.

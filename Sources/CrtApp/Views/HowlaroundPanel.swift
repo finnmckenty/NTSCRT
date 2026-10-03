@@ -88,8 +88,9 @@ struct HowlaroundPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("Howlaround").font(.headline)
+                    Text("Video Feedback").font(.headline)
                     Spacer()
+                    presetsMenu
                     Button("Reset") { state.resetHowlaround() }
                         .buttonStyle(.borderless)
                 }
@@ -109,30 +110,83 @@ struct HowlaroundPanel: View {
         }
     }
 
+    // MARK: presets
+
+    @State private var presetsVersion = 0
+
+    private var presetsMenu: some View {
+        let presets = FeedbackPresets.discover()
+        return Menu {
+            Button("Save Preset…") { savePreset() }
+            Button("Load Preset…") { loadPreset() }
+            if !presets.isEmpty {
+                Divider()
+                ForEach(presets) { preset in
+                    Button(preset.name) { load(preset.url) }
+                }
+            }
+        } label: {
+            Text("Presets")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .id(presetsVersion)          // re-list after a save
+        .help("Save the camera's settings as a Video Feedback preset, or load one. They live in their own folder, apart from the look presets.")
+    }
+
+    private func savePreset() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.directoryURL = FeedbackPresets.saveFolder()
+        panel.nameFieldStringValue = "Video feedback \(timestamp).json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try state.saveFeedbackPreset(to: url)
+            presetsVersion += 1
+        } catch {
+            alert("Couldn't save the preset.", error)
+        }
+    }
+
+    private func loadPreset() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.directoryURL = FeedbackPresets.saveFolder()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        load(url)
+    }
+
+    private func load(_ url: URL) {
+        do { try state.loadFeedbackPreset(from: url) } catch { alert("Couldn't load the preset.", error) }
+    }
+
+    private func alert(_ message: String, _ error: Error) {
+        let a = NSAlert()
+        a.messageText = message
+        a.informativeText = error.localizedDescription
+        a.alertStyle = .warning
+        a.runModal()
+    }
+
+    private var timestamp: String {
+        let f = DateFormatter()
+        f.dateFormat = "dd-MM-yy HH.mm.ss"
+        return f.string(from: Date())
+    }
+
     // MARK: footer
 
     private var isVideo: Bool { state.videoSource != nil }
+    @State private var showOutput = false
 
-    private var outputSummary: String {
-        if state.howlaroundGIF {
-            let s = state.exportGifSize
-            return "\(s.width) × \(s.height) · \(state.gifFPS) fps"
-        }
-        let s = state.exportVideoSize
-        let codec = (state.exportFormat.codec ?? .h264).rawValue
-        return "\(s.width) × \(s.height) · \(codec)"
+    /// One pass of the render, in seconds.
+    private var lengthSeconds: Double {
+        isVideo ? state.effectiveTimelineDuration : state.howlaroundSeconds
     }
 
     private var footer: some View {
         @Bindable var state = state
         return HStack(spacing: 12) {
-            Picker("", selection: $state.howlaroundGIF) {
-                Text("Video").tag(false)
-                Text("GIF").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
             if isVideo {
                 Text(String(format: "%.1f s, the whole clip", state.effectiveTimelineDuration))
                     .font(.callout).foregroundStyle(.secondary)
@@ -143,8 +197,28 @@ struct HowlaroundPanel: View {
                     Text("s").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Text(outputSummary).font(.callout).foregroundStyle(.secondary)
-                .help("Size and format come from the Export settings.")
+            // The same export options as the Export popover — the same views,
+            // bound to the same settings.
+            Button {
+                showOutput.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text(state.exportSummary)
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+            }
+            .popover(isPresented: $showOutput, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Export settings").font(.headline)
+                    ExportSizeOptions()
+                    ExportVideoOptions(lengthSeconds: lengthSeconds)
+                    Text("Shared with the Export button.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(14)
+                .frame(width: 300)
+            }
+            .help("Format, size and quality for the render — the Export settings, shared with the Export button.")
             Spacer()
             if state.howlRenderWorking {
                 ProgressView(value: state.howlRenderProgress).frame(width: 120)
@@ -172,20 +246,14 @@ struct HowlaroundPanel: View {
     }
 
     private func render() {
-        let gif = state.howlaroundGIF
+        let format = state.exportFormat
         let panel = NSSavePanel()
-        let ext: String
-        if gif {
+        if format.isGIF {
             panel.allowedContentTypes = [.gif]
-            ext = "gif"
         } else {
-            let codec = state.exportFormat.codec ?? .h264
-            panel.allowedContentTypes = [codec.isProRes ? .quickTimeMovie : .mpeg4Movie]
-            ext = codec.fileExtension
+            panel.allowedContentTypes = [format.isProRes ? .quickTimeMovie : .mpeg4Movie]
         }
-        let f = DateFormatter()
-        f.dateFormat = "dd-MM-yy HH.mm.ss"
-        panel.nameFieldStringValue = "howlaround \(f.string(from: Date())).\(ext)"
+        panel.nameFieldStringValue = "video feedback \(timestamp).\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         state.renderHowlaroundFile(to: url)
     }
@@ -208,7 +276,7 @@ private struct HowlaroundControl: View {
         let s = state.howlaroundSettings
         switch param.id {
         case "drift_dir": return s["drift"] == 0
-        case "take": return s["shake"] == 0
+        case "seed": return s["shake"] == 0
         default: return false
         }
     }

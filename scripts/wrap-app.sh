@@ -29,6 +29,11 @@ cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 if [[ -d presets ]]; then
   mkdir -p "$APP/Contents/Resources/presets"
   cp presets/*.json "$APP/Contents/Resources/presets/" 2>/dev/null || true
+  # Video Feedback presets keep their own folder.
+  if [[ -d "presets/Video Feedback" ]]; then
+    mkdir -p "$APP/Contents/Resources/presets/Video Feedback"
+    cp "presets/Video Feedback/"*.json "$APP/Contents/Resources/presets/Video Feedback/" 2>/dev/null || true
+  fi
 fi
 # Optional VHS stage dylib (the app runs without it).
 if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then

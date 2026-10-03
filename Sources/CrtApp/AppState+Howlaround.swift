@@ -86,10 +86,13 @@ extension AppState {
     // exactly the look an export would.
 
     func howlaroundMp4Settings(outputURL: URL, size: (width: Int, height: Int), bitrate: Int,
-                               codec: Mp4Exporter.Codec, render: HowlaroundRender) -> Mp4Exporter.Settings {
+                               codec: Mp4Exporter.Codec, render: HowlaroundRender,
+                               loops: Int) -> Mp4Exporter.Settings {
         var s = mp4ExportSettings(route: videoSource == nil ? .still : .video, outputURL: outputURL,
                                   size: size, bitrate: bitrate, codec: codec)
-        s.loopCount = 1
+        // A clip repeats in passes inside the exporter; a still's repeats are
+        // rendered frames (see renderHowlaround).
+        s.loopCount = videoSource == nil ? 1 : loops
         s.howlaround = render
         return s
     }
@@ -115,6 +118,9 @@ extension AppState {
         let frameParams = exportFrameParams
         let codec = exportFormat.codec ?? .h264
         let bitrate = exportBitrate(for: size)
+        // The Export settings' Loop repeats a full render (GIFs loop by
+        // themselves); a draft is always one pass.
+        let loops = draftSeconds == nil && !gif ? max(1, exportLoopCount) : 1
         if let vs = videoSource {
             let length = vs.durationSeconds
             if gif {
@@ -130,7 +136,7 @@ extension AppState {
                 let render = HowlaroundRender(settings: howlaroundSettings, length: length,
                                               frameLimit: limit, cancel: cancel)
                 let settings = howlaroundMp4Settings(outputURL: url, size: size, bitrate: bitrate,
-                                                     codec: codec, render: render)
+                                                     codec: codec, render: render, loops: loops)
                 try await Mp4Exporter(context: context).export(
                     source: vs, paramValues: params, settings: settings, ntscSettingsJSON: ntscJSON,
                     frameParams: frameParams, progress: progress)
@@ -149,16 +155,16 @@ extension AppState {
                     ntscSettingsJSON: ntscJSON, frameParams: frameParams, progress: progress)
             } else {
                 let fps = timelineFPS
-                let frames = max(1, Int((seconds * Double(fps)).rounded()))
+                let frames = max(1, Int((seconds * Double(fps)).rounded())) * loops
                 let settings = howlaroundMp4Settings(outputURL: url, size: size, bitrate: bitrate,
-                                                     codec: codec, render: render)
+                                                     codec: codec, render: render, loops: loops)
                 try await Mp4Exporter(context: context).exportStill(
                     source: source, totalFrames: frames, fps: fps, paramValues: params,
                     settings: settings, ntscSettingsJSON: ntscJSON, frameParams: frameParams,
                     progress: progress)
             }
         } else {
-            throw NSError(domain: "Howlaround", code: 2,
+            throw NSError(domain: "VideoFeedback", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "Open an image or a video first."])
         }
     }
@@ -201,7 +207,7 @@ extension AppState {
             let cancel = HowlaroundCancel()
             self.howlDraftCancel = cancel
             let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("ntscrt-howlaround-draft-\(generation).mp4")
+                .appendingPathComponent("ntscrt-feedback-draft-\(generation).mp4")
             self.howlDraftWorking = true
             self.howlDraftProgress = 0
             self.howlDraftStatus = "Rendering draft…"
@@ -245,7 +251,7 @@ extension AppState {
     // MARK: full render
 
     func renderHowlaroundFile(to url: URL) {
-        let gif = howlaroundGIF
+        let gif = exportFormat.isGIF
         let size = gif ? exportGifSize : exportVideoSize
         let cancel = HowlaroundCancel()
         howlRenderCancel = cancel
@@ -279,5 +285,27 @@ extension AppState {
 
     func cancelHowlaroundRender() {
         howlRenderCancel?.cancel()
+    }
+
+    // MARK: presets (their own folder — FeedbackPresets)
+
+    func saveFeedbackPreset(to url: URL) throws {
+        var dict: [String: Any] = ["kind": FeedbackPresets.kind, "version": 1, "values": howlaroundValues]
+        if videoSource == nil { dict["seconds"] = howlaroundSeconds }
+        let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url)
+    }
+
+    func loadFeedbackPreset(from url: URL) throws {
+        let data = try Data(contentsOf: url)
+        guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              dict["kind"] as? String == FeedbackPresets.kind,
+              let values = dict["values"] as? [String: Double] else {
+            throw NSError(domain: "VideoFeedback", code: 3, userInfo: [NSLocalizedDescriptionKey:
+                "Not a Video Feedback preset. Look presets load from the toolbar's Preset menu."])
+        }
+        howlaroundValues = HowlaroundParam.defaultValues.merging(values) { _, new in new }
+        if let seconds = dict["seconds"] as? Double { howlaroundSeconds = min(60, max(0.5, seconds)) }
+        scheduleHowlaroundDraft()
     }
 }

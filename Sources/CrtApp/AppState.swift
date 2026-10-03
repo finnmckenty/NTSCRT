@@ -514,8 +514,6 @@ final class AppState {
     var howlaroundValues: [String: Double] = HowlaroundParam.defaultValues
     /// Length of a howlaround made from a still, in seconds.
     var howlaroundSeconds: Double = 5
-    /// Render a GIF instead of a video.
-    var howlaroundGIF: Bool = false
     /// The latest draft (a short, small render of the current settings).
     var howlDraftURL: URL?
     var howlDraftWorking = false
@@ -1472,7 +1470,13 @@ final class AppState {
 
     enum LookError: Swift.Error, LocalizedError {
         case badFile
-        var errorDescription: String? { "not a crt-app look file" }
+        case feedbackPreset
+        var errorDescription: String? {
+            switch self {
+            case .badFile: return "not a crt-app look file"
+            case .feedbackPreset: return "This is a Video Feedback preset — load it from the Video Feedback panel's Presets menu."
+            }
+        }
     }
 
     func lookDictionary() -> [String: Any] {
@@ -1536,6 +1540,7 @@ final class AppState {
         guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw LookError.badFile
         }
+        if dict["kind"] as? String == FeedbackPresets.kind { throw LookError.feedbackPreset }
         if let d = dict["downscale"] as? [String: Any] {
             if let v = d["enabled"] as? Bool { downscaleEnabled = v }
             if let v = d["width"] as? Int { downscaleWidth = v }

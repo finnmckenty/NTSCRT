@@ -18,10 +18,10 @@ final class HowlaroundTests: XCTestCase {
     private func settings(_ values: [String: Double]) -> HowlaroundSettings {
         // A plain centred camera unless a test says otherwise.
         HowlaroundSettings(values: ["zoom": 0.5, "centre_x": 0, "centre_y": 0, "roll": 0, "turn": 0, "tilt": 0,
-                                    "shake": 0, "take": 1, "drift": 0, "drift_dir": 0, "push": 0,
+                                    "shake": 0, "seed": 1, "drift": 0, "drift_dir": 0, "push": 0,
                                     "spin": 0, "loop": 0,
                                     "focus": 0, "brightness": 1, "contrast": 1, "colour_drift": 0,
-                                    "hue_drift": 0, "auto_exposure": 0, "mix": 0, "delay": 1,
+                                    "hue_drift": 0, "auto_exposure": 0, "key": 0, "key_invert": 0, "delay": 1,
                                     "counter": 0].merging(values) { _, new in new })
     }
 
@@ -109,11 +109,20 @@ final class HowlaroundTests: XCTestCase {
     }
 
     func testRunUpCoversTheTunnel() {
-        let s = settings([:])
-        XCTAssertGreaterThanOrEqual(s.runUpFrames(aspect: 1, chainHeight: 240), 6 + 4)
+        // One trip per copy to build the tunnel, then the delay's worth of
+        // history — not copies × delay, which at a 20-frame delay would be
+        // hundreds of frames before the first one is written.
+        let plan = settings([:]).runUpPlan(aspect: 1, chainHeight: 240)
+        XCTAssertGreaterThanOrEqual(plan.build, 6 + 4)
+        XCTAssertEqual(plan.settle, 1)
         XCTAssertEqual(settings(["zoom": 0]).runUpFrames(aspect: 1, chainHeight: 240), 0)
-        let slow = settings(["delay": 3]).runUpFrames(aspect: 1, chainHeight: 240)
-        XCTAssertGreaterThanOrEqual(slow, 3 * (6 + 4))
+        let slow = settings(["delay": 20]).runUpPlan(aspect: 1, chainHeight: 240)
+        XCTAssertEqual(slow.build, plan.build)
+        XCTAssertEqual(slow.settle, 20)
+        // A seamless loop settles longer, so the first copies carry the lag
+        // they'll have at the end.
+        let loop = settings(["delay": 20, "loop": 1]).runUpPlan(aspect: 1, chainHeight: 240)
+        XCTAssertGreaterThan(loop.settle, 20 * 6)
     }
 
     // MARK: movement
@@ -126,8 +135,8 @@ final class HowlaroundTests: XCTestCase {
     }
 
     func testTheSameTakeMovesTheSameWay() {
-        let a = settings(["shake": 0.6, "take": 3]), b = settings(["shake": 0.6, "take": 3])
-        let c = settings(["shake": 0.6, "take": 4])
+        let a = settings(["shake": 0.6, "seed": 3]), b = settings(["shake": 0.6, "seed": 3])
+        let c = settings(["shake": 0.6, "seed": 4])
         var moved = false, differs = false
         for t in stride(from: 0.0, to: 4, by: 0.37) {
             let pa = a.pose(at: t, length: 4)
@@ -136,13 +145,13 @@ final class HowlaroundTests: XCTestCase {
             differs = differs || pa != c.pose(at: t, length: 4)
         }
         XCTAssertTrue(moved, "the hands should move the camera")
-        XCTAssertTrue(differs, "another take should move differently")
+        XCTAssertTrue(differs, "another seed should move differently")
     }
 
     func testHandsSwayGentlyAndStayInRange() {
         // At full shake the tunnel centre wanders a few percent of the frame and
         // changes smoothly from frame to frame (30 fps).
-        let s = settings(["shake": 1, "take": 7])
+        let s = settings(["shake": 1, "seed": 7])
         var biggest = 0.0, fastest = 0.0
         var last = s.pose(at: 0, length: 10).centreX
         for i in 1...300 {
@@ -173,7 +182,7 @@ final class HowlaroundTests: XCTestCase {
 
     func testALoopEndsWhereItStarted() {
         let s = settings(["drift": 0.3, "drift_dir": 200, "push": -0.2, "spin": 45,
-                          "shake": 0.8, "take": 5, "loop": 1])
+                          "shake": 0.8, "seed": 5, "loop": 1])
         let L = 4.0
         let a = s.pose(at: 0, length: L), b = s.pose(at: L, length: L)
         XCTAssertEqual(a.centreX, b.centreX, accuracy: 1e-9)
@@ -317,6 +326,41 @@ final class HowlaroundTests: XCTestCase {
         let room = try luma(0.18), first = try luma(0.33), second = try luma(0.41)
         XCTAssertLessThan(first, room - 0.1)
         XCTAssertLessThan(second, first - 0.05)
+    }
+
+    func testALongDelayStillOpensOnTheWholeTunnel() async throws {
+        // 20 frames per trip round the loop, three frames rendered: the
+        // copies are there from the first frame.
+        let url = try await gif(framed, settings(["delay": 20]))
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertTrue(isRed(try pixel(url, 0.5, 0.27)), "first copy's frame")
+        XCTAssertTrue(isRed(try pixel(url, 0.5, 0.385)), "second copy's frame")
+    }
+
+    /// Bright in the middle, dark around it.
+    private lazy var spot: MTLTexture = texture { x, y in
+        let dx = Double(x - N / 2), dy = Double(y - N / 2)
+        return (dx * dx + dy * dy).squareRoot() < Double(N) * 0.12 ? (250, 250, 250) : (30, 30, 30)
+    }
+
+    func testTheLumaKeyPutsTheBrightPartsOnTop() async throws {
+        // The room is dark with a bright spot in the middle; the TV — dim,
+        // so the copies stand apart — covers the middle half. Keyed, the
+        // spot sits on top of the copies; the dark parts show the feedback.
+        let off = try await gif(spot, settings(["brightness": 0.6]))
+        let keyed = try await gif(spot, settings(["brightness": 0.6, "key": 0.5]))
+        let inverted = try await gif(spot, settings(["brightness": 0.6, "key": 0.5, "key_invert": 1]))
+        defer { for u in [off, keyed, inverted] { try? FileManager.default.removeItem(at: u) } }
+        func luma(_ u: URL, _ fx: Double, _ fy: Double) throws -> Double {
+            let c = try pixel(u, fx, fy); return (c.0 + c.1 + c.2) / 3
+        }
+        // In the TV, unkeyed, the middle is a dimmed copy of the room.
+        XCTAssertLessThan(try luma(off, 0.5, 0.5), 0.75)
+        // Keyed: the bright spot is on top, full brightness.
+        XCTAssertGreaterThan(try luma(keyed, 0.5, 0.5), 0.9)
+        // Inverted: the dark room is keyed instead, so the spot's place
+        // shows the feedback (dim), and the dark parts are your picture.
+        XCTAssertLessThan(try luma(inverted, 0.5, 0.5), 0.75)
     }
 
     func testCancelStopsTheRender() async throws {

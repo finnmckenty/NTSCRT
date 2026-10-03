@@ -342,8 +342,7 @@ public final class Mp4Exporter {
                 if let howl, !ranUp {
                     // Build the tunnel on the first frame before writing it.
                     ranUp = true
-                    try howl.runUp(frames: howl.settings.runUpFrames(aspect: aspect,
-                                                                     chainHeight: chainInput.height),
+                    try howl.runUp(aspect: aspect, chainHeight: chainInput.height,
                                    fps: Double(source.frameRate),
                                    scene: frame.texture, pipeline: self.pipeline, ntsc: ntscStage,
                                    glitch: zip(glitchRenderer, frameGlitch).map {
@@ -593,9 +592,8 @@ public final class Mp4Exporter {
             if let howl {
                 // Build the tunnel before the first written frame.
                 let g = try applyFrameParams(0)
-                try howl.runUp(frames: howl.settings.runUpFrames(
-                                   aspect: Double(source.width) / Double(max(1, source.height)),
-                                   chainHeight: chainInput.height),
+                try howl.runUp(aspect: Double(source.width) / Double(max(1, source.height)),
+                               chainHeight: chainInput.height,
                                fps: Double(fps),
                                scene: source, pipeline: self.pipeline, ntsc: ntscStage,
                                glitch: zip(glitchRenderer, g).map { GlitchFrame(renderer: $0.0, time: 0, settings: $0.1) },

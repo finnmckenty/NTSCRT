@@ -16,7 +16,7 @@ public struct HowlaroundParam: Identifiable, Sendable {
         case framing = "Framing"
         case movement = "Movement"
         case camera = "Camera"
-        case feedback = "Feedback"
+        case signal = "Signal"
     }
     public enum Kind: Equatable, Sendable {
         case slider(min: Double, max: Double, percent: Bool, unit: String, step: Double?)
@@ -119,10 +119,10 @@ public struct HowlaroundParam: Identifiable, Sendable {
             defaultValue: 0.4, neutralValue: 0, ends: Ends(low: "Tripod", high: "Shaky"),
             help: "The camera operator's hands: a slow sway with a little tremor. Every copy is one trip round the loop older than the one around it, so the tunnel follows the camera a moment late and snakes."),
         HowlaroundParam(
-            id: "take", label: "Take", group: .movement,
-            kind: .slider(min: 1, max: 20, percent: false, unit: "", step: 1),
+            id: "seed", label: "Random seed", group: .movement,
+            kind: .slider(min: 1, max: 99, percent: false, unit: "", step: 1),
             defaultValue: 1, neutralValue: 1,
-            help: "Which performance of the handheld shake. The same take always moves the same way — so the draft matches the render, and a take you like can always be found again."),
+            help: "Picks the handheld motion. The same seed always moves the same way — so the draft matches the render, and motion you like can always be found again."),
         HowlaroundParam(
             id: "drift_dir", label: "Drift direction", group: .movement,
             kind: .direction,
@@ -184,17 +184,22 @@ public struct HowlaroundParam: Identifiable, Sendable {
             help: "The camcorder's automatic exposure. It reacts to the brightness of its own picture a moment late, so the whole loop pulses."),
 
         HowlaroundParam(
-            id: "mix", label: "Picture mix", group: .feedback,
+            id: "key", label: "Luma key", group: .signal,
             kind: .slider(min: 0, max: 1, percent: true, unit: "", step: nil),
-            defaultValue: 0, neutralValue: 0, ends: Ends(low: "Camera only", high: "Your picture"),
-            help: "A video mixer between the camera and the TV, fading your picture in over the camera's. At 0% the TV shows only what the camera sees, and your picture is just the room around the TV. Turned up, your picture is laid over every copy, so it echoes all the way down the tunnel."),
+            defaultValue: 0, neutralValue: 0, ends: Ends(low: "Off", high: "Whole picture"),
+            help: "A video mixer between the camera and the TV keys your picture over the camera's: its bright parts sit on top, and the feedback shows through the darker parts — so your subject stays solid while the tunnel trails around it. Turn it up to key in darker tones too. Off, the TV shows only what the camera sees."),
         HowlaroundParam(
-            id: "delay", label: "Delay", group: .feedback,
-            kind: .slider(min: 1, max: 4, percent: false, unit: "frames", step: 1),
+            id: "key_invert", label: "Key the dark parts", group: .signal,
+            kind: .toggle,
+            defaultValue: 0, neutralValue: 0,
+            help: "Key your picture's dark parts on top instead, with the feedback showing through the bright ones — for dark subjects on light backgrounds."),
+        HowlaroundParam(
+            id: "delay", label: "Delay", group: .signal,
+            kind: .slider(min: 1, max: 20, percent: false, unit: "frames", step: 1),
             defaultValue: 1, neutralValue: 1,
             help: "How long one trip around the loop takes. Each copy is that much older than the one around it, so anything moving — the camera included — echoes down the tunnel."),
         HowlaroundParam(
-            id: "counter", label: "Camcorder counter", group: .feedback,
+            id: "counter", label: "Camcorder counter", group: .signal,
             kind: .toggle,
             defaultValue: 0, neutralValue: 0,
             help: "The camcorder's elapsed-time counter, burned into its picture — so it's filmed again with everything else and repeats down the tunnel."),
@@ -235,10 +240,10 @@ public struct HowlaroundSettings: Equatable, Sendable {
     /// Zero zoom: the camera sees the room only, so the picture is exactly
     /// the scene and nothing feeds back.
     public var tvInView: Bool { zoom > 0.001 }
-    public var delay: Int { max(1, min(4, Int(self["delay"].rounded()))) }
+    public var delay: Int { max(1, min(20, Int(self["delay"].rounded()))) }
     public var counter: Bool { self["counter"] >= 0.5 }
     public var loop: Bool { self["loop"] >= 0.5 }
-    public var take: Int { max(1, Int(self["take"].rounded())) }
+    public var seed: Int { max(1, Int(self["seed"].rounded())) }
 
     /// The framing knobs alone, before any movement.
     public var basePose: HowlaroundPose {
@@ -271,7 +276,7 @@ public struct HowlaroundSettings: Equatable, Sendable {
         p.roll += self["spin"] * m
         let shake = self["shake"]
         if shake > 0 {
-            let hands = HowlaroundHands(take: take, period: loop ? L : nil)
+            let hands = HowlaroundHands(seed: seed, period: loop ? L : nil)
             p.centreX += shake * 0.050 * hands.value(0, t)
             p.centreY += shake * 0.045 * hands.value(1, t)
             p.turn += shake * 6.0 * hands.value(2, t)
@@ -377,26 +382,39 @@ public struct HowlaroundSettings: Equatable, Sendable {
         return max(1, min(200, Int(n.rounded(.down))))
     }
 
-    /// Passes to run before the first frame is written, so it already shows
-    /// the whole tunnel (one more copy appears per trip round the loop).
-    public func runUpFrames(aspect: Double, chainHeight: Int) -> Int {
-        guard tvInView else { return 0 }
+    /// The run-up before the first frame is written, so it already shows
+    /// the whole tunnel: first `build` trips round the loop at one frame
+    /// each (one more copy appears per trip, so a long delay would take
+    /// copies × delay frames to fill the tunnel), then `settle` frames at the
+    /// real delay so the ring holds the history it needs. A seamless loop
+    /// settles longer, so the first copies at the start carry the same lag
+    /// as at the end.
+    public func runUpPlan(aspect: Double, chainHeight: Int) -> (build: Int, settle: Int) {
+        guard tvInView else { return (0, 0) }
         let copies = visibleCopies(aspect: aspect, chainHeight: chainHeight) ?? 60
-        let settle = self["auto_exposure"] > 0 ? 30 : 0
-        return max(4 * delay, min(300, delay * (copies + 4) + settle))
+        let exposure = self["auto_exposure"] > 0 ? 30 : 0
+        let build = copies + 4 + exposure
+        let settle = loop ? min(400, delay * min(copies + 4, 12)) : delay
+        return (build, settle)
+    }
+
+    /// The run-up's total length in frames.
+    public func runUpFrames(aspect: Double, chainHeight: Int) -> Int {
+        let plan = runUpPlan(aspect: aspect, chainHeight: chainHeight)
+        return plan.build + plan.settle
     }
 }
 
 /// The camera operator's hands: per axis, a slow sway (a few incommensurate
 /// sinusoids around 0.15–0.7 Hz) with a little tremor (4–7 Hz), the same for
-/// the same take. With a `period` every frequency is rounded to a whole
+/// the same seed. With a `period` every frequency is rounded to a whole
 /// number of cycles over it, so the motion repeats exactly — a seamless loop.
 /// `value` stays mostly within ±1.
 struct HowlaroundHands {
     private var parts: [[(f: Double, phase: Double, amp: Double)]] = []
 
-    init(take: Int, period: Double?) {
-        let seed = UInt64(take)
+    init(seed: Int, period: Double?) {
+        let seed = UInt64(seed)
         func snap(_ f: Double) -> Double {
             guard let period else { return f }
             return max(1, (f * period).rounded()) / period
@@ -553,6 +571,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
             guard let fn = library.makeFunction(name: name) else { throw Self.error("kernel \(name)") }
             return try device.makeComputePipelineState(function: fn)
         }
+        lag = render.settings.delay
         cameraPipeline = try pipe("howl_camera")
         blurPipeline = try pipe("howl_blur")
 
@@ -594,8 +613,12 @@ public final class HowlaroundLoop: @unchecked Sendable {
         for (n, v) in params { try? feedbackChain.setParameter(n, value: v) }
     }
 
+    /// How many frames back the camera's TV picture is: the delay, or one
+    /// while the run-up builds the tunnel.
+    private var lag = 1
+
     private var writeSlot: Int { frame % ring.count }
-    private var readSlot: Int { (frame + 1) % ring.count }   // `delay` frames ago
+    private var readSlot: Int { ((frame - lag) % ring.count + ring.count) % ring.count }
 
     /// The TV's picture for this frame goes here (see ExportFrame).
     public var feedback: HowlaroundFeedback {
@@ -619,7 +642,11 @@ public final class HowlaroundLoop: @unchecked Sendable {
         guard let camera, let cb = context.queue.makeCommandBuffer() else { throw Self.error("camera texture") }
         let s = settings
         let aspect = Double(scene.width) / Double(max(1, scene.height))
-        let pose = s.pose(at: time, length: render.length)
+        // A render repeated in passes (the Loop count) replays a one-way move
+        // each pass; a seamless loop repeats by itself.
+        let L = max(0.1, render.length)
+        let t = time >= 0 && !s.loop ? time.truncatingRemainder(dividingBy: L) : time
+        let pose = s.pose(at: t, length: L)
 
         // Defocus, in the TV picture's own pixels: a camera blur of `sigma`
         // chain-input lines is that over the screen's size in the frame.
@@ -651,10 +678,11 @@ public final class HowlaroundLoop: @unchecked Sendable {
         }
         var u = CameraUniforms(
             axisX: f4(ax), axisY: f4(ay), normal: f4(n), centre: f4(c),
-            balance: SIMD4(Float(r / luma), Float(1 / luma), Float(b / luma), Float(s.tvInView ? s["mix"] : 0)),
+            balance: SIMD4(Float(r / luma), Float(1 / luma), Float(b / luma), 0),
             counterRect: rect,
             params: SIMD4(Float(aspect), Float(max(0.001, pose.zoom)), Float(s["brightness"]), Float(s["contrast"])),
-            params2: SIMD4(Float(cos(hue)), Float(sin(hue)), Float(exposure), s.tvInView ? 1 : 0))
+            params2: SIMD4(Float(cos(hue)), Float(sin(hue)), Float(exposure), s.tvInView ? 1 : 0),
+            key: SIMD4(Float(s.tvInView ? s["key"] : 0), s["key_invert"] >= 0.5 ? 1 : 0, 0, 0))
 
         guard let enc = cb.makeComputeCommandEncoder() else { throw Self.error("encoder") }
         enc.setComputePipelineState(cameraPipeline)
@@ -702,10 +730,20 @@ public final class HowlaroundLoop: @unchecked Sendable {
     /// the first frame of the render already shows the whole tunnel. Uses the
     /// export's own NTSC stage and glitch renderer, standing still at its
     /// first moment.
-    public func runUp(frames: Int, fps: Double, scene: MTLTexture, pipeline: Pipeline, ntsc: NtscStage?,
+    public func runUp(aspect: Double, chainHeight: Int, fps: Double, scene: MTLTexture,
+                      pipeline: Pipeline, ntsc: NtscStage?,
                       glitch: GlitchFrame?, downscale: DownscaleSpec?) throws {
+        let plan = settings.runUpPlan(aspect: aspect, chainHeight: chainHeight)
+        let frames = plan.build + plan.settle
+        defer { lag = settings.delay }
         for k in 0..<frames {
             if isCancelled { throw CancellationError() }
+            // Switching to the real delay: the camera now films the TV as it
+            // was `delay` frames ago — before the tunnel was built — so fill
+            // that history with the finished tunnel, as if the TV had shown
+            // it all along.
+            if k == plan.build && plan.build > 0 && settings.delay > 1 { try fillHistory() }
+            lag = k < plan.build ? 1 : settings.delay
             // The camera's moment: before the first frame, so the tunnel
             // already carries the motion that leads into it.
             let image = try cameraImage(scene: scene, time: Double(k - frames) / max(1, fps))
@@ -725,6 +763,18 @@ public final class HowlaroundLoop: @unchecked Sendable {
             cb.waitUntilCompleted()
             advance()
         }
+    }
+
+    /// Copy the latest TV picture into every slot of the ring.
+    private func fillHistory() throws {
+        let latest = ring[((frame - 1) % ring.count + ring.count) % ring.count]
+        guard let cb = context.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
+            throw Self.error("command buffer")
+        }
+        for slot in ring where slot !== latest { blit.copy(from: latest, to: slot) }
+        blit.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
     }
 
     // MARK: helpers
@@ -810,6 +860,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
         var counterRect: SIMD4<Float>
         var params: SIMD4<Float>      // aspect, zoom, brightness, contrast
         var params2: SIMD4<Float>     // hue cos, hue sin, exposure, TV in view
+        var key: SIMD4<Float>         // key level, invert
     }
 
     private struct BlurUniforms {
@@ -823,7 +874,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
     using namespace metal;
 
     struct CameraUniforms {
-        float4 axisX, axisY, normal, centre, balance, counterRect, params, params2;
+        float4 axisX, axisY, normal, centre, balance, counterRect, params, params2, key;
     };
     struct BlurUniforms { float2 dir; float sigma; int radius; };
 
@@ -875,8 +926,15 @@ public final class HowlaroundLoop: @unchecked Sendable {
                 }
             }
         }
-        // The mixer: your picture faded in over the camera's.
-        c = mix(c, scene.read(gid).rgb, u.balance.w);
+        // The mixer's luma key: your picture over the camera's wherever it's
+        // brighter than the key level (darker, inverted), with a soft edge.
+        if (u.key.x > 0.0) {
+            float3 src = scene.read(gid).rgb;
+            float y = dot(src, float3(0.299, 0.587, 0.114));
+            if (u.key.y > 0.5) y = 1.0 - y;
+            float level = 1.0 - u.key.x;
+            c = mix(c, src, smoothstep(level - 0.06, level + 0.06, y));
+        }
         c *= u.params2.z;
         float4 r = u.counterRect;
         if (r.z > r.x && uv.x >= r.x && uv.x <= r.z && uv.y >= r.y && uv.y <= r.w) {
