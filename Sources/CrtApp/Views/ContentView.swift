@@ -184,7 +184,7 @@ struct ContentView: View {
             }
         }
         if env["CRT_SHOW_HOWL"] == "1" { showHowlaround = true }
-        // CRT_FEEDBACK_PRESET_CHECK=1: a Video Feedback preset saves and loads
+        // CRT_FEEDBACK_PRESET_CHECK=1: a Screen Loop preset saves and loads
         // back exactly, and the look presets refuse one with a pointer to the
         // panel (the two kinds live apart).
         if env["CRT_FEEDBACK_PRESET_CHECK"] != nil {
@@ -206,10 +206,10 @@ struct ContentView: View {
             check("a still's length comes back", state.howlaroundSeconds == 7.5)
             do {
                 try state.loadLook(from: url)
-                check("the look presets refuse a Video Feedback preset", false)
+                check("the look presets refuse a Screen Loop preset", false)
             } catch {
-                check("the look presets refuse a Video Feedback preset",
-                      error.localizedDescription.contains("Video Feedback panel"), error.localizedDescription)
+                check("the look presets refuse a Screen Loop preset",
+                      error.localizedDescription.contains("Screen Loop panel"), error.localizedDescription)
             }
             check("its folder is separate from the look presets",
                   FeedbackPresets.saveFolder().lastPathComponent == FeedbackPresets.folderName,
@@ -1532,14 +1532,14 @@ struct ContentView: View {
             Button {
                 showHowlaround = true
             } label: {
-                Label("Feedback", systemImage: "camera.viewfinder")
+                Label("Screen Loop", systemImage: "camera.viewfinder")
                     .labelStyle(.titleAndIcon)
             }
             .disabled(state.sourceTexture == nil && state.videoSource == nil || state.exportWorking)
             .sheet(isPresented: $showHowlaround) {
                 HowlaroundPanel().environment(state)
             }
-            .help("Video Feedback: point a camcorder at the TV that's showing its own picture — a tunnel of copies, with your look on every pass")
+            .help("Screen Loop: point a camcorder at the TV that's showing its own picture — video feedback, a tunnel of copies with your look on every pass")
 
             Button {
                 showExport.toggle()

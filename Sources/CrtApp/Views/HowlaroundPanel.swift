@@ -88,7 +88,7 @@ struct HowlaroundPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("Video Feedback").font(.headline)
+                    Text("Screen Loop").font(.headline)
                     Spacer()
                     presetsMenu
                     Button("Reset") { state.resetHowlaround() }
@@ -131,14 +131,14 @@ struct HowlaroundPanel: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .id(presetsVersion)          // re-list after a save
-        .help("Save the camera's settings as a Video Feedback preset, or load one. They live in their own folder, apart from the look presets.")
+        .help("Save the camera's settings as a Screen Loop preset, or load one. They live in their own folder, apart from the look presets.")
     }
 
     private func savePreset() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.directoryURL = FeedbackPresets.saveFolder()
-        panel.nameFieldStringValue = "Video feedback \(timestamp).json"
+        panel.nameFieldStringValue = "Screen loop \(timestamp).json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try state.saveFeedbackPreset(to: url)
@@ -253,7 +253,7 @@ struct HowlaroundPanel: View {
         } else {
             panel.allowedContentTypes = [format.isProRes ? .quickTimeMovie : .mpeg4Movie]
         }
-        panel.nameFieldStringValue = "video feedback \(timestamp).\(format.fileExtension)"
+        panel.nameFieldStringValue = "screen loop \(timestamp).\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         state.renderHowlaroundFile(to: url)
     }

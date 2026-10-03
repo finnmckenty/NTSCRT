@@ -43,7 +43,7 @@ struct ExportPopover: View {
             Text(isVideo ? "Export video" : "Export image")
                 .font(.headline)
 
-            // The options themselves are shared with the Video Feedback
+            // The options themselves are shared with the Screen Loop
             // panel (ExportOptions.swift) — one source of truth.
             ExportSizeOptions()
 

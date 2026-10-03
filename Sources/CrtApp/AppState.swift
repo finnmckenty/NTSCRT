@@ -508,7 +508,7 @@ final class AppState {
     private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
-    // MARK: - howlaround (video feedback render — CrtCore/Howlaround.swift)
+    // MARK: - Screen Loop (video feedback render — CrtCore/Howlaround.swift)
 
     /// The howlaround camera's knobs (the Howlaround panel).
     var howlaroundValues: [String: Double] = HowlaroundParam.defaultValues
@@ -1474,7 +1474,7 @@ final class AppState {
         var errorDescription: String? {
             switch self {
             case .badFile: return "not a crt-app look file"
-            case .feedbackPreset: return "This is a Video Feedback preset — load it from the Video Feedback panel's Presets menu."
+            case .feedbackPreset: return "This is a Screen Loop preset — load it from the Screen Loop panel's Presets menu."
             }
         }
     }

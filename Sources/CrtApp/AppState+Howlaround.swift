@@ -302,7 +302,7 @@ extension AppState {
               dict["kind"] as? String == FeedbackPresets.kind,
               let values = dict["values"] as? [String: Double] else {
             throw NSError(domain: "VideoFeedback", code: 3, userInfo: [NSLocalizedDescriptionKey:
-                "Not a Video Feedback preset. Look presets load from the toolbar's Preset menu."])
+                "Not a Screen Loop preset. Look presets load from the toolbar's Preset menu."])
         }
         howlaroundValues = HowlaroundParam.defaultValues.merging(values) { _, new in new }
         if let seconds = dict["seconds"] as? Double { howlaroundSeconds = min(60, max(0.5, seconds)) }

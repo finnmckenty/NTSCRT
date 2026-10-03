@@ -1,13 +1,13 @@
 import Foundation
 
-/// Video Feedback presets: the camera's knobs (and a still's length) as a
-/// small JSON file, kept in a folder of their own — "Video Feedback" — so
+/// Screen Loop presets: the camera's knobs (and a still's length) as a
+/// small JSON file, kept in a folder of their own — "Screen Loop" — so
 /// they never mix with the look presets.
 enum FeedbackPresets {
-    static let folderName = "Video Feedback"
+    static let folderName = "Screen Loop"
     static let kind = "ntscrt-video-feedback"
 
-    /// Bundled with the app (read-only): presets/Video Feedback.
+    /// Bundled with the app (read-only): presets/Screen Loop.
     static var bundledFolder: URL? {
         guard let root = Paths.lookPresetsRoot() else { return nil }
         let url = root.appendingPathComponent(folderName)
@@ -20,7 +20,7 @@ enum FeedbackPresets {
         Paths.projectPresetsFolder()?.appendingPathComponent(folderName)
     }
 
-    /// Yours, for an installed app: Application Support/NTSCRT/Video Feedback.
+    /// Yours, for an installed app: Application Support/NTSCRT/Screen Loop.
     static var userFolder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NTSCRT").appendingPathComponent(folderName)
