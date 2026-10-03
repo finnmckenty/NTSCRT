@@ -344,6 +344,7 @@ public final class Mp4Exporter {
                     ranUp = true
                     try howl.runUp(frames: howl.settings.runUpFrames(aspect: aspect,
                                                                      chainHeight: chainInput.height),
+                                   fps: Double(source.frameRate),
                                    scene: frame.texture, pipeline: self.pipeline, ntsc: ntscStage,
                                    glitch: zip(glitchRenderer, frameGlitch).map {
                                        GlitchFrame(renderer: $0.0, time: 0, settings: $0.1)
@@ -595,6 +596,7 @@ public final class Mp4Exporter {
                 try howl.runUp(frames: howl.settings.runUpFrames(
                                    aspect: Double(source.width) / Double(max(1, source.height)),
                                    chainHeight: chainInput.height),
+                               fps: Double(fps),
                                scene: source, pipeline: self.pipeline, ntsc: ntscStage,
                                glitch: zip(glitchRenderer, g).map { GlitchFrame(renderer: $0.0, time: 0, settings: $0.1) },
                                downscale: settings.downscale)

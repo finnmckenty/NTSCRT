@@ -186,11 +186,12 @@ struct ContentView: View {
         // CRT_HOWL_PANEL_SNAPSHOT=<out.png>: draw the Howlaround panel off
         // screen (the draft video itself doesn't draw this way).
         if let out = env["CRT_HOWL_PANEL_SNAPSHOT"] {
-            let host = NSHostingView(rootView: HowlaroundPanel().environment(state)
+            let tall = env["CRT_HOWL_PANEL_TALL"] == "1"
+            let host = NSHostingView(rootView: HowlaroundPanel(height: tall ? 1950 : 700).environment(state)
                 .background(Color(nsColor: .windowBackgroundColor))
                 .environment(\.colorScheme, .dark))
             host.appearance = NSAppearance(named: .darkAqua)
-            host.frame = CGRect(x: 0, y: 0, width: 1040, height: 700)
+            host.frame = CGRect(x: 0, y: 0, width: 1040, height: tall ? 1950 : 700)
             let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.contentView = host
             try? await Task.sleep(for: .seconds(3))

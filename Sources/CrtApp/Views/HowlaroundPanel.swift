@@ -11,6 +11,8 @@ import CrtCore
 struct HowlaroundPanel: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
+    /// Taller only for the off-screen snapshot, so every knob shows.
+    var height: CGFloat = 700
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,7 +24,7 @@ struct HowlaroundPanel: View {
             Divider()
             footer
         }
-        .frame(width: 1040, height: 700)
+        .frame(width: 1040, height: height)
         .onAppear {
             // The renders drive the shared Metal queue (and librashader,
             // which isn't thread-safe), so the live preview pauses meanwhile.
@@ -61,7 +63,8 @@ struct HowlaroundPanel: View {
                     VStack {
                         HStack {
                             ProgressView().controlSize(.small)
-                            Text("Updating draft…").font(.caption)
+                            Text("Updating draft… \(Int((state.howlDraftProgress * 100).rounded()))%")
+                                .font(.caption).monospacedDigit()
                         }
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(.black.opacity(0.6), in: Capsule())
@@ -189,7 +192,8 @@ struct HowlaroundPanel: View {
 }
 
 /// One camera knob: label, value, slider (double-click the knob for its
-/// neutral setting), or a switch.
+/// neutral setting), or a switch. Knobs either side of a middle read in words
+/// ("20% right"), and every slider says what its ends mean.
 private struct HowlaroundControl: View {
     @Environment(AppState.self) private var state
     let param: HowlaroundParam
@@ -199,39 +203,110 @@ private struct HowlaroundControl: View {
                 set: { state.setHowlaroundValue(param.id, $0) })
     }
 
-    var body: some View {
-        switch param.kind {
-        case .toggle:
-            Toggle(isOn: Binding(get: { value.wrappedValue >= 0.5 },
-                                 set: { value.wrappedValue = $0 ? 1 : 0 })) {
-                Text(param.label).font(.callout)
-            }
-            .toggleStyle(.switch)
-            .help(param.help)
-        case .slider(let lo, let hi, let percent, let unit, let step):
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(param.label).font(.callout).lineLimit(1)
-                    Spacer()
-                    if percent {
-                        NumericField(value: Binding(get: { value.wrappedValue * 100 },
-                                                    set: { value.wrappedValue = $0 / 100 }),
-                                     range: (lo * 100)...(hi * 100), width: 52)
-                        Text("%").font(.caption).foregroundStyle(.secondary)
-                            .frame(minWidth: 12, alignment: .leading)
-                    } else {
-                        NumericField(value: value, range: lo...hi, width: 52)
-                        Text(unit).font(.caption).foregroundStyle(.secondary)
-                            .frame(minWidth: 12, alignment: .leading)
-                    }
-                }
-                PropertySlider(value: value, range: lo...hi, step: step, neutral: param.neutralValue)
-                if param.id == "zoom" {
-                    Text(copiesCaption).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .help(param.help)
+    /// Greyed out while the knob it depends on is off.
+    private var idle: Bool {
+        let s = state.howlaroundSettings
+        switch param.id {
+        case "drift_dir": return s["drift"] == 0
+        case "take": return s["shake"] == 0
+        default: return false
         }
+    }
+
+    var body: some View {
+        Group {
+            switch param.kind {
+            case .toggle:
+                Toggle(isOn: Binding(get: { value.wrappedValue >= 0.5 },
+                                     set: { value.wrappedValue = $0 ? 1 : 0 })) {
+                    Text(param.label).font(.callout)
+                }
+                .toggleStyle(.switch)
+            case .direction:
+                direction
+            case .slider(let lo, let hi, let percent, let unit, let step):
+                slider(lo: lo, hi: hi, percent: percent, unit: unit, step: step)
+            }
+        }
+        .disabled(idle)
+        .opacity(idle ? 0.45 : 1)
+        .help(param.help)
+    }
+
+    private func slider(lo: Double, hi: Double, percent: Bool, unit: String, step: Double?) -> some View {
+        let scale = percent ? 100.0 : 1.0
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(param.label).font(.callout).lineLimit(1)
+                Spacer()
+                if param.sides != nil {
+                    // The size in the field, the side in words; a negative
+                    // number typed in switches sides.
+                    let reading = param.reading(value.wrappedValue)
+                    NumericField(value: Binding(
+                        get: { param.reading(value.wrappedValue).magnitude * scale },
+                        set: { typed in
+                            let side: Double = value.wrappedValue < 0 ? -1 : 1
+                            value.wrappedValue = (typed < 0 ? -side : side) * abs(typed) / scale
+                        }),
+                        range: 0...(max(abs(lo), abs(hi)) * scale), width: 46)
+                    Text(reading.magnitude == 0 ? reading.side : (percent ? "% " : "\(unit) ") + reading.side)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 104, alignment: .leading)
+                        .lineLimit(1)
+                } else {
+                    NumericField(value: Binding(get: { value.wrappedValue * scale },
+                                                set: { value.wrappedValue = $0 / scale }),
+                                 range: (lo * scale)...(hi * scale), width: 46)
+                    Text(percent ? "%" : (unit == "frames" && value.wrappedValue == 1 ? "frame" : unit))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 104, alignment: .leading)
+                        .lineLimit(1)
+                }
+            }
+            PropertySlider(value: value, range: lo...hi, step: step, neutral: param.neutralValue)
+            if let sides = param.sides {
+                endLabels(sides.negative.capitalizedFirst, sides.positive.capitalizedFirst)
+            } else if let ends = param.ends {
+                endLabels(ends.low, ends.high)
+            }
+            if param.id == "zoom" {
+                Text(copiesCaption).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var direction: some View {
+        let degrees = value.wrappedValue
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(param.label).font(.callout).lineLimit(1)
+                Spacer()
+                Image(systemName: "arrow.right")
+                    .rotationEffect(.degrees(-degrees))
+                    .frame(width: 16)
+                Text(HowlaroundParam.compass(degrees))
+                    .font(.callout).monospacedDigit()
+                    .frame(width: 104, alignment: .leading)
+            }
+            PropertySlider(value: value, range: 0...360, neutral: param.neutralValue)
+            HStack {
+                ForEach(Array(["Right", "Up", "Left", "Down", "Right"].enumerated()), id: \.offset) { i, word in
+                    Text(word)
+                    if i < 4 { Spacer() }
+                }
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private func endLabels(_ low: String, _ high: String) -> some View {
+        HStack {
+            Text(low)
+            Spacer()
+            Text(high)
+        }
+        .font(.caption2).foregroundStyle(.secondary)
     }
 
     private var copiesCaption: String {
@@ -239,6 +314,10 @@ private struct HowlaroundControl: View {
         guard let n = state.howlaroundCopies else { return "The screen overfills the frame: copies grow and swirl." }
         return n >= 200 ? "200+ copies" : "≈ \(n) cop\(n == 1 ? "y" : "ies") visible"
     }
+}
+
+private extension String {
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }
 
 /// Plays the latest draft on a loop, silently.
@@ -255,7 +334,8 @@ private struct DraftPlayer: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
-        view.controlsStyle = .none
+        // A scrubber appears on hover: the draft runs the whole render now.
+        view.controlsStyle = .minimal
         view.videoGravity = .resizeAspect
         view.player = context.coordinator.player
         context.coordinator.player.isMuted = true

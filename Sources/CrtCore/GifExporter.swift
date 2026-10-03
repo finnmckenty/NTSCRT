@@ -360,6 +360,7 @@ public final class GifExporter {
             let aspect = Double(scene.width) / Double(max(1, scene.height))
             try howl.runUp(frames: howl.settings.runUpFrames(aspect: aspect,
                                                              chainHeight: chainInputSize.height),
+                           fps: Double(settings.fps),
                            scene: scene, pipeline: pipeline, ntsc: ntscStage,
                            glitch: zip(glitchRenderer, glitch).map {
                                GlitchFrame(renderer: $0.0, time: 0, settings: $0.1)

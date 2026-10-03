@@ -116,16 +116,19 @@ extension AppState {
         let codec = exportFormat.codec ?? .h264
         let bitrate = exportBitrate(for: size)
         if let vs = videoSource {
+            let length = vs.durationSeconds
             if gif {
                 let limit = draftSeconds.map { max(1, Int(($0 * Double(gifFPS)).rounded())) }
-                let render = HowlaroundRender(settings: howlaroundSettings, frameLimit: limit, cancel: cancel)
+                let render = HowlaroundRender(settings: howlaroundSettings, length: length,
+                                              frameLimit: limit, cancel: cancel)
                 let settings = howlaroundGifSettings(outputURL: url, size: size, render: render)
                 try await GifExporter(context: context).exportVideo(
                     source: vs, paramValues: params, settings: settings, ntscSettingsJSON: ntscJSON,
                     frameParams: frameParams, progress: progress)
             } else {
                 let limit = draftSeconds.map { max(1, Int(($0 * Double(max(1, vs.frameRate))).rounded())) }
-                let render = HowlaroundRender(settings: howlaroundSettings, frameLimit: limit, cancel: cancel)
+                let render = HowlaroundRender(settings: howlaroundSettings, length: length,
+                                              frameLimit: limit, cancel: cancel)
                 let settings = howlaroundMp4Settings(outputURL: url, size: size, bitrate: bitrate,
                                                      codec: codec, render: render)
                 try await Mp4Exporter(context: context).export(
@@ -133,8 +136,11 @@ extension AppState {
                     frameParams: frameParams, progress: progress)
             }
         } else if let source = sourceTexture {
-            let seconds = draftSeconds ?? howlaroundSeconds
-            let render = HowlaroundRender(settings: howlaroundSettings, cancel: cancel)
+            // A draft of a still covers its start; the move still spans the
+            // whole length, so the draft shows the start of the same move.
+            let seconds = min(howlaroundSeconds, draftSeconds ?? howlaroundSeconds)
+            let render = HowlaroundRender(settings: howlaroundSettings, length: howlaroundSeconds,
+                                          cancel: cancel)
             if gif {
                 let frames = max(1, Int((seconds * Double(gifFPS)).rounded()))
                 let settings = howlaroundGifSettings(outputURL: url, size: size, render: render)
@@ -170,7 +176,14 @@ extension AppState {
         return (max(64, Int(w.rounded())) & ~1, max(64, Int(h.rounded())) & ~1)
     }
 
-    static let howlDraftSeconds = 2.0
+    /// Drafts cover the whole render up to this long — a move spans the
+    /// whole render, so a short draft would miss most of it.
+    static let howlDraftSeconds = 10.0
+
+    /// How long the draft runs: the whole render, up to `howlDraftSeconds`.
+    var howlDraftLength: Double {
+        min(Self.howlDraftSeconds, videoSource?.durationSeconds ?? howlaroundSeconds)
+    }
 
     /// Re-render the draft shortly after the knobs stop moving. A draft still
     /// running is cancelled and allowed to wind down first: two renders must
@@ -190,17 +203,24 @@ extension AppState {
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ntscrt-howlaround-draft-\(generation).mp4")
             self.howlDraftWorking = true
+            self.howlDraftProgress = 0
             self.howlDraftStatus = "Rendering draft…"
             let started = Date()
             do {
                 try await self.renderHowlaround(to: url, gif: false, size: self.howlDraftSize,
                                                 draftSeconds: Self.howlDraftSeconds, cancel: cancel,
-                                                progress: { _ in })
+                                                progress: { p in
+                                                    Task { @MainActor in
+                                                        if generation == self.howlDraftGeneration {
+                                                            self.howlDraftProgress = p
+                                                        }
+                                                    }
+                                                })
                 guard generation == self.howlDraftGeneration else { return }
                 if let old = self.howlDraftURL, old != url { try? FileManager.default.removeItem(at: old) }
                 self.howlDraftURL = url
-                self.howlDraftStatus = String(format: "Draft · %.0f s at %d px · rendered in %.1f s",
-                                              Self.howlDraftSeconds, self.howlDraftSize.width,
+                self.howlDraftStatus = String(format: "Draft · %.1f s at %d px · rendered in %.1f s",
+                                              self.howlDraftLength, self.howlDraftSize.width,
                                               Date().timeIntervalSince(started))
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: url)

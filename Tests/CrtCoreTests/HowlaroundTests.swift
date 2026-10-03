@@ -18,6 +18,8 @@ final class HowlaroundTests: XCTestCase {
     private func settings(_ values: [String: Double]) -> HowlaroundSettings {
         // A plain centred camera unless a test says otherwise.
         HowlaroundSettings(values: ["zoom": 0.5, "aim_x": 0, "aim_y": 0, "roll": 0, "turn": 0, "tilt": 0,
+                                    "shake": 0, "take": 1, "drift": 0, "drift_dir": 0, "push": 0,
+                                    "spin": 0, "loop": 0,
                                     "focus": 0, "brightness": 1, "contrast": 1, "colour_drift": 0,
                                     "hue_drift": 0, "auto_exposure": 0, "mix": 0, "delay": 1,
                                     "counter": 0].merging(values) { _, new in new })
@@ -59,6 +61,99 @@ final class HowlaroundTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(slow, 3 * (6 + 4))
     }
 
+    // MARK: movement
+
+    func testAStillCameraHoldsItsFraming() {
+        let s = settings(["aim_x": 0.1, "roll": 5])
+        for t in [-1.0, 0, 0.7, 3.3] {
+            XCTAssertEqual(s.pose(at: t, length: 4), s.basePose)
+        }
+    }
+
+    func testTheSameTakeMovesTheSameWay() {
+        let a = settings(["shake": 0.6, "take": 3]), b = settings(["shake": 0.6, "take": 3])
+        let c = settings(["shake": 0.6, "take": 4])
+        var moved = false, differs = false
+        for t in stride(from: 0.0, to: 4, by: 0.37) {
+            let pa = a.pose(at: t, length: 4)
+            XCTAssertEqual(pa, b.pose(at: t, length: 4))
+            moved = moved || pa != a.basePose
+            differs = differs || pa != c.pose(at: t, length: 4)
+        }
+        XCTAssertTrue(moved, "the hands should move the camera")
+        XCTAssertTrue(differs, "another take should move differently")
+    }
+
+    func testHandsSwayGentlyAndStayInRange() {
+        // At full shake the aim wanders a few percent of the frame and
+        // changes smoothly from frame to frame (30 fps).
+        let s = settings(["shake": 1, "take": 7])
+        var biggest = 0.0, fastest = 0.0
+        var last = s.pose(at: 0, length: 10).aimX
+        for i in 1...300 {
+            let x = s.pose(at: Double(i) / 30, length: 10).aimX
+            biggest = max(biggest, abs(x))
+            fastest = max(fastest, abs(x - last))
+            last = x
+        }
+        XCTAssertGreaterThan(biggest, 0.02)
+        XCTAssertLessThan(biggest, 0.12)
+        XCTAssertLessThan(fastest, 0.012)
+    }
+
+    func testAMoveRunsFromTheFramingToItsEnd() {
+        let s = settings(["drift": 0.3, "drift_dir": 90, "push": 0.2, "spin": 30])
+        let start = s.pose(at: 0, length: 5), end = s.pose(at: 5, length: 5)
+        XCTAssertEqual(start, s.basePose)
+        XCTAssertEqual(end.aimX, 0, accuracy: 1e-9)
+        XCTAssertEqual(end.aimY, -0.3, accuracy: 1e-9)      // up
+        XCTAssertEqual(end.zoom, 0.5 * 1.2, accuracy: 1e-9)
+        XCTAssertEqual(end.roll, 30, accuracy: 1e-9)
+        // Eased: slow at the ends, halfway at the middle.
+        XCTAssertEqual(s.pose(at: 2.5, length: 5).aimY, -0.15, accuracy: 1e-9)
+        XCTAssertLessThan(abs(s.pose(at: 0.25, length: 5).aimY), 0.3 * 0.05)
+        // Before the first frame (the run-up) it holds its start.
+        XCTAssertEqual(s.pose(at: -0.5, length: 5), s.basePose)
+    }
+
+    func testALoopEndsWhereItStarted() {
+        let s = settings(["drift": 0.3, "drift_dir": 200, "push": -0.2, "spin": 45,
+                          "shake": 0.8, "take": 5, "loop": 1])
+        let L = 4.0
+        let a = s.pose(at: 0, length: L), b = s.pose(at: L, length: L)
+        XCTAssertEqual(a.aimX, b.aimX, accuracy: 1e-9)
+        XCTAssertEqual(a.aimY, b.aimY, accuracy: 1e-9)
+        XCTAssertEqual(a.zoom, b.zoom, accuracy: 1e-9)
+        XCTAssertEqual(a.roll, b.roll, accuracy: 1e-9)
+        XCTAssertEqual(a.turn, b.turn, accuracy: 1e-9)
+        // Out and back: furthest out in the middle.
+        let mid = s.pose(at: L / 2, length: L)
+        XCTAssertGreaterThan(abs(mid.roll - a.roll), 30)
+        // The run-up wraps round: just before the start is the end of the loop.
+        let before = s.pose(at: -0.1, length: L), nearEnd = s.pose(at: L - 0.1, length: L)
+        XCTAssertEqual(before.aimX, nearEnd.aimX, accuracy: 1e-9)
+    }
+
+    func testKnobsReadInWords() {
+        let aim = HowlaroundParam.all.first { $0.id == "aim_x" }!
+        XCTAssertEqual(aim.reading(-0.2).side, "left")
+        XCTAssertEqual(aim.reading(-0.2).magnitude, 0.2, accuracy: 1e-12)
+        XCTAssertEqual(aim.reading(0.15).side, "right")
+        XCTAssertEqual(aim.reading(0).side, "centre")
+        let up = HowlaroundParam.all.first { $0.id == "aim_y" }!
+        XCTAssertEqual(up.reading(-0.1).side, "up")
+        XCTAssertEqual(HowlaroundParam.all.first { $0.id == "roll" }!.reading(10).side, "clockwise")
+        XCTAssertEqual(HowlaroundParam.compass(0), "right")
+        XCTAssertEqual(HowlaroundParam.compass(45), "up-right")
+        XCTAssertEqual(HowlaroundParam.compass(90), "up")
+        XCTAssertEqual(HowlaroundParam.compass(180), "left")
+        XCTAssertEqual(HowlaroundParam.compass(270), "down")
+        XCTAssertEqual(HowlaroundParam.compass(350), "right")
+        // Up on the knob is up in the picture: a drift "up" raises the TV.
+        let s = settings(["drift": 0.2, "drift_dir": 90])
+        XCTAssertLessThan(s.pose(at: 1, length: 1).aimY, 0)
+    }
+
     // MARK: the loop, end to end
 
     private func texture(_ pixel: (Int, Int) -> (UInt8, UInt8, UInt8)) -> MTLTexture {
@@ -95,7 +190,8 @@ final class HowlaroundTests: XCTestCase {
             .appendingPathComponent("howl-\(UUID().uuidString).gif")
         let s = GifExporter.Settings(outputURL: url, width: N, height: N, fps: 12, downscale: nil,
                                      presetPath: "", shaderEnabled: false, glitch: nil,
-                                     howlaround: howl.map { HowlaroundRender(settings: $0, cancel: cancel) })
+                                     howlaround: howl.map { HowlaroundRender(settings: $0, length: Double(frames) / 12,
+                                                                             cancel: cancel) })
         try await GifExporter(context: context).exportStill(source: source, totalFrames: frames,
                                                             paramValues: [:], settings: s,
                                                             progress: { _ in })

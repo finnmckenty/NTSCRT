@@ -519,6 +519,7 @@ final class AppState {
     /// The latest draft (a short, small render of the current settings).
     var howlDraftURL: URL?
     var howlDraftWorking = false
+    var howlDraftProgress: Double = 0
     var howlDraftStatus = ""
     var howlRenderWorking = false
     var howlRenderProgress: Double = 0
