@@ -210,7 +210,7 @@ The window may open behind other windows because SPM-built executables aren't pr
 open build/NTSCRT.app
 ```
 
-The script wraps the SPM-built binary in `build/NTSCRT.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any rebuild. It bundles the release binary by default; pass `debug` to wrap a debug build instead.
+The script builds the binary (`swift build -c release --product crt-app`), wraps it in `build/NTSCRT.app` with a minimal `Info.plist`, embeds `librashader.dylib` under `Contents/Frameworks/`, ad-hoc signs it, and bakes the absolute path of `Vendor/slang-shaders/` into `LSEnvironment.CRT_PRESETS` so it can find presets from any launch context. Re-run after any change. Release by default; pass `debug` for a debug build. (It used to wrap whatever binary the last build left while stamping the current git version into the title, so a stale binary could claim to be the new code — it builds first since 2026-10-05.)
 
 ### How it finds external assets
 
