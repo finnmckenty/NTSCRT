@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Wrap the SPM-built crt-app executable in a minimal .app bundle so it
+# Build the crt-app executable and wrap it in a minimal .app bundle so it
 # launches as a proper foreground macOS app (window gets focus, dock entry,
-# Cmd-Q quits). Run after `swift build -c release --product crt-app`.
+# Cmd-Q quits).
 #
 # Usage: wrap-app.sh [release|debug]   (default: release)
 #
@@ -12,10 +12,10 @@ cd "$(dirname "$0")/.."
 
 CONFIG="${1:-release}"
 
-if [[ ! -x ".build/$CONFIG/crt-app" ]]; then
-  echo "build first: swift build -c $CONFIG --product crt-app" >&2
-  exit 1
-fi
+# Always build: this script used to wrap whatever binary the last build
+# left, and stamp it with the current git version — so a stale binary went
+# out titled as the new code (2026-10-05: the Screen Loop dots "missing").
+swift build -c "$CONFIG" --product crt-app
 
 APP=build/NTSCRT.app
 rm -rf "$APP"

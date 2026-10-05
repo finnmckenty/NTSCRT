@@ -407,8 +407,11 @@ private struct DraftPlayer: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
-        // A scrubber appears on hover: the draft runs the whole render now.
-        view.controlsStyle = .minimal
+        // No controls: the vanishing-point dots live on the picture, and the
+        // player's hover controls — a play button ringed by its progress in
+        // the middle of the picture — looked like the draft refreshing
+        // whenever the pointer went for a dot.
+        view.controlsStyle = .none
         view.videoGravity = .resizeAspect
         view.player = context.coordinator.player
         context.coordinator.player.isMuted = true
