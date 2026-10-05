@@ -127,7 +127,7 @@ final class GlitchStageTests: XCTestCase {
         XCTAssertGreaterThan(starts.max()! - starts.min()!, W / 3, "and moves across it, row by row")
     }
 
-    func testGhostIsShiftedWithItsColourRotatedByTheDelay() throws {
+    func testGhostIsShiftedWithItsColorRotatedByTheDelay() throws {
         let input = texture { x, _ in (100..<116).contains(x) ? (0.8, 0.2, 0.2) : (0.5, 0.5, 0.5) }
         let delay = 3.0
         let px = try render(input, ["ghost_level": 0.5, "ghost_delay": delay])
@@ -137,22 +137,22 @@ final class GlitchStageTests: XCTestCase {
         let background = yiq(px, 180, y)
         let original = yiq(readback(input), 108, y)
         let gi = ghost.1 - background.1, gq = ghost.2 - background.2
-        XCTAssertGreaterThan((gi * gi + gq * gq).squareRoot(), 0.03, "the ghost carries colour")
+        XCTAssertGreaterThan((gi * gi + gq * gq).squareRoot(), 0.03, "the ghost carries color")
         let expected = atan2(original.2, original.1) - 2 * .pi * NTSCTiming.subcarrierMHz * delay
         var diff = (atan2(gq, gi) - expected).truncatingRemainder(dividingBy: 2 * .pi)
         if diff > .pi { diff -= 2 * .pi } else if diff < -.pi { diff += 2 * .pi }
         XCTAssertLessThan(abs(diff), 0.2, "hue rotated by 2π·fsc·τ (off by \(diff) rad)")
         // The ghost adds level × the bar's difference from its surroundings
-        // (red on mid-grey is darker in luma: 0.38 vs 0.50).
+        // (red on mid-gray is darker in luma: 0.38 vs 0.50).
         let barY = 0.299 * 0.8 + 0.587 * 0.2 + 0.114 * 0.2
         XCTAssertEqual(ghost.0 - background.0, 0.5 * (barY - 0.5), accuracy: 0.02,
                        "luma offset of half the bar's contrast")
     }
 
-    func testSlidingPictureKeepsItsColourButATornOneDoesNot() throws {
+    func testSlidingPictureKeepsItsColorButATornOneDoesNot() throws {
         // The burst gate follows the incoming sync through a standing phase
         // error, so a picture that slides with the horizontal hold stays in
-        // colour; when the loop slips cycles, it can't.
+        // color; when the loop slips cycles, it can't.
         let input = texture { x, _ in (x / 20) % 2 == 0 ? (0.9, 0.2, 0.2) : (0.2, 0.3, 0.9) }
         func saturation(_ px: [UInt8]) -> Double {
             var total = 0.0
@@ -165,10 +165,10 @@ final class GlitchStageTests: XCTestCase {
         }
         let reference = saturation(readback(input))
         let sliding = saturation(try render(input, ["horizontal_hold": 0.3]))
-        XCTAssertGreaterThan(sliding, reference * 0.7, "a sliding picture keeps its colour")
+        XCTAssertGreaterThan(sliding, reference * 0.7, "a sliding picture keeps its color")
     }
 
-    func testColourKillerRemovesChromaWithoutBurst() throws {
+    func testColorKillerRemovesChromaWithoutBurst() throws {
         let input = texture { x, _ in (x / 20) % 2 == 0 ? (0.9, 0.2, 0.2) : (0.2, 0.3, 0.9) }
         var plan = healthyPlan()
         for i in plan.rows.indices { plan.rows[i].burstScale = 0 }
@@ -177,7 +177,7 @@ final class GlitchStageTests: XCTestCase {
             (0..<W).map { x in let c = yiq(px, x, y); return (c.1 * c.1 + c.2 * c.2).squareRoot() }
                 .reduce(0, +) / Double(W)
         }
-        XCTAssertGreaterThan(saturation(2), 0.1, "colour holds for a few lines...")
+        XCTAssertGreaterThan(saturation(2), 0.1, "color holds for a few lines...")
         XCTAssertLessThan(saturation(A - 1), 0.01, "...then the killer switches it off")
     }
 

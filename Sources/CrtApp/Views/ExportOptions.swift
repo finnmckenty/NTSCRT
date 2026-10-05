@@ -1,8 +1,8 @@
 import SwiftUI
 import CrtCore
 
-// The export options, in one place: the Export popover and the Video
-// Feedback panel both show these views, bound to the same settings in
+// The export options, in one place: the Export popover and the Screen
+// Loop panel both show these views, bound to the same settings in
 // AppState, so an option added or changed here reaches both — and a
 // render made from either uses the same values.
 
@@ -131,7 +131,7 @@ struct ExportVideoOptions: View {
                     .font(.caption2).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("GIF is 256 colours and compresses noise badly, so size climbs fast. Estimate assumes a noisy look; clean ones come in under.")
+                Text("GIF is 256 colors and compresses noise badly, so size climbs fast. Estimate assumes a noisy look; clean ones come in under.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

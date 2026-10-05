@@ -52,7 +52,7 @@ final class ShaderBypassTests: XCTestCase {
         return (0..<h).map { y in (0..<w).map { x in Int(bytes[(y * w + x) * 4 + 1]) } }
     }
 
-    /// A whole-multiple output is a pure nearest-neighbour enlargement:
+    /// A whole-multiple output is a pure nearest-neighbor enlargement:
     /// every source pixel becomes a solid k×k block of its exact value.
     func testWholeMultipleIsExactNearestEnlargement() throws {
         let src = input(4, 3) { x, y in UInt8(20 + 17 * x + 50 * y) }
@@ -63,15 +63,15 @@ final class ShaderBypassTests: XCTestCase {
     }
 
     /// A fractional enlargement still gives every source pixel the same
-    /// size (block centres keep their exact value) and conserves brightness,
+    /// size (block centers keep their exact value) and conserves brightness,
     /// rather than making some columns a pixel wider than others.
-    func testFractionalEnlargementKeepsBlockCentresAndBrightness() throws {
+    func testFractionalEnlargementKeepsBlockCentersAndBrightness() throws {
         let src = input(8, 6) { x, y in (x + y) % 2 == 0 ? 40 : 200 }
         let out = try render(src, to: 28, 21)        // 3.5×
         for sy in 0..<6 { for sx in 0..<8 {
             let cx = Int((Double(sx) + 0.5) * 3.5), cy = Int((Double(sy) + 0.5) * 3.5)
             XCTAssertEqual(out[cy][cx], (sx + sy) % 2 == 0 ? 40 : 200, accuracy: 2,
-                           "centre of source pixel \(sx),\(sy)")
+                           "center of source pixel \(sx),\(sy)")
         } }
         let mean = Double(out.joined().reduce(0, +)) / Double(28 * 21)
         XCTAssertEqual(mean, 120, accuracy: 2, "box filter conserves brightness")

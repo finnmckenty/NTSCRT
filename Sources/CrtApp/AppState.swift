@@ -634,7 +634,7 @@ final class AppState {
     /// shader-on on one side, shader-off on the other.
     /// Chain-dirty: toggling on must populate the secondary target.
     var compareEnabled: Bool = false { didSet { markChainDirty() } }
-    /// Normalised x-position of the compare line, 0..1.
+    /// Normalized x-position of the compare line, 0..1.
     var compareLineX: Float = 0.5 { didSet { markViewDirty() } }
 
     /// Integer scale: size the render target to a whole-number multiple of
@@ -650,7 +650,7 @@ final class AppState {
             markViewDirty()
         }
     }
-    /// Pan offset in normalised image space (clamped so panning can't expose
+    /// Pan offset in normalized image space (clamped so panning can't expose
     /// beyond the source bounds at the current zoom).
     var panX: Float = 0.0 { didSet { markViewDirty() } }
     var panY: Float = 0.0 { didSet { markViewDirty() } }
@@ -857,11 +857,11 @@ final class AppState {
     }
 
     /// When the playhead sits exactly on a keyframe, editing any parameter
-    /// rewrites that keyframe — the After Effects / Premiere behaviour, so
+    /// rewrites that keyframe — the After Effects / Premiere behavior, so
     /// tweaking a look you've jumped to doesn't silently get discarded on
     /// the next scrub. Only ever fires for user edits, and only for an
     /// exact hit: at any other time the live values are interpolated, and
-    /// baking those into a keyframe would drag it toward its neighbour.
+    /// baking those into a keyframe would drag it toward its neighbor.
     private func autoKeyIfParked() {
         guard timelineEnabled, !suppressAutoKey, !timelinePlaying, !exportInProgress else { return }
         guard let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < parkedTolerance })
@@ -1117,7 +1117,7 @@ final class AppState {
 
     var exportLongEdge: Int = 1920
     var exportFormat: ExportFormat = .h264
-    /// GIF gets its own size and frame rate: it's a 256-colour, poorly
+    /// GIF gets its own size and frame rate: it's a 256-color, poorly
     /// compressing format, so the sizes that work for MP4 produce files
     /// nothing will accept (a 1080px 5s 30fps GIF of VHS noise is ~30 MB).
     var gifWidth: Int = 480

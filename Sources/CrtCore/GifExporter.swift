@@ -7,7 +7,7 @@ import CrtAppBridge
 
 /// Encodes the CRT pipeline's output as an animated GIF.
 ///
-/// GIF is a 256-colour, LZW-compressed format and our output is full-frame
+/// GIF is a 256-color, LZW-compressed format and our output is full-frame
 /// animated noise — close to its worst case — so files run large and the
 /// sensible sizes are small (measured: ~0.65–0.95 bytes per pixel per
 /// frame). `estimatedBytes` exposes that so the UI can warn before an

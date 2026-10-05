@@ -6,13 +6,13 @@ import Metal
 ///
 /// 1. `glitch_gate` (one thread per row): what the TV's burst gate sees —
 ///    the burst when the set is in lock, picture or blanking when it isn't.
-/// 2. `glitch_chroma` (one thread): the colour reference loop down the
-///    rows — 3.58 MHz oscillator phase, ACC gain, colour killer — the same
+/// 2. `glitch_chroma` (one thread): the color reference loop down the
+///    rows — 3.58 MHz oscillator phase, ACC gain, color killer — the same
 ///    recurrence `ChromaReference` runs on the CPU.
 /// 3. `glitch_compose` (one thread per pixel): reads the signal each screen
 ///    pixel was scanned from — picture, blanking, sync pulses, line-21
 ///    caption data — then adds the ghost, dropouts, hum and snow, and
-///    decodes colour against the row's reference.
+///    decodes color against the row's reference.
 ///
 /// Linear signal effects (ghost, hum, snow) are added after ntsc-rs has
 /// decoded the picture. For a linear decoder that is exact, not an
@@ -22,7 +22,7 @@ import Metal
 /// decoder would have given it.
 ///
 /// A healthy set in lock reproduces its input exactly: every pixel samples
-/// its own texel, and no colour maths runs.
+/// its own texel, and no color math runs.
 public final class GlitchStage {
 
     private let device: MTLDevice
@@ -170,7 +170,7 @@ public final class GlitchStage {
     constant float BROAD = 27.1;
     constant float2 BURST_DIR = float2(0.5446390350, -0.8386705679);
 
-    // ---- colour space (NTSC Y'IQ on the gamma-encoded picture) ----
+    // ---- color space (NTSC Y'IQ on the gamma-encoded picture) ----
     inline float3 rgb2yiq(float3 c) {
         return float3(0.299 * c.r + 0.587 * c.g + 0.114 * c.b,
                       0.596 * c.r - 0.274 * c.g - 0.322 * c.b,
@@ -303,7 +303,7 @@ public final class GlitchStage {
                 g += s.yiq.yz * U.pictureGain;
             }
         }
-        // Normalized so a centred gate (10 of its 16 samples on the burst)
+        // Normalized so a centered gate (10 of its 16 samples on the burst)
         // reads the burst at full amplitude.
         g *= (GATE_E - GATE_S) / ((BURST_E - BURST_S) * float(N));
         float n = rw.noiseIRE / 92.5 * U.gateNoise;
@@ -313,7 +313,7 @@ public final class GlitchStage {
         gate[y] = g;
     }
 
-    // ---- pass 2: the colour reference loop, top to bottom ----
+    // ---- pass 2: the color reference loop, top to bottom ----
     kernel void glitch_chroma(device const float2* gate [[buffer(0)]],
                               constant GlitchU& U [[buffer(1)]],
                               device float4* color [[buffer(2)]],
@@ -415,7 +415,7 @@ public final class GlitchStage {
 
         // Tape signal loss: past the FM threshold the deck's demodulator
         // outputs streaks instead of picture — black and white dashes a
-        // fraction of a microsecond to a couple long — and its colour
+        // fraction of a microsecond to a couple long — and its color
         // killer drops chroma with the signal.
         if (rw.tapeLoss > 0.0) {
             float seg = 0.5 + 1.6 * uni(U.seed, U.fieldIndex, gid.y, 201u);

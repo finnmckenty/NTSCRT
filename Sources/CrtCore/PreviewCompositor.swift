@@ -237,9 +237,9 @@ public final class PreviewCompositor {
         constexpr sampler sampL(filter::linear, address::clamp_to_edge);
         constexpr sampler sampN(filter::nearest, address::clamp_to_edge);
 
-        // Map the fragment to a target pixel, then normalise. Doing the
+        // Map the fragment to a target pixel, then normalize. Doing the
         // letterbox in pixel space with a whole-pixel offset keeps the
-        // sample on texel centres for any drawable size.
+        // sample on texel centers for any drawable size.
         float2 px = float2(in.uv.x * u.dstW - u.offX,
                            in.uv.y * u.dstH - u.offY);
         float2 uv = float2(px.x / u.tgtW, px.y / u.tgtH);
@@ -265,13 +265,13 @@ public final class PreviewCompositor {
         float4 b = u.useNearest != 0 ? secondary.sample(sampN, uv)
                                      : secondary.sample(sampL, uv);
 
-        float4 colour;
+        float4 color;
         if (u.compareEnabled != 0) {
-            colour = (in.uv.x < u.compareLineX) ? a : b;
+            color = (in.uv.x < u.compareLineX) ? a : b;
         } else {
-            colour = a;
+            color = a;
         }
-        return colour;
+        return color;
     }
     """
 }

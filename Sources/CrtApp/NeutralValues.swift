@@ -5,7 +5,7 @@ import CrtCore
 /// slider knob goes to. Decided per property:
 ///
 /// - strengths, amounts, weights and offsets: 0
-/// - multipliers (brightness, contrast, saturation, colour boost): 1
+/// - multipliers (brightness, contrast, saturation, color boost): 1
 /// - scale and "detail" controls: their minimum (smallest, smoothest effect)
 /// - geometry: flat (largest curvature radius, smallest corner and border)
 /// - beam widths: their maximum (fat beams leave the least scanline gap)

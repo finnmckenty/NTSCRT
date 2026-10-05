@@ -382,7 +382,7 @@ private struct ParamControl: View {
     }
 
     private func sliderView(title: String) -> some View {
-        // Sanitise bounds for SwiftUI's Slider preconditions.
+        // Sanitize bounds for SwiftUI's Slider preconditions.
         let lo = Double(param.minimum)
         let hiRaw = Double(param.maximum)
         let hi = hiRaw > lo ? hiRaw : lo + 1.0

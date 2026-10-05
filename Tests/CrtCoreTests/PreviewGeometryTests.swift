@@ -26,18 +26,18 @@ final class PreviewGeometryTests: XCTestCase {
         return right - left
     }
 
-    func testLetterboxOffsetIsWholePixelsAndCentred() {
+    func testLetterboxOffsetIsWholePixelsAndCentered() {
         for (dw, dh) in drawables {
             let (plan, g) = geometry(dw, dh, integer: true)
             XCTAssertEqual(g.targetWidth, plan.displayWidth)
             XCTAssertEqual(g.targetHeight, plan.displayHeight)
-            // Centred to within the one pixel an odd delta can't split.
+            // Centered to within the one pixel an odd delta can't split.
             XCTAssertTrue((0...1).contains(dw - g.targetWidth - 2 * g.offsetX), "\(dw)")
             XCTAssertTrue((0...1).contains(dh - g.targetHeight - 2 * g.offsetY), "\(dh)")
         }
     }
 
-    /// The banding bug: a half-pixel letterbox centre made nearest sampling
+    /// The banding bug: a half-pixel letterbox center made nearest sampling
     /// duplicate ~150 of 1280 rows. Every drawable row inside the display
     /// rect must map to its own texel row, in order.
     func testAtFitEachDisplayRowSamplesExactlyOneTexelRowInOrder() {

@@ -2,7 +2,7 @@
 # In-app check that every Export route follows the CRT on/off toggle.
 #
 # The exporter-level tests in the release gate (ExportShaderToggleTests)
-# prove the exporters honour `shaderEnabled`. What they can't see is whether
+# prove the exporters honor `shaderEnabled`. What they can't see is whether
 # the app's Export buttons pass the toggle along — and that wiring is exactly
 # where this bug (and the ignored Loop count before it) lived. This runs the
 # app's own settings builders and export methods, the ones the buttons call,

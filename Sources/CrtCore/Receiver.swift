@@ -11,7 +11,7 @@ public enum NTSCTiming {
     public static let burstEnd = 7.8
     /// The set's burst gate: a 4 µs window around the burst, keyed from its
     /// own horizontal flyback — so a horizontal phase error slides it off
-    /// the burst (colour fades, then the killer cuts in) and onto picture.
+    /// the burst (color fades, then the killer cuts in) and onto picture.
     public static let gateStart = 4.55
     public static let gateEnd = 8.55
     public static let activeStart = 9.4
@@ -19,10 +19,10 @@ public enum NTSCTiming {
     public static var activeEnd: Double { activeStart + activeLength }
     public static let equalizingPulse = 2.3
     public static let broadPulse = 27.1
-    public static let fieldRate = 60000.0 / 1001.0          // 59.94 Hz (colour)
+    public static let fieldRate = 60000.0 / 1001.0          // 59.94 Hz (color)
     public static let linesPerField = 262.5
     public static let subcarrierMHz = 315.0 / 88.0          // 3.579545
-    /// Colour burst direction in the decoder's I/Q plane: 180° on the B−Y
+    /// Color burst direction in the decoder's I/Q plane: 180° on the B−Y
     /// axis, which is (sin 33°, −cos 33°) in I/Q.
     public static let burstI = 0.5446390350150271
     public static let burstQ = -0.8386705679454240
@@ -106,14 +106,14 @@ public struct GlitchRow: Equatable {
     /// Fraction of the burst surviving tape signal loss.
     public var burstScale: Float
     /// Tape signal loss (0–1): past the FM threshold the picture gives way
-    /// to the demodulator's streaks, and the deck's colour killer drops
+    /// to the demodulator's streaks, and the deck's color killer drops
     /// chroma — unlike antenna snow, which adds to the picture.
     public var tapeLoss: Float = 0
     /// Where the burst gate sits relative to the scan line start (µs). The
     /// gate is keyed from a fast phase loop that follows the incoming sync,
     /// so it stays on the burst through a slow or standing phase error (a
-    /// sliding picture keeps its colour) but not through cycle slips (a torn
-    /// picture's colour goes wild).
+    /// sliding picture keeps its color) but not through cycle slips (a torn
+    /// picture's color goes wild).
     public var gateShift: Float = 0
     var pad1: Float = 0, pad2: Float = 0
 }
@@ -131,9 +131,9 @@ public struct GlitchFieldPlan {
     public var raster: ReceiverRaster
     public var rows: [GlitchRow]
     public var dropouts: [GlitchDropout]
-    /// Colour reference state entering the first visible row: the phase
+    /// Color reference state entering the first visible row: the phase
     /// error of the TV's 3.58 MHz oscillator (rad), the ACC gain, the
-    /// colour killer's integrator and its on/off state.
+    /// color killer's integrator and its on/off state.
     public var chromaPhase: Float
     public var chromaGain: Float
     public var killer: Float
@@ -382,7 +382,7 @@ public final class ReceiverSimulator {
         }
 
         // AFC: PI loop around a VCO of limited range, with a sinusoidal
-        // phase detector — the Adler-equation behaviour of real AFC and
+        // phase detector — the Adler-equation behavior of real AFC and
         // injection-locked oscillators. Its restoring force peaks a quarter
         // line off, so past the hold range the loop slips cycles at a beat
         // rate rising from zero as √(detuning): a few slow bars first, more
@@ -421,7 +421,7 @@ public final class ReceiverSimulator {
         vPhase += 1 + (next - theta) / H
         let period = Double(L) * (1 + k.vTotal)
         if vsync {
-            var e = vPhase / period - k.vCentre
+            var e = vPhase / period - k.vCenter
             e -= e.rounded()                    // nearest wrap, −½…½
             vPhase -= k.vLock * period * sin(2 * .pi * e)
         }
@@ -478,7 +478,7 @@ public final class ReceiverSimulator {
                 gateShift: Float(loggedGate(tvLine))))
         }
 
-        // Settle the colour reference over the blanking lines just above
+        // Settle the color reference over the blanking lines just above
         // the picture. Only blanking and burst can be under the gate there
         // when the set is locked; picture content (torn sets) is treated as
         // no burst — the visible rows then measure the real picture on GPU.
@@ -488,7 +488,7 @@ public final class ReceiverSimulator {
             let tvLine = first - Int64(w)
             // The burst gate is blanked during the set's own vertical
             // retrace, so the equalizing and sync lines (no burst) don't
-            // drag the colour loop off every field.
+            // drag the color loop off every field.
             if inRetrace(tvLine) { continue }
             let tau = Double(tvLine) * H + loggedTheta(tvLine)
             let (j, u0) = signalLine(at: tau)
@@ -636,7 +636,7 @@ public final class ReceiverSimulator {
     }
 
     /// Picture search: at n× the heads cross n−1 track boundaries per field.
-    /// Between tracks they read the guard band and the neighbouring
+    /// Between tracks they read the guard band and the neighboring
     /// azimuth's track — noise; on a track, picture. The bars drift as the
     /// heads' phase against the tracks slides. Returns the loss at line j and
     /// how many crossings precede it in the field (for the timing jumps).
@@ -765,7 +765,7 @@ public final class ReceiverSimulator {
 struct Knobs {
     let settings: GlitchSettings
     /// RF noise, IRE RMS. Signal strength maps linearly to a carrier-to-
-    /// noise ratio of 0–60 dB: snow shows below ~45 dB, colour fails below
+    /// noise ratio of 0–60 dB: snow shows below ~45 dB, color fails below
     /// ~20, sync below ~12, as on real sets.
     let sigma: Double
     /// Picture amplitude once the AGC runs out of gain (very weak signals).
@@ -775,10 +775,10 @@ struct Knobs {
     /// Its greatest pull per detected pulse, as a fraction of the field —
     /// which is also the lock range: 1.5%, beyond which the picture rolls.
     let vLock = 0.015
-    /// The set is aligned so that, at its centred hold, retrace starts at the
+    /// The set is aligned so that, at its centered hold, retrace starts at the
     /// vertical sync pulse despite the oscillator's built-in detuning — the
-    /// standing phase error that detuning would cause, cancelled.
-    let vCentre: Double
+    /// standing phase error that detuning would cause, canceled.
+    let vCenter: Double
     let vBeta: Double
     /// Horizontal oscillator's free-running offset per raster line.
     let hR: Double
@@ -797,7 +797,7 @@ struct Knobs {
     let captions: Bool
     /// Burst-key loop rate per raster line (~6 NTSC lines).
     let gateAlpha: Double
-    // Colour reference loop rates, per raster line.
+    // Color reference loop rates, per raster line.
     let chromaAlpha: Double
     let accGamma: Double
     let killerKappa: Double
@@ -808,7 +808,7 @@ struct Knobs {
         let strength = min(1, max(0, settings["signal_strength"]))
         // Carrier-to-noise ratio falls linearly from 38 dB to 0 across the
         // knob, so every part of its travel does something: faint snow just
-        // below 100%, heavy by 50%, colour and sync failing below ~30%,
+        // below 100%, heavy by 50%, color and sync failing below ~30%,
         // nothing but snow at 0. The last term takes the residual noise at
         // 100% to exactly zero.
         sigma = max(0, 100 * pow(10, -1.9 * strength) - 1.26 * pow(strength, 4))
@@ -821,12 +821,12 @@ struct Knobs {
         let vKnob = settings["vertical_hold"]
         let builtIn = 0.002
         vTotal = builtIn + (vKnob < 0 ? -1 : 1) * 0.10 * pow(abs(vKnob), 1.37)
-        vCentre = asin(builtIn / vLock) / (2 * .pi)
+        vCenter = asin(builtIn / vLock) / (2 * .pi)
         vBeta = 1 - exp(-1 / (1.5 * s))
         // Horizontal: the AFC is proportional, so any detuning shows as a
         // standing phase error — the picture slides. The knob curve is in two
         // parts: up to the hold-in edge (~35%) the slide grows gently (under
-        // 2 µs to ~15%; the burst gate slides off the burst — colour drops
+        // 2 µs to ~15%; the burst gate slides off the burst — color drops
         // out — around 20%); past it, cycle slipping starts with one or two
         // slow bars and builds to ~11.
         let hKnob = abs(settings["horizontal_hold"])
@@ -856,9 +856,9 @@ struct Knobs {
     }
 }
 
-/// The TV's colour reference: a 3.58 MHz oscillator phase-locked to the
+/// The TV's color reference: a 3.58 MHz oscillator phase-locked to the
 /// burst seen through the burst gate, an ACC amplifier normalizing chroma to
-/// the burst's amplitude, and a colour killer that switches chroma off when
+/// the burst's amplitude, and a color killer that switches chroma off when
 /// no burst is found. The same recurrence runs on the GPU for visible rows.
 struct ChromaReference {
     var phase = 0.0

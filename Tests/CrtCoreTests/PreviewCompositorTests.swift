@@ -68,7 +68,7 @@ final class PreviewCompositorTests: XCTestCase {
         cb.commit()
         cb.waitUntilCompleted()
 
-        // Luminance down the centre column.
+        // Luminance down the center column.
         var bytes = [UInt8](repeating: 0, count: dw * dh * 4)
         dst.getBytes(&bytes, bytesPerRow: dw * 4, from: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0)
         let x = dw / 2

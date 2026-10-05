@@ -209,7 +209,7 @@ struct TimelineBar: View {
         }
         // The knob makes this stack `knob` wide, so the offset has to back
         // out half of that — otherwise the line lands right of the playhead
-        // time and looks off-centre against a keyframe diamond.
+        // time and looks off-center against a keyframe diamond.
         .frame(width: knob)
         .offset(x: CGFloat(state.playheadT) * w - knob / 2)
         .allowsHitTesting(false)
@@ -253,12 +253,12 @@ struct TimelineBar: View {
     }
 
     /// Easing dropdown under each keyframe. Chips stagger onto a second row
-    /// when neighbours are too close to sit side by side.
+    /// when neighbors are too close to sit side by side.
     ///
-    /// The chip lives in a fixed-width container so it centres on the
+    /// The chip lives in a fixed-width container so it centers on the
     /// keyframe regardless of the label ("Linear" vs "Ease in-out"), and
     /// draws its own chevron — the system menu indicator sits at the
-    /// trailing edge and would throw the centring off.
+    /// trailing edge and would throw the centering off.
     private func easingChip(for key: Keyframe, width: CGFloat, row: Int) -> some View {
         let y = rulerHeight + trackHeight + chipTopGap + CGFloat(row) * chipRowHeight
         return Menu {
@@ -285,7 +285,7 @@ struct TimelineBar: View {
                         in: RoundedRectangle(cornerRadius: 5))
         }
         // .borderlessButton discards a custom label (it renders its own
-        // title + leading indicator), which breaks both the centring and
+        // title + leading indicator), which breaks both the centering and
         // the chip styling — .button keeps the label exactly as authored.
         .menuStyle(.button)
         .buttonStyle(.plain)

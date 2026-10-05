@@ -31,15 +31,15 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "signal_strength", label: "Signal strength", group: .reception,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 1,
-            help: "Antenna signal level. Lowering it brings snow first, then flickering and lost colour as the colour burst drowns, then broken sync as the sync pulses do — the order a real set fails in."),
+            help: "Antenna signal level. Lowering it brings snow first, then flickering and lost color as the color burst drowns, then broken sync as the sync pulses do — the order a real set fails in."),
         GlitchParam(
             id: "vertical_hold", label: "Vertical hold", group: .reception,
             kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "The vertical oscillator's free-running speed. Near the centre the sync pulses pull it into lock; past the lock range the picture rolls, with the blanking bar crossing the screen."),
+            help: "The vertical oscillator's free-running speed. Near the center the sync pulses pull it into lock; past the lock range the picture rolls, with the blanking bar crossing the screen."),
         GlitchParam(
             id: "horizontal_hold", label: "Horizontal hold", group: .reception,
             kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "The horizontal oscillator's free-running speed. Off centre the picture slides sideways as the AFC strains to hold it; further and lock breaks — the picture tears into diagonal bands and the colour goes wild."),
+            help: "The horizontal oscillator's free-running speed. Off center the picture slides sideways as the AFC strains to hold it; further and lock breaks — the picture tears into diagonal bands and the color goes wild."),
         GlitchParam(
             id: "afc_speed", label: "AFC response", group: .reception,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.5,
@@ -51,7 +51,7 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "ghost_level", label: "Ghost", group: .reception,
             kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "A reflected copy of the signal arriving late (multipath). Negative values invert it, as reflections often did. Its colour shifts with the delay, because the delayed colour carrier arrives at a different phase."),
+            help: "A reflected copy of the signal arriving late (multipath). Negative values invert it, as reflections often did. Its color shifts with the delay, because the delayed color carrier arrives at a different phase."),
         GlitchParam(
             id: "ghost_delay", label: "Ghost delay", group: .reception,
             kind: .slider(min: 0.2, max: 12, percent: false, unit: "µs"), defaultValue: 2,
@@ -59,7 +59,7 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "hum", label: "Hum", group: .reception,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Mains hum leaking into the video: light and dark bars that drift slowly up the picture (60 Hz hum against the 59.94 Hz colour field rate), bending the picture where the sync separator is pulled off."),
+            help: "Mains hum leaking into the video: light and dark bars that drift slowly up the picture (60 Hz hum against the 59.94 Hz color field rate), bending the picture where the sync separator is pulled off."),
         GlitchParam(
             id: "closed_captions", label: "Caption data", group: .reception,
             kind: .toggle, defaultValue: 1,

@@ -7,7 +7,7 @@ import CrtAppBridge
 /// output with hard pixel edges, the way the preview shows that state.
 ///
 /// An output that is a whole multiple of the input is a plain nearest-
-/// neighbour enlargement. Anything else is enlarged (nearest) to the next
+/// neighbor enlargement. Anything else is enlarged (nearest) to the next
 /// whole multiple and box-filtered down, so every source pixel keeps the same
 /// size instead of some columns coming out one pixel wider than others —
 /// the same render-big-then-integrate rule the shader path uses.

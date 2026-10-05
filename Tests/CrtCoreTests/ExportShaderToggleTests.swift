@@ -6,10 +6,10 @@ import CrtAppBridge
 @testable import CrtCore
 
 /// Every export route must follow the CRT toggle. None of them did: the
-/// preview honoured it, but PNG, MP4/MOV (from a clip or a still) and GIF
+/// preview honored it, but PNG, MP4/MOV (from a clip or a still) and GIF
 /// (from either) all ran the shader regardless.
 ///
-/// These drive the real exporters with the real shader on a flat grey
+/// These drive the real exporters with the real shader on a flat gray
 /// source, where the only thing that can put a row-to-row pattern in the
 /// output is the shader's scanlines — so "on" must show them and "off" must
 /// be flat, whatever the codec does to the pixels.
@@ -53,7 +53,7 @@ final class ExportShaderToggleTests: XCTestCase {
 
     // MARK: - helpers
 
-    private func flatGreySource() -> MTLTexture {
+    private func flatGraySource() -> MTLTexture {
         let d = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: sourceSize.w, height: sourceSize.h, mipmapped: false)
         d.usage = [.shaderRead]
@@ -99,7 +99,7 @@ final class ExportShaderToggleTests: XCTestCase {
         XCTAssertLessThan(offMod, 1.5, "\(route): shader OFF must not (got \(offMod))")
     }
 
-    /// A short flat-grey clip to feed the video-source routes.
+    /// A short flat-gray clip to feed the video-source routes.
     private func makeSourceClip() async throws -> VideoSource {
         let settings = Mp4Exporter.Settings(
             outputURL: tmp.appendingPathComponent("source-clip.mp4"),
@@ -107,7 +107,7 @@ final class ExportShaderToggleTests: XCTestCase {
             downscale: nil, presetPath: presetPath,
             shaderEnabled: false, glitch: nil, codec: .h264, averageBitrate: 8_000_000)
         try await Mp4Exporter(context: context).exportStill(
-            source: flatGreySource(), totalFrames: 6, fps: 12,
+            source: flatGraySource(), totalFrames: 6, fps: 12,
             paramValues: [:], settings: settings, progress: { _ in })
         return try await VideoSource(url: settings.outputURL, device: context.device)
     }
@@ -128,7 +128,7 @@ final class ExportShaderToggleTests: XCTestCase {
             try ExportFrame.encode(into: cb, pipeline: pipeline, chain: chain,
                                    bypass: ShaderBypass(context: context), supersample: nil,
                                    glitch: nil,
-                                   inputTexture: flatGreySource(), outputTexture: target,
+                                   inputTexture: flatGraySource(), outputTexture: target,
                                    downscale: downscale, frameCount: 1)
             let blit = try XCTUnwrap(cb.makeBlitCommandEncoder())
             blit.copy(from: target, to: staging)
@@ -147,7 +147,7 @@ final class ExportShaderToggleTests: XCTestCase {
         for shader in [true, false] {
             let settings = mp4Settings("still-\(shader).mp4", shader: shader)
             try await Mp4Exporter(context: context).exportStill(
-                source: flatGreySource(), totalFrames: 4, fps: 12,
+                source: flatGraySource(), totalFrames: 4, fps: 12,
                 paramValues: [:], settings: settings, progress: { _ in })
             frames[shader] = try await firstFrame(of: settings.outputURL)
         }
@@ -171,7 +171,7 @@ final class ExportShaderToggleTests: XCTestCase {
         for shader in [true, false] {
             let settings = gifSettings("still-\(shader).gif", shader: shader)
             try await GifExporter(context: context).exportStill(
-                source: flatGreySource(), totalFrames: 3,
+                source: flatGraySource(), totalFrames: 3,
                 paramValues: [:], settings: settings, progress: { _ in })
             frames[shader] = try await firstFrame(of: settings.outputURL)
         }

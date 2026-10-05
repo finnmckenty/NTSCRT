@@ -3,7 +3,7 @@ import Foundation
 /// The composite's drawable → texture mapping as a pure value, so the
 /// invariants each past preview bug violated can be checked without a GPU:
 ///
-/// - the letterbox offset is a whole number of pixels (a half-pixel centre
+/// - the letterbox offset is a whole number of pixels (a half-pixel center
 ///   put nearest samples on texel boundaries and duplicated ~150 rows);
 /// - the framing reference is the *display* size whichever texture is
 ///   sampled, so zoom is continuous and toggling integer scale never
@@ -69,7 +69,7 @@ public struct PreviewGeometry: Equatable {
     }
 
     /// Row of a `textureHeight`-row texture that nearest sampling picks for
-    /// drawable row `py` (at the horizontal centre).
+    /// drawable row `py` (at the horizontal center).
     public func texelRow(py: Int, textureHeight: Int) -> Int? {
         guard let uv = uv(px: drawableWidth / 2, py: py) else { return nil }
         return min(textureHeight - 1, Int(uv.y * Float(textureHeight)))

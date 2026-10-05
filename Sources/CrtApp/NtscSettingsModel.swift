@@ -79,7 +79,7 @@ struct NtscSetting: Identifiable {
             out.removeAll { chroma.contains($0.name) }
             out.insert(NtscSetting(name: "chroma_distortion",
                                    label: "Chroma distortion",
-                                   description: "Phase and delay errors in the colour subcarrier.",
+                                   description: "Phase and delay errors in the color subcarrier.",
                                    kind: .section(children: members)),
                        at: min(anchor, out.count))
         }

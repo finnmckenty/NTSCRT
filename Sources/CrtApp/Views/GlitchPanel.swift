@@ -83,7 +83,7 @@ private struct GlitchControl: View {
         switch param.kind {
         case .toggle:
             // Dropout compensation only has something to do once there are
-            // dropouts; greyed out until then, like the CRT panel's gates.
+            // dropouts; grayed out until then, like the CRT panel's gates.
             let idle = param.id == "dropout_compensation" && state.glitchSettings["dropouts"] == 0
             Toggle(isOn: Binding(get: { value.wrappedValue >= 0.5 },
                                  set: { value.wrappedValue = $0 ? 1 : 0 })) {

@@ -86,7 +86,7 @@ final class ReceiverSimulatorTests: XCTestCase {
         return out
     }
 
-    func testVerticalHoldNearCentreLocksAndSlides() {
+    func testVerticalHoldNearCenterLocksAndSlides() {
         // In lock the phase-locked oscillator holds with a standing phase
         // error: the picture slides vertically as the hold is turned, then
         // starts to roll past ±~25%.
@@ -99,7 +99,7 @@ final class ReceiverSimulatorTests: XCTestCase {
             if shift > L / 2 { shift -= L } else if shift < -L / 2 { shift += L }
             shifts[knob] = shift
         }
-        XCTAssertEqual(shifts[0], 0, "centred: normal framing")
+        XCTAssertEqual(shifts[0], 0, "centered: normal framing")
         XCTAssertGreaterThan(abs(shifts[0.05]!), 1, "the picture slides from the first few percent")
         XCTAssertGreaterThan(abs(shifts[0.15]!), abs(shifts[0.05]!), "further the more it's turned")
         XCTAssertTrue((shifts[0.15]! > 0) != (shifts[-0.15]! > 0), "opposite ways for opposite settings")
@@ -135,7 +135,7 @@ final class ReceiverSimulatorTests: XCTestCase {
 
     // MARK: - horizontal hold
 
-    func testHorizontalHoldCentredIsExact() {
+    func testHorizontalHoldCenteredIsExact() {
         let p = plans(["horizontal_hold": 0.0])[0]
         XCTAssertTrue(p.rows.allSatisfy { $0.u0 == 0 })
     }
@@ -300,9 +300,9 @@ extension ReceiverSimulatorTests {
         XCTAssertTrue(noisyRows(0).isEmpty, "tracked: nothing visible")
         let mild = noisyRows(0.3), bad = noisyRows(0.9)
         XCTAssertFalse(bad.isEmpty, "bad tracking shows a noise band")
-        let mildCentre = mild.isEmpty ? Double(raster.activeLines) : Double(mild.reduce(0, +)) / Double(mild.count)
-        let badCentre = Double(bad.reduce(0, +)) / Double(bad.count)
-        XCTAssertLessThan(badCentre, mildCentre, "it climbs as the error grows")
+        let mildCenter = mild.isEmpty ? Double(raster.activeLines) : Double(mild.reduce(0, +)) / Double(mild.count)
+        let badCenter = Double(bad.reduce(0, +)) / Double(bad.count)
+        XCTAssertLessThan(badCenter, mildCenter, "it climbs as the error grows")
         XCTAssertGreaterThan(bad.count, mild.count, "and widens")
     }
 }
