@@ -66,13 +66,38 @@ extension AppState {
     var howlaroundSettings: HowlaroundSettings { HowlaroundSettings(values: howlaroundValues) }
 
     func setHowlaroundValue(_ id: String, _ value: Double) {
-        howlaroundValues[id] = value
+        setHowlaroundValues([id: value])
+    }
+
+    /// Several knobs at once (the preview's dots set up to four), with one
+    /// new draft — and none when nothing changed.
+    func setHowlaroundValues(_ values: [String: Double]) {
+        guard values.contains(where: { howlaroundValues[$0.key] != $0.value }) else { return }
+        howlaroundValues.merge(values) { _, new in new }
         scheduleHowlaroundDraft()
     }
 
     func resetHowlaround() {
         howlaroundValues = HowlaroundParam.defaultValues
         scheduleHowlaroundDraft()
+    }
+
+    /// The whole render's length in seconds: what a move spans.
+    var howlRenderLength: Double { videoSource?.durationSeconds ?? howlaroundSeconds }
+
+    /// The vanishing point and drift in words, under the preview: "Vanishing
+    /// point 20% left, 22% up · drifts to 10% right and back".
+    var howlaroundReadout: String {
+        let s = howlaroundSettings
+        guard s.tvInView else { return "Zoom is 0%: the camera doesn't see the TV, so there's no tunnel." }
+        let start = HowlaroundParam.describe(s.vanishingPoint)
+        var text = "Vanishing point " + (start == "the middle" ? "in the middle" : start)
+        if s.driftTarget == s.vanishingPoint {
+            text += " · no drift"
+        } else {
+            text += " · drifts to " + HowlaroundParam.describe(s.driftTarget) + (s.loop ? " and back" : "")
+        }
+        return text
     }
 
     /// How many copies the current framing shows (nil = they grow instead).
@@ -192,7 +217,7 @@ extension AppState {
     }
 
     /// Re-render the draft shortly after the knobs stop moving. A draft still
-    /// running is cancelled and allowed to wind down first: two renders must
+    /// running is canceled and allowed to wind down first: two renders must
     /// never drive the shared Metal queue (and librashader) at once.
     func scheduleHowlaroundDraft(delay: Duration = .milliseconds(350)) {
         guard sourceTexture != nil || videoSource != nil else { return }
@@ -271,7 +296,7 @@ extension AppState {
                 self.howlLastOutput = url
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: url)
-                self.howlRenderStatus = "Render cancelled"
+                self.howlRenderStatus = "Render canceled"
             } catch {
                 self.howlRenderStatus = "Render failed: \(error.localizedDescription)"
             }
@@ -290,7 +315,9 @@ extension AppState {
     // MARK: presets (their own folder — FeedbackPresets)
 
     func saveFeedbackPreset(to url: URL) throws {
-        var dict: [String: Any] = ["kind": FeedbackPresets.kind, "version": 1, "values": howlaroundValues]
+        // Version 2: the American ids and the drift as a line (see
+        // HowlaroundParam.migrated, which reads version 1 too).
+        var dict: [String: Any] = ["kind": FeedbackPresets.kind, "version": 2, "values": howlaroundValues]
         if videoSource == nil { dict["seconds"] = howlaroundSeconds }
         let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url)
@@ -304,7 +331,7 @@ extension AppState {
             throw NSError(domain: "VideoFeedback", code: 3, userInfo: [NSLocalizedDescriptionKey:
                 "Not a Screen Loop preset. Look presets load from the toolbar's Preset menu."])
         }
-        howlaroundValues = HowlaroundParam.defaultValues.merging(values) { _, new in new }
+        howlaroundValues = HowlaroundParam.defaultValues.merging(HowlaroundParam.migrated(values)) { _, new in new }
         if let seconds = dict["seconds"] as? Double { howlaroundSeconds = min(60, max(0.5, seconds)) }
         scheduleHowlaroundDraft()
     }

@@ -40,7 +40,7 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 // Preserve source aspect ratio: PreviewView gets a frame
-                // matching the source's aspect, centred in the available
+                // matching the source's aspect, centered in the available
                 // space. The view palette floats over the letterbox area and
                 // fades out when the pointer goes idle.
                 ZStack {
@@ -142,7 +142,7 @@ struct ContentView: View {
                 || env["CRT_HOWL_RENDER"] != nil || env["CRT_HOWL_DRAFT_CHECK"] != nil
                 || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1"
                 || env["CRT_FEEDBACK_PRESET_CHECK"] != nil
-                || env["CRT_FIELD_FOCUS_CHECK"] != nil else { return }
+                || env["CRT_FIELD_FOCUS_CHECK"] != nil || env["CRT_PAD_E2E"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -183,6 +183,16 @@ struct ContentView: View {
                 let kv = pair.split(separator: "=", maxSplits: 1)
                 if kv.count == 2, let v = Double(kv[1]) { state.setGlitchValue(String(kv[0]), v) }
             }
+        }
+        // CRT_HOWL="zoom=0.8,center_x=0.1" sets Screen Loop knobs for the
+        // other Screen Loop hooks (old ids and the old drift are read too).
+        if let pairs = env["CRT_HOWL"] {
+            var values: [String: Double] = [:]
+            for pair in pairs.split(separator: ",") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                if kv.count == 2, let v = Double(kv[1]) { values[String(kv[0])] = v }
+            }
+            state.howlaroundValues.merge(HowlaroundParam.migrated(values)) { _, new in new }
         }
         if env["CRT_SHOW_HOWL"] == "1" { showHowlaround = true }
         // CRT_FIELD_FOCUS_CHECK=1: a number field that has keyboard focus
@@ -231,6 +241,174 @@ struct ContentView: View {
             print(failures == 0 ? "FIELDFOCUS-PASS" : "FIELDFOCUS-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
+        // CRT_PAD_E2E=1: the vanishing-point dots on the real panel, driven
+        // by mouse and key events through AppKit's event queue (the path a
+        // mouse takes) over the real draft player: drag the dot, pull the
+        // ring out of it, drag the arrow, nudge with the arrow keys, snap the
+        // ring back, double-click each — checking the stored settings after
+        // every step, and that plain clicks move nothing.
+        if env["CRT_PAD_E2E"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("PADE2E \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            state.howlaroundValues = HowlaroundParam.defaultValues
+            // Launched from a shell the app can't come to the front, so its
+            // window isn't key — where AppKit spends a click on bringing the
+            // window forward unless the view takes first clicks.
+            final class FirstClickHost<Content: View>: NSHostingView<Content> {
+                override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+            }
+            let host = FirstClickHost(rootView: HowlaroundPanel().environment(state))
+            host.frame = CGRect(x: 0, y: 0, width: 1040, height: 700)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView = host
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard VanishingPointPad.lastPad != nil else {
+                print("PADE2E FAIL the pad isn't drawn"); exit(1)
+            }
+            print("PADE2E window key: \(window.isKeyWindow), pad frame \(VanishingPointPad.lastPad!.frame.integral)")
+            var pad: HowlaroundPad { VanishingPointPad.lastPad! }
+
+            var s: HowlaroundSettings { state.howlaroundSettings }
+            /// A point of the pad in the window's coordinates. SwiftUI's global
+            /// space is the whole window's, title bar included, top down.
+            func windowPoint(_ p: CGPoint) -> NSPoint {
+                let g = VanishingPointPad.lastFrame
+                return NSPoint(x: g.minX + p.x, y: window.frame.height - (g.minY + p.y))
+            }
+            func deliver(_ e: NSEvent) {
+                // Posted through the event queue when the window is key; handed
+                // to it directly when it isn't (the queue routes keys to the key window).
+                if window.isKeyWindow { NSApp.postEvent(e, atStart: false) } else { window.sendEvent(e) }
+            }
+            func mouse(_ type: NSEvent.EventType, _ p: CGPoint, clicks: Int = 1) {
+                deliver(NSEvent.mouseEvent(with: type, location: windowPoint(p), modifierFlags: [],
+                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                           clickCount: clicks, pressure: type == .leftMouseUp ? 0 : 1)!)
+            }
+            func click(_ p: CGPoint) async {
+                mouse(.leftMouseDown, p); mouse(.leftMouseUp, p)
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            func drag(from a: CGPoint, by d: CGSize) async {
+                mouse(.leftMouseDown, a)
+                try? await Task.sleep(for: .milliseconds(40))
+                for i in 1...12 {
+                    let f = CGFloat(i) / 12
+                    mouse(.leftMouseDragged, CGPoint(x: a.x + d.width * f, y: a.y + d.height * f))
+                    try? await Task.sleep(for: .milliseconds(16))
+                }
+                mouse(.leftMouseUp, CGPoint(x: a.x + d.width, y: a.y + d.height))
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            func doubleClick(_ p: CGPoint) async {
+                mouse(.leftMouseDown, p, clicks: 1); mouse(.leftMouseUp, p, clicks: 1)
+                mouse(.leftMouseDown, p, clicks: 2); mouse(.leftMouseUp, p, clicks: 2)
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+            /// An arrow key: 123 left, 124 right, 125 down, 126 up.
+            func arrow(_ code: UInt16, shift: Bool = false) async {
+                let scalar: UInt32 = [123: 0xF702, 124: 0xF703, 125: 0xF701, 126: 0xF700][code]!
+                let chars = String(Character(Unicode.Scalar(scalar)!))
+                for type in [NSEvent.EventType.keyDown, .keyUp] {
+                    deliver(NSEvent.keyEvent(with: type, location: .zero,
+                                             modifierFlags: shift ? [.shift, .numericPad, .function] : [.numericPad, .function],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             characters: chars, charactersIgnoringModifiers: chars,
+                                             isARepeat: false, keyCode: code)!)
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            func near(_ a: Double, _ b: Double, _ tolerance: Double = 0.004) -> Bool { abs(a - b) <= tolerance }
+            func at(_ p: SIMD2<Double>) -> String { String(format: "(%.4f, %.4f)", p.x, p.y) }
+            let w = pad.frame.width, h = pad.frame.height
+
+            var before = state.howlaroundValues
+            await arrow(124)
+            check("before any dot is clicked, an arrow key moves nothing", state.howlaroundValues == before)
+            await click(pad.startPoint)
+            check("a click on the dot moves nothing", state.howlaroundValues == before)
+
+            await drag(from: pad.startPoint, by: CGSize(width: w * 0.1, height: h * 0.1))
+            check("dragging the dot moves the vanishing point",
+                  near(s["center_x"], -0.1) && near(s["center_y"], -0.12), at(s.vanishingPoint))
+            check("…and with no drift, the ring comes along", s.driftTarget == s.vanishingPoint)
+
+            // The ring sits round the dot: grab it 11 points out from the middle.
+            await drag(from: CGPoint(x: pad.startPoint.x + 11, y: pad.startPoint.y),
+                       by: CGSize(width: w * 0.3, height: -h * 0.2))
+            check("pulling the ring out of the dot makes a drift",
+                  near(s["drift_x"], 0.3) && near(s["drift_y"], -0.2),
+                  String(format: "drift (%.4f, %.4f)", s["drift_x"], s["drift_y"]))
+            check("…and leaves the vanishing point where it was",
+                  near(s["center_x"], -0.1) && near(s["center_y"], -0.12), at(s.vanishingPoint))
+
+            var end = s.driftTarget
+            await drag(from: pad.startPoint, by: CGSize(width: -w * 0.05, height: 0))
+            check("dragging the dot now leaves the ring where it is",
+                  near(s.driftTarget.x, end.x, 1e-9) && near(s.driftTarget.y, end.y, 1e-9)
+                      && near(s["center_x"], -0.15), "\(at(s.vanishingPoint)) → \(at(s.driftTarget))")
+
+            var start = s.vanishingPoint
+            end = s.driftTarget
+            let middle = CGPoint(x: (pad.startPoint.x + pad.endPoint.x) / 2, y: (pad.startPoint.y + pad.endPoint.y) / 2)
+            await drag(from: middle, by: CGSize(width: 0, height: h * 0.1))
+            check("dragging the arrow moves both",
+                  near(s.vanishingPoint.y, start.y + 0.1) && near(s.driftTarget.y, end.y + 0.1)
+                      && near(s.vanishingPoint.x, start.x, 1e-9), "\(at(s.vanishingPoint)) → \(at(s.driftTarget))")
+
+            start = s.vanishingPoint
+            await arrow(124)
+            check("the right arrow key then nudges both 1%",
+                  near(s.vanishingPoint.x, start.x + 0.01, 1e-9) && near(s.driftTarget.x - s.vanishingPoint.x, 0.35),
+                  at(s.vanishingPoint))
+
+            await click(pad.endPoint)
+            end = s.driftTarget
+            await arrow(126, shift: true)
+            check("after clicking the ring, Shift-up nudges it 10% up",
+                  near(s.driftTarget.y, end.y - 0.1, 1e-9), "\(at(end)) → \(at(s.driftTarget))")
+
+            await drag(from: pad.endPoint, by: CGSize(width: pad.startPoint.x - pad.endPoint.x + 6,
+                                                      height: pad.startPoint.y - pad.endPoint.y - 4))
+            check("dragging the ring back near the dot lands on it: no drift",
+                  s["drift_x"] == 0 && s["drift_y"] == 0, String(format: "drift (%.4f, %.4f)", s["drift_x"], s["drift_y"]))
+
+            await drag(from: CGPoint(x: pad.startPoint.x, y: pad.startPoint.y - 12), by: CGSize(width: -w * 0.2, height: 0))
+            check("pulled out again from the ring's top", near(s["drift_x"], -0.2), String(format: "drift_x %.4f", s["drift_x"]))
+            await doubleClick(pad.endPoint)
+            check("double-clicking the ring removes the drift", s["drift_x"] == 0 && s["drift_y"] == 0,
+                  String(format: "drift (%.4f, %.4f)", s["drift_x"], s["drift_y"]))
+
+            // In the picture's corner the dot reaches past it (over the
+            // letterbox, or the text below a picture that fills the height),
+            // and can be grabbed there.
+            state.setHowlaroundValues(["center_x": 0.5, "center_y": 0.5])
+            try? await Task.sleep(for: .milliseconds(300))
+            await drag(from: CGPoint(x: pad.startPoint.x + 4, y: pad.startPoint.y + 4),
+                       by: CGSize(width: -w * 0.2, height: -h * 0.2))
+            check("a dot in the corner can be grabbed from outside the picture",
+                  near(s["center_x"], 0.3) && near(s["center_y"], 0.3), at(s.vanishingPoint))
+
+            await doubleClick(pad.startPoint)
+            check("double-clicking the dot sends the vanishing point to the middle",
+                  s.vanishingPoint == .zero && s.driftTarget == .zero, at(s.vanishingPoint))
+
+            before = state.howlaroundValues
+            await click(CGPoint(x: pad.frame.maxX - 30, y: pad.frame.minY + 30))
+            check("a click elsewhere on the picture moves nothing", state.howlaroundValues == before)
+            check("the readout says where things are",
+                  state.howlaroundReadout == "Vanishing point in the middle · no drift", state.howlaroundReadout)
+            window.orderOut(nil)
+            print(failures == 0 ? "PADE2E-PASS" : "PADE2E-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         // CRT_FEEDBACK_PRESET_CHECK=1: a Screen Loop preset saves and loads
         // back exactly, and the look presets refuse one with a pointer to the
         // panel (the two kinds live apart).
@@ -251,6 +429,22 @@ struct ContentView: View {
             do { try state.loadFeedbackPreset(from: url) } catch { check("load", false, "\(error)") }
             check("values come back exactly", state.howlaroundValues == wanted)
             check("a still's length comes back", state.howlaroundSeconds == 7.5)
+            // A preset saved by 0.13: British ids, the drift as distance and
+            // direction. It loads into today's settings with the same move.
+            let old = FileManager.default.temporaryDirectory.appendingPathComponent("fb-preset-v1.json")
+            let v1 = #"{"kind": "ntscrt-video-feedback", "version": 1, "values": {"centre_x": -0.5, "centre_y": -0.5, "colour_drift": -0.49, "drift": 0.25, "drift_dir": 90, "zoom": 0.63}}"#
+            try? v1.data(using: .utf8)?.write(to: old)
+            do { try state.loadFeedbackPreset(from: old) } catch { check("load a 0.13 preset", false, "\(error)") }
+            let loaded = state.howlaroundValues
+            check("a 0.13 preset loads into today's ids",
+                  loaded["center_x"] == -0.5 && loaded["center_y"] == -0.5 && loaded["color_drift"] == -0.49
+                      && loaded["zoom"] == 0.63
+                      && ["centre_x", "centre_y", "colour_drift", "drift", "drift_dir"].allSatisfy { loaded[$0] == nil },
+                  "\(loaded.filter { $0.key.contains("c") || $0.key.contains("drift") })")
+            check("…with its drift as a line (25% up)",
+                  abs((loaded["drift_x"] ?? 9)) < 1e-12 && abs((loaded["drift_y"] ?? 9) + 0.25) < 1e-12,
+                  "drift_x \(loaded["drift_x"] ?? .nan), drift_y \(loaded["drift_y"] ?? .nan)")
+            try? FileManager.default.removeItem(at: old)
             do {
                 try state.loadLook(from: url)
                 check("the look presets refuse a Screen Loop preset", false)
@@ -337,16 +531,10 @@ struct ContentView: View {
             print(failures == 0 ? "HOWLDRAFT-PASS" : "HOWLDRAFT-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
-        // CRT_HOWL="zoom=0.8,roll=10" sets howlaround knobs; CRT_HOWL_RENDER=
-        // <out.mp4|out.gif> renders one through the panel's own render call
-        // and exits (CRT_HOWL_DRAFT=1: the draft's length and size instead).
+        // CRT_HOWL_RENDER=<out.mp4|out.gif> renders a howlaround (knobs from
+        // CRT_HOWL) through the panel's own render call and exits
+        // (CRT_HOWL_DRAFT=1: the draft's length and size instead).
         if let out = env["CRT_HOWL_RENDER"] {
-            if let pairs = env["CRT_HOWL"] {
-                for pair in pairs.split(separator: ",") {
-                    let kv = pair.split(separator: "=", maxSplits: 1)
-                    if kv.count == 2, let v = Double(kv[1]) { state.howlaroundValues[String(kv[0])] = v }
-                }
-            }
             if let secs = env["CRT_HOWL_SECONDS"].flatMap(Double.init) { state.howlaroundSeconds = secs }
             let draft = env["CRT_HOWL_DRAFT"] == "1"
             let gif = out.hasSuffix(".gif")
@@ -421,7 +609,7 @@ struct ContentView: View {
         }
         // CRT_PLAY_FRAME_CHECK=<n>: play to frame n, then check that the
         // frame it decoded matches the SEEKED frame n more closely than its
-        // neighbours. Compared by coarse luminance signature, not bytes: the
+        // neighbors. Compared by coarse luminance signature, not bytes: the
         // seek path renders via CGImage/sRGB while sequential decode hands
         // back raw BGRA, so identical frames aren't byte-identical.
         if let target = env["CRT_PLAY_FRAME_CHECK"].flatMap(Int.init) {
@@ -643,7 +831,7 @@ struct ContentView: View {
             }
             // Sweep the sidebar until the slider showing `value` exists (the
             // NTSC and CRT lists are lazy, so the document grows as it goes),
-            // then centre it in view.
+            // then center it in view.
             func findSlider(showing value: Double) async -> NeutralSlider? {
                 guard let sv = views(content).compactMap({ $0 as? NSScrollView }).first(where: { sv in
                     sv.documentView.map { views($0).contains { $0 is NeutralSlider } } ?? false
@@ -663,7 +851,7 @@ struct ContentView: View {
                     if hits.count > 1 { print("E2E: \(hits.count) sliders show \(value)"); return nil }
                     if let s = hits.first {
                         // Rows above re-measure as they come into view and
-                        // shift it, so re-centre until the knob is in view.
+                        // shift it, so re-center until the knob is in view.
                         let knob = (s.cell as! NSSliderCell).knobRect(flipped: s.isFlipped)
                         for _ in 0..<8 where !s.visibleRect.contains(knob) {
                             let r = doc.convert(s.bounds, from: s)
@@ -1327,7 +1515,7 @@ struct ContentView: View {
             state.scrubTimeline(to: 0.8)
             state.setKeyframeAtPlayhead()
             // Park the playhead exactly on the first key, as clicking its
-            // diamond does — makes playhead/diamond centring measurable.
+            // diamond does — makes playhead/diamond centering measurable.
             state.scrubTimeline(to: state.timelineKeys[0].t)
         }
         if env["CRT_DUMP_TOOLTIPS"] == "1" {
@@ -1338,14 +1526,14 @@ struct ContentView: View {
             }
             func walk(_ v: NSView, _ depth: Int) {
                 if let t = v.toolTip {
-                    // Does a click at this view's centre reach the control
+                    // Does a click at this view's center reach the control
                     // underneath, or does the tooltip overlay swallow it?
                     var hitClass = "?"
                     if let cv = v.window?.contentView {
-                        let centre = v.convert(NSPoint(x: v.bounds.midX, y: v.bounds.midY), to: cv)
-                        hitClass = cv.hitTest(centre).map { "\(type(of: $0))" } ?? "nil"
+                        let center = v.convert(NSPoint(x: v.bounds.midX, y: v.bounds.midY), to: cv)
+                        hitClass = cv.hitTest(center).map { "\(type(of: $0))" } ?? "nil"
                     }
-                    print("TOOLTIP [\(type(of: v))] frame=\(v.frame.integral) hitTestAtCentre=\(hitClass) :: \(t.prefix(40))")
+                    print("TOOLTIP [\(type(of: v))] frame=\(v.frame.integral) hitTestAtCenter=\(hitClass) :: \(t.prefix(40))")
                 }
                 for sub in v.subviews { walk(sub, depth + 1) }
             }

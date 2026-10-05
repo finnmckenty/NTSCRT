@@ -81,15 +81,34 @@ struct HowlaroundPanel: View {
                         Spacer()
                     }
                     .padding(10)
+                    .allowsHitTesting(false)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            Text(state.howlDraftStatus.isEmpty ? " " : state.howlDraftStatus)
-                .font(.caption).foregroundStyle(.secondary)
-                .lineLimit(1)
+            // The vanishing point and drift, dragged on the picture. It
+            // reaches past the picture's edges, so a point in a corner is
+            // still whole and can be grabbed.
+            .overlay {
+                VanishingPointPad(pictureSize: CGSize(width: state.howlDraftSize.width,
+                                                      height: state.howlDraftSize.height),
+                                  margin: Self.padMargin)
+                    .padding(-Self.padMargin)
+            }
+            .zIndex(1)                      // a dot at the bottom edge draws over the text below
+            VStack(alignment: .leading, spacing: 2) {
+                Text(state.howlaroundReadout)
+                    .font(.callout)
+                Text(state.howlDraftStatus.isEmpty ? " " : state.howlDraftStatus)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            .allowsHitTesting(false)        // …and can still be grabbed there
         }
         .padding(16)
     }
+
+    /// How far the dots may reach past the picture: the preview's padding.
+    static let padMargin: CGFloat = 14
 
     // MARK: knobs
 
@@ -109,7 +128,13 @@ struct HowlaroundPanel: View {
                 ForEach(HowlaroundParam.Group.allCases, id: \.self) { group in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(group.rawValue).font(.callout).bold()
-                        ForEach(HowlaroundParam.all.filter { $0.group == group }) { param in
+                        if group == .framing {
+                            Text("On the preview, drag the green dot to set the vanishing point, and pull the blue ring out of it to make the point drift.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        // The vanishing point and drift are set on the preview.
+                        ForEach(HowlaroundParam.all.filter { $0.group == group && !$0.isPosition }) { param in
                             HowlaroundControl(param: param)
                         }
                     }
@@ -280,14 +305,9 @@ private struct HowlaroundControl: View {
                 set: { state.setHowlaroundValue(param.id, $0) })
     }
 
-    /// Greyed out while the knob it depends on is off.
+    /// Grayed out while the knob it depends on is off.
     private var idle: Bool {
-        let s = state.howlaroundSettings
-        switch param.id {
-        case "drift_dir": return s["drift"] == 0
-        case "seed": return s["shake"] == 0
-        default: return false
-        }
+        param.id == "seed" && state.howlaroundSettings["shake"] == 0
     }
 
     var body: some View {
@@ -299,8 +319,8 @@ private struct HowlaroundControl: View {
                     Text(param.label).font(.callout)
                 }
                 .toggleStyle(.switch)
-            case .direction:
-                direction
+            case .position:
+                EmptyView()                 // dragged on the preview
             case .slider(let lo, let hi, let percent, let unit, let step):
                 slider(lo: lo, hi: hi, percent: percent, unit: unit, step: step)
             }
@@ -350,30 +370,6 @@ private struct HowlaroundControl: View {
             if param.id == "zoom" {
                 Text(copiesCaption).font(.caption).foregroundStyle(.secondary)
             }
-        }
-    }
-
-    private var direction: some View {
-        let degrees = value.wrappedValue
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(param.label).font(.callout).lineLimit(1)
-                Spacer()
-                Image(systemName: "arrow.right")
-                    .rotationEffect(.degrees(-degrees))
-                    .frame(width: 16)
-                Text(HowlaroundParam.compass(degrees))
-                    .font(.callout).monospacedDigit()
-                    .frame(width: 104, alignment: .leading)
-            }
-            PropertySlider(value: value, range: 0...360, neutral: param.neutralValue)
-            HStack {
-                ForEach(Array(["Right", "Up", "Left", "Down", "Right"].enumerated()), id: \.offset) { i, word in
-                    Text(word)
-                    if i < 4 { Spacer() }
-                }
-            }
-            .font(.caption2).foregroundStyle(.secondary)
         }
     }
 

@@ -3,14 +3,14 @@
   "values" : {
     "auto_exposure" : 0,
     "brightness" : 1,
-    "centre_x" : -0.5,
-    "centre_y" : -0.5,
-    "colour_drift" : -0.48872070312500004,
+    "center_x" : -0.5,
+    "center_y" : -0.5,
+    "color_drift" : -0.48872070312500004,
     "contrast" : 1.05,
     "counter" : 0,
     "delay" : 5,
-    "drift" : 0.048675537109375,
-    "drift_dir" : 0,
+    "drift_x" : 0.048675537109375,
+    "drift_y" : 0,
     "focus" : 0.20000000000000001,
     "hue_drift" : 15.853271484375,
     "key" : 0.46433821627322347,
@@ -25,5 +25,5 @@
     "turn" : 4.16107177734375,
     "zoom" : 0.63355308066122229
   },
-  "version" : 1
+  "version" : 2
 }

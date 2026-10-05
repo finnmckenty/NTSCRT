@@ -21,8 +21,9 @@ public struct HowlaroundParam: Identifiable, Sendable {
     public enum Kind: Equatable, Sendable {
         case slider(min: Double, max: Double, percent: Bool, unit: String, step: Double?)
         case toggle
-        /// A direction in degrees: 0 right, 90 up, 180 left, 270 down.
-        case direction
+        /// One coordinate of a point dragged on the preview (the vanishing
+        /// point, where it drifts to), rather than a knob of its own.
+        case position(min: Double, max: Double)
     }
     /// For knobs either side of a neutral middle: the words for each side,
     /// so a value reads "20% left" rather than "−20%".
@@ -61,6 +62,12 @@ public struct HowlaroundParam: Identifiable, Sendable {
         self.help = help
     }
 
+    /// Set by dragging on the preview, rather than with a knob of its own.
+    public var isPosition: Bool {
+        if case .position = kind { return true }
+        return false
+    }
+
     /// How a value reads: its size in the knob's units and the word for its
     /// side ("20", "% right"), or the knob's word for the middle at zero.
     public func reading(_ value: Double) -> (magnitude: Double, side: String) {
@@ -69,11 +76,40 @@ public struct HowlaroundParam: Identifiable, Sendable {
         return (abs(value), value < 0 ? sides.negative : sides.positive)
     }
 
-    /// The compass word for a direction ("up-right").
-    public static func compass(_ degrees: Double) -> String {
-        let names = ["right", "up-right", "up", "up-left", "left", "down-left", "down", "down-right"]
-        let i = Int(((degrees.truncatingRemainder(dividingBy: 360) + 360) / 45).rounded()) % 8
-        return names[i]
+    /// A point of the frame in words, to the nearest percent: "20% left,
+    /// 22% up", "5% down", or "the middle". (From the middle of the frame,
+    /// in fractions of its width and height, y down — the settings' units.)
+    public static func describe(_ p: SIMD2<Double>) -> String {
+        func part(_ v: Double, _ sides: Sides?) -> String? {
+            let percent = Int((abs(v) * 100).rounded())
+            guard percent > 0, let sides else { return nil }
+            return "\(percent)% \(v < 0 ? sides.negative : sides.positive)"
+        }
+        let across = all.first { $0.id == "center_x" }?.sides
+        let upDown = all.first { $0.id == "center_y" }?.sides
+        let parts = [part(p.x, across), part(p.y, upDown)].compactMap { $0 }
+        return parts.isEmpty ? "the middle" : parts.joined(separator: ", ")
+    }
+
+    /// Settings saved by earlier versions, in today's terms. Until 0.13.1
+    /// three ids were spelled the British way (centre_x, centre_y,
+    /// colour_drift), and the drift was a distance and a compass direction
+    /// (drift, drift_dir: 0° right, 90° up) rather than the line from the
+    /// vanishing point to where it drifts to — the same move either way.
+    public static func migrated(_ values: [String: Double]) -> [String: Double] {
+        var v = values
+        for (old, new) in [("centre_x", "center_x"), ("centre_y", "center_y"), ("colour_drift", "color_drift")] {
+            if let x = v.removeValue(forKey: old), v[new] == nil { v[new] = x }
+        }
+        let distance = v.removeValue(forKey: "drift"), degrees = v.removeValue(forKey: "drift_dir")
+        if let distance, v["drift_x"] == nil, v["drift_y"] == nil {
+            let a = (degrees ?? 0) * Double.pi / 180
+            // Straight up leaves cos 90° ≈ 6e-17 behind: that's no drift across.
+            func clean(_ x: Double) -> Double { abs(x) < 1e-12 ? 0 : x }
+            v["drift_x"] = clean(distance * cos(a))
+            v["drift_y"] = clean(-distance * sin(a))    // up is toward −y
+        }
+        return v
     }
 
     public static let all: [HowlaroundParam] = [
@@ -83,22 +119,22 @@ public struct HowlaroundParam: Identifiable, Sendable {
             defaultValue: 0.87, neutralValue: 0, ends: Ends(low: "Wide", high: "Close"),
             help: "How big the TV's screen is in the camera's frame — each copy is this size of the one around it. Below 100% the copies shrink into a tunnel, more of them the closer you get to 100%. Above 100% every pass grows instead, into the swirling patterns feedback is known for. 0% points the camera away from the TV."),
         HowlaroundParam(
-            id: "centre_x", label: "Centre left – right", group: .framing,
-            kind: .slider(min: -0.5, max: 0.5, percent: true, unit: "", step: nil),
+            id: "center_x", label: "Vanishing point left – right", group: .framing,
+            kind: .position(min: -0.5, max: 0.5),
             defaultValue: -0.2, neutralValue: 0,
             sides: Sides(negative: "left", positive: "right", zero: "middle"),
-            help: "Where the tunnel converges across the frame — the point the copies shrink towards (past 100% zoom, the point they grow away from). It stays put as you change the zoom and angles; the camera is re-aimed at the TV to keep it there."),
+            help: "Where the tunnel converges across the frame — the point the copies shrink toward (past 100% zoom, the point they grow away from). It stays put as you change the zoom and angles; the camera is re-aimed at the TV to keep it there. Set by the green dot on the preview."),
         HowlaroundParam(
-            id: "centre_y", label: "Centre up – down", group: .framing,
-            kind: .slider(min: -0.5, max: 0.5, percent: true, unit: "", step: nil),
+            id: "center_y", label: "Vanishing point up – down", group: .framing,
+            kind: .position(min: -0.5, max: 0.5),
             defaultValue: -0.22, neutralValue: 0,
             sides: Sides(negative: "up", positive: "down", zero: "middle"),
-            help: "Where the tunnel converges up and down the frame."),
+            help: "Where the tunnel converges up and down the frame. Set by the green dot on the preview."),
         HowlaroundParam(
             id: "roll", label: "Roll", group: .framing,
             kind: .slider(min: -45, max: 45, percent: false, unit: "°", step: nil),
             defaultValue: 0, neutralValue: 0,
-            sides: Sides(negative: "anticlockwise", positive: "clockwise", zero: "level"),
+            sides: Sides(negative: "counterclockwise", positive: "clockwise", zero: "level"),
             help: "The TV turned against the camera. Every pass turns the picture again, so the tunnel becomes a spiral."),
         HowlaroundParam(
             id: "turn", label: "Side angle", group: .framing,
@@ -124,15 +160,17 @@ public struct HowlaroundParam: Identifiable, Sendable {
             defaultValue: 1, neutralValue: 1,
             help: "Picks the handheld motion. The same seed always moves the same way — so the draft matches the render, and motion you like can always be found again."),
         HowlaroundParam(
-            id: "drift_dir", label: "Drift direction", group: .movement,
-            kind: .direction,
+            id: "drift_x", label: "Drift left – right", group: .movement,
+            kind: .position(min: -1, max: 1),
             defaultValue: 0, neutralValue: 0,
-            help: "Which way the tunnel's centre slides across the frame over the render."),
+            sides: Sides(negative: "left", positive: "right", zero: "none"),
+            help: "How far the vanishing point slides across the frame over the render, easing in and out. Set by the blue ring on the preview."),
         HowlaroundParam(
-            id: "drift", label: "Drift", group: .movement,
-            kind: .slider(min: 0, max: 0.5, percent: true, unit: "", step: nil),
-            defaultValue: 0, neutralValue: 0, ends: Ends(low: "None", high: "Half the frame"),
-            help: "How far the tunnel's centre slides across the frame over the render, easing in and out — from where you put it."),
+            id: "drift_y", label: "Drift up – down", group: .movement,
+            kind: .position(min: -1, max: 1),
+            defaultValue: 0, neutralValue: 0,
+            sides: Sides(negative: "up", positive: "down", zero: "none"),
+            help: "How far the vanishing point slides up or down over the render. Set by the blue ring on the preview."),
         HowlaroundParam(
             id: "push", label: "Push", group: .movement,
             kind: .slider(min: -0.5, max: 0.5, percent: true, unit: "", step: nil),
@@ -143,7 +181,7 @@ public struct HowlaroundParam: Identifiable, Sendable {
             id: "spin", label: "Spin", group: .movement,
             kind: .slider(min: -180, max: 180, percent: false, unit: "°", step: nil),
             defaultValue: 0, neutralValue: 0,
-            sides: Sides(negative: "anticlockwise", positive: "clockwise", zero: "no spin"),
+            sides: Sides(negative: "counterclockwise", positive: "clockwise", zero: "no spin"),
             help: "Rolling the camera over the render, from the Roll you set."),
         HowlaroundParam(
             id: "loop", label: "Seamless loop", group: .movement,
@@ -167,16 +205,16 @@ public struct HowlaroundParam: Identifiable, Sendable {
             defaultValue: 1.05, neutralValue: 1.0, ends: Ends(low: "Flatter", high: "Harsher"),
             help: "The TV's contrast as the camera sees it, applied again on every pass — so the deep copies get harsher (or flatter) than the outer ones."),
         HowlaroundParam(
-            id: "colour_drift", label: "Colour drift", group: .camera,
+            id: "color_drift", label: "Color drift", group: .camera,
             kind: .slider(min: -1, max: 1, percent: true, unit: "", step: nil),
             defaultValue: -0.3, neutralValue: 0,
             sides: Sides(negative: "cool", positive: "warm", zero: "neutral"),
-            help: "The camera's white balance against the TV's colour temperature. The tint compounds on every pass: cool turns the deep copies teal and blue, warm turns them orange."),
+            help: "The camera's white balance against the TV's color temperature. The tint compounds on every pass: cool turns the deep copies teal and blue, warm turns them orange."),
         HowlaroundParam(
             id: "hue_drift", label: "Hue drift", group: .camera,
             kind: .slider(min: -30, max: 30, percent: false, unit: "° per pass", step: nil),
             defaultValue: 0, neutralValue: 0,
-            help: "A tint error that turns the hue a little on every pass, so the tunnel cycles through the colours."),
+            help: "A tint error that turns the hue a little on every pass, so the tunnel cycles through the colors."),
         HowlaroundParam(
             id: "auto_exposure", label: "Auto exposure", group: .camera,
             kind: .slider(min: 0, max: 1, percent: true, unit: "", step: nil),
@@ -215,9 +253,9 @@ public struct HowlaroundParam: Identifiable, Sendable {
 public struct HowlaroundPose: Equatable, Sendable {
     public var zoom: Double
     /// Where the tunnel converges, from the middle of the frame (fractions
-    /// of its height and width).
-    public var centreX: Double
-    public var centreY: Double
+    /// of its width and height, y down).
+    public var centerX: Double
+    public var centerY: Double
     public var roll: Double
     public var turn: Double
     public var tilt: Double
@@ -247,8 +285,42 @@ public struct HowlaroundSettings: Equatable, Sendable {
 
     /// The framing knobs alone, before any movement.
     public var basePose: HowlaroundPose {
-        HowlaroundPose(zoom: zoom, centreX: self["centre_x"], centreY: self["centre_y"],
+        HowlaroundPose(zoom: zoom, centerX: self["center_x"], centerY: self["center_y"],
                        roll: self["roll"], turn: self["turn"], tilt: self["tilt"])
+    }
+
+    /// Where the tunnel converges at the start of the render, and where the
+    /// drift takes it by the end (from the middle of the frame, fractions of
+    /// its width and height, y down).
+    public var vanishingPoint: SIMD2<Double> { SIMD2(self["center_x"], self["center_y"]) }
+    public var driftTarget: SIMD2<Double> { vanishingPoint + SIMD2(self["drift_x"], self["drift_y"]) }
+
+    /// The settings that put the vanishing point at `start` and drift it to `end`.
+    public static func values(vanishingPoint start: SIMD2<Double>, driftTarget end: SIMD2<Double>)
+        -> [String: Double] {
+        ["center_x": start.x, "center_y": start.y, "drift_x": end.x - start.x, "drift_y": end.y - start.y]
+    }
+
+    /// How far the operator's hands move the vanishing point at full shake,
+    /// per unit of their sway (fractions of the frame's width and height).
+    static let handheldCenter = SIMD2(0.050, 0.045)
+
+    /// The furthest the hands take the vanishing point from where it would
+    /// otherwise be, over a render `length` seconds long — across and up or
+    /// down, in fractions of the width and height. The motion repeats every
+    /// pass, so one pass covers it all.
+    public func handheldReach(length: Double) -> SIMD2<Double> {
+        let shake = self["shake"]
+        guard shake > 0, tvInView else { return .zero }
+        let L = max(0.1, length)
+        let hands = HowlaroundHands(seed: seed, period: loop ? L : nil)
+        let samples = max(400, min(4000, Int(L * 60)))
+        var reach = SIMD2<Double>.zero
+        for i in 0...samples {
+            let t = L * Double(i) / Double(samples)
+            reach = pointwiseMax(reach, SIMD2(abs(hands.value(0, t)), abs(hands.value(1, t))))
+        }
+        return shake * Self.handheldCenter * reach
     }
 
     /// Where the camera is `t` seconds into a render `length` seconds long:
@@ -269,16 +341,18 @@ public struct HowlaroundSettings: Equatable, Sendable {
             let x = min(1, max(0, t / L))
             m = x * x * (3 - 2 * x)
         }
-        let dir = self["drift_dir"] * Double.pi / 180
-        p.centreX += self["drift"] * m * cos(dir)
-        p.centreY -= self["drift"] * m * sin(dir)          // up is towards −y
+        // Along the line from the vanishing point to where it drifts to, in
+        // the same units, so the tunnel follows the line drawn on the
+        // picture whatever the frame's shape.
+        p.centerX += self["drift_x"] * m
+        p.centerY += self["drift_y"] * m
         p.zoom *= max(0.05, 1 + self["push"] * m)
         p.roll += self["spin"] * m
         let shake = self["shake"]
         if shake > 0 {
             let hands = HowlaroundHands(seed: seed, period: loop ? L : nil)
-            p.centreX += shake * 0.050 * hands.value(0, t)
-            p.centreY += shake * 0.045 * hands.value(1, t)
+            p.centerX += shake * Self.handheldCenter.x * hands.value(0, t)
+            p.centerY += shake * Self.handheldCenter.y * hands.value(1, t)
             p.turn += shake * 6.0 * hands.value(2, t)
             p.tilt += shake * 4.5 * hands.value(3, t)
             p.roll += shake * 3.5 * hands.value(4, t)
@@ -287,15 +361,15 @@ public struct HowlaroundSettings: Equatable, Sendable {
         return p
     }
 
-    /// The screen's axes and centre in camera space (image plane at z = 1,
+    /// The screen's axes and center in camera space (image plane at z = 1,
     /// frame height 1 and width `aspect`, y down) for a pose. The camera
     /// stays put and the TV turns, so the room — the scene — always fills
     /// the frame.
     ///
     /// The pose says where the tunnel converges, not where the screen is:
     /// the screen is placed so that the point of the TV picture at the
-    /// tunnel's centre is filmed exactly there, so that point maps to itself
-    /// pass after pass — the fixed point the copies shrink towards. With the
+    /// tunnel's center is filmed exactly there, so that point maps to itself
+    /// pass after pass — the fixed point the copies shrink toward. With the
     /// screen placed directly the fixed point sits at position ÷ (1 − zoom),
     /// eight times the position at 87% zoom: the tunnel ran out of the frame
     /// and a 1% nudge moved it 8% (found in GPT Astra's "Tunnel Lab"
@@ -317,12 +391,12 @@ public struct HowlaroundSettings: Equatable, Sendable {
         }
         func r(_ v: SIMD3<Double>) -> SIMD3<Double> { ry(rx(rz(v))) }
         let ax = r(SIMD3(1, 0, 0)), ay = r(SIMD3(0, 1, 0))
-        // The ray through the tunnel's centre, and the picture point that
-        // must land on it, offset from the screen's centre.
-        let q = SIMD3(pose.centreX * aspect, pose.centreY, 1)
-        let offset = pose.zoom * (pose.centreX * aspect * ax + pose.centreY * ay)
+        // The ray through the tunnel's center, and the picture point that
+        // must land on it, offset from the screen's center.
+        let q = SIMD3(pose.centerX * aspect, pose.centerY, 1)
+        let offset = pose.zoom * (pose.centerX * aspect * ax + pose.centerY * ay)
         // Any distance along the ray keeps the fixed point; 1 + offset.z keeps
-        // the screen's centre at depth 1, where zoom means what it says. At
+        // the screen's center at depth 1, where zoom means what it says. At
         // the knobs' extremes (big zoom, a corner, steep angles) that would put
         // the point behind the camera, so it's held in front — the fixed point
         // stays exact and the screen just sits a little further away.
@@ -345,7 +419,7 @@ public struct HowlaroundSettings: Equatable, Sendable {
 
     /// How the camera stretches the picture at a point of the TV picture
     /// (both 0…1): the map's Jacobian, columns = d/dx, d/dy. nil where the
-    /// point or its neighbours land behind the camera.
+    /// point or its neighbors land behind the camera.
     func stretch(at s: SIMD2<Double>, aspect: Double) -> (SIMD2<Double>, SIMD2<Double>)? {
         let e = 1e-4
         guard let px = cameraPoint(tv: s + SIMD2(e, 0), aspect: aspect),
@@ -356,7 +430,7 @@ public struct HowlaroundSettings: Equatable, Sendable {
     }
 
     /// The largest factor a pass scales things by at a point (the Jacobian's
-    /// spectral radius): below 1 the copies shrink towards there.
+    /// spectral radius): below 1 the copies shrink toward there.
     func shrink(at s: SIMD2<Double>, aspect: Double) -> Double? {
         guard let (jx, jy) = stretch(at: s, aspect: aspect) else { return nil }
         let tr = jx.x + jy.y, det = jx.x * jy.y - jy.x * jx.y
@@ -368,15 +442,15 @@ public struct HowlaroundSettings: Equatable, Sendable {
         return abs(det).squareRoot()          // a spiral: complex pair
     }
 
-    /// How deep the tunnel goes: passes until something at its centre is
+    /// How deep the tunnel goes: passes until something at its center is
     /// smaller than a couple of scan lines, from how much each pass shrinks
-    /// it there. nil when the copies grow instead. (Measured at the centre,
+    /// it there. nil when the copies grow instead. (Measured at the center,
     /// not on whole copies: with the camera off to one side, the copies'
     /// near edges run out of the frame while the tunnel still converges.)
     public func visibleCopies(aspect: Double, chainHeight: Int) -> Int? {
         guard tvInView else { return 0 }
         let p = basePose
-        guard let rate = shrink(at: SIMD2(p.centreX + 0.5, p.centreY + 0.5), aspect: aspect),
+        guard let rate = shrink(at: SIMD2(p.centerX + 0.5, p.centerY + 0.5), aspect: aspect),
               rate < 0.995 else { return nil }
         let n = log(2 / Double(max(16, chainHeight))) / log(rate)
         return max(1, min(200, Int(n.rounded(.down))))
@@ -430,7 +504,7 @@ struct HowlaroundHands {
                 p.append((snap(0.15 + 0.55 * u), 2 * Double.pi * v, amp))
                 power += amp * amp / 2
             }
-            // Normalise the sway to an RMS of 0.45, then add the tremor.
+            // Normalize the sway to an RMS of 0.45, then add the tremor.
             let scale = 0.45 / power.squareRoot()
             p = p.map { ($0.0, $0.1, $0.2 * scale) }
             for k in 0..<2 {
@@ -666,7 +740,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
             SIMD4(Float(v.x), Float(v.y), Float(v.z), Float(w))
         }
         // White balance: red against blue, keeping luminance where it was.
-        let wb = 0.07 * s["colour_drift"]
+        let wb = 0.07 * s["color_drift"]
         let r = 1 + wb, b = 1 - wb
         let luma = 0.299 * r + 0.587 + 0.114 * b
         let hue = s["hue_drift"] * Double.pi / 180
@@ -677,7 +751,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
             counterTexture = tex
         }
         var u = CameraUniforms(
-            axisX: f4(ax), axisY: f4(ay), normal: f4(n), centre: f4(c),
+            axisX: f4(ax), axisY: f4(ay), normal: f4(n), center: f4(c),
             balance: SIMD4(Float(r / luma), Float(1 / luma), Float(b / luma), 0),
             counterRect: rect,
             params: SIMD4(Float(aspect), Float(max(0.001, pose.zoom)), Float(s["brightness"]), Float(s["contrast"])),
@@ -855,7 +929,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
         var axisX: SIMD4<Float>
         var axisY: SIMD4<Float>
         var normal: SIMD4<Float>
-        var centre: SIMD4<Float>
+        var center: SIMD4<Float>
         var balance: SIMD4<Float>
         var counterRect: SIMD4<Float>
         var params: SIMD4<Float>      // aspect, zoom, brightness, contrast
@@ -874,7 +948,7 @@ public final class HowlaroundLoop: @unchecked Sendable {
     using namespace metal;
 
     struct CameraUniforms {
-        float4 axisX, axisY, normal, centre, balance, counterRect, params, params2, key;
+        float4 axisX, axisY, normal, center, balance, counterRect, params, params2, key;
     };
     struct BlurUniforms { float2 dir; float sigma; int radius; };
 
@@ -899,9 +973,9 @@ public final class HowlaroundLoop: @unchecked Sendable {
             float3 n = u.normal.xyz;
             float denom = dot(d, n);
             if (fabs(denom) > 1e-6) {
-                float t = dot(u.centre.xyz, n) / denom;
+                float t = dot(u.center.xyz, n) / denom;
                 if (t > 0) {
-                    float3 p = d * t - u.centre.xyz;
+                    float3 p = d * t - u.center.xyz;
                     float sx = dot(p, u.axisX.xyz) / (zoom * aspect) + 0.5;
                     float sy = dot(p, u.axisY.xyz) / zoom + 0.5;
                     // Anti-aliased screen edge, about a pixel wide.
