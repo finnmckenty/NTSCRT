@@ -36,14 +36,20 @@ struct Twirl: View {
 /// String-backed on purpose: TextField(value:format:) re-parses and
 /// re-formats on every keystroke and goes stale when the bound value changes
 /// externally mid-edit, which mangled typed input (e.g. "120" → "1,620").
-/// Here the text is only parsed on commit and only refreshed from the bound
-/// value while the field is unfocused.
+/// Here the text is only parsed on commit, and only text you've typed is
+/// committed: until you type, the field follows the bound value even while
+/// it has focus. (It used to commit whatever it showed on losing focus — so
+/// a field focused while its slider moved put the old value back. The
+/// Screen Loop panel focuses its first field on opening, so opening the
+/// export settings reset Zoom.)
 struct NumericField: View {
     let value: Binding<Double>
     let range: ClosedRange<Double>
     var width: CGFloat = 72
 
     @State private var text: String
+    /// Typed into since the field last showed the bound value.
+    @State private var edited = false
     @FocusState private var focused: Bool
 
     init(value: Binding<Double>, range: ClosedRange<Double>, width: CGFloat = 72) {
@@ -54,7 +60,10 @@ struct NumericField: View {
     }
 
     var body: some View {
-        TextField("", text: $text)
+        // Typing goes through this binding; the field's own refreshes don't.
+        // AppKit also writes the unchanged text back when the field gains
+        // focus, so only a real change counts as an edit.
+        TextField("", text: Binding(get: { text }, set: { if $0 != text { text = $0; edited = true } }))
             .textFieldStyle(.roundedBorder)
             .font(.system(.caption, design: .monospaced))
             .multilineTextAlignment(.trailing)
@@ -65,16 +74,19 @@ struct NumericField: View {
                 if !isFocused { commit() }
             }
             .onChange(of: value.wrappedValue) { _, v in
-                if !focused { text = Self.display(v) }
+                if !focused || !edited { text = Self.display(v) }
             }
     }
 
     private func commit() {
-        let cleaned = text.replacingOccurrences(of: ",", with: "")
-            .trimmingCharacters(in: .whitespaces)
-        if let v = Double(cleaned) {
-            value.wrappedValue = min(max(v, range.lowerBound), range.upperBound)
+        if edited {
+            let cleaned = text.replacingOccurrences(of: ",", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            if let v = Double(cleaned) {
+                value.wrappedValue = min(max(v, range.lowerBound), range.upperBound)
+            }
         }
+        edited = false
         text = Self.display(value.wrappedValue)
     }
 
@@ -91,6 +103,8 @@ struct IntField: View {
     var width: CGFloat = 56
 
     @State private var text: String
+    /// Typed into since the field last showed the bound value (see NumericField).
+    @State private var edited = false
     @FocusState private var focused: Bool
 
     init(value: Binding<Int>, range: ClosedRange<Int>, width: CGFloat = 56) {
@@ -101,7 +115,7 @@ struct IntField: View {
     }
 
     var body: some View {
-        TextField("", text: $text)
+        TextField("", text: Binding(get: { text }, set: { if $0 != text { text = $0; edited = true } }))
             .textFieldStyle(.roundedBorder)
             .font(.system(.caption, design: .monospaced))
             .multilineTextAlignment(.trailing)
@@ -112,16 +126,19 @@ struct IntField: View {
                 if !isFocused { commit() }
             }
             .onChange(of: value.wrappedValue) { _, v in
-                if !focused { text = String(v) }
+                if !focused || !edited { text = String(v) }
             }
     }
 
     private func commit() {
-        let cleaned = text.replacingOccurrences(of: ",", with: "")
-            .trimmingCharacters(in: .whitespaces)
-        if let v = Int(cleaned) {
-            value.wrappedValue = min(max(v, range.lowerBound), range.upperBound)
+        if edited {
+            let cleaned = text.replacingOccurrences(of: ",", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            if let v = Int(cleaned) {
+                value.wrappedValue = min(max(v, range.lowerBound), range.upperBound)
+            }
         }
+        edited = false
         text = String(value.wrappedValue)
     }
 }

@@ -141,7 +141,8 @@ struct ContentView: View {
                 || env["CRT_SAVE_LOOK"] != nil || env["CRT_LOOK"] != nil
                 || env["CRT_HOWL_RENDER"] != nil || env["CRT_HOWL_DRAFT_CHECK"] != nil
                 || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1"
-                || env["CRT_FEEDBACK_PRESET_CHECK"] != nil else { return }
+                || env["CRT_FEEDBACK_PRESET_CHECK"] != nil
+                || env["CRT_FIELD_FOCUS_CHECK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -184,6 +185,52 @@ struct ContentView: View {
             }
         }
         if env["CRT_SHOW_HOWL"] == "1" { showHowlaround = true }
+        // CRT_FIELD_FOCUS_CHECK=1: a number field that has keyboard focus
+        // while its slider moves the value must not put the old value back
+        // when focus leaves it (it did: the Screen Loop panel focuses Zoom's
+        // field on opening, and opening the export settings reset Zoom).
+        // Real panel, real field, real first-responder changes.
+        if env["CRT_FIELD_FOCUS_CHECK"] != nil {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("FIELDFOCUS \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            state.howlaroundValues["zoom"] = 0.87
+            let host = NSHostingView(rootView: HowlaroundPanel().environment(state))
+            host.frame = CGRect(x: 0, y: 0, width: 1040, height: 700)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            try? await Task.sleep(for: .milliseconds(800))
+            func views(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(views) }
+            let field = views(host).compactMap { $0 as? NSTextField }.first { $0.isEditable && $0.stringValue == "87" }
+            check("found Zoom's field", field != nil)
+            if let field {
+                window.makeFirstResponder(field)                      // focused, as on opening
+                try? await Task.sleep(for: .milliseconds(300))
+                state.setHowlaroundValue("zoom", 0.64)                // the slider moves it
+                try? await Task.sleep(for: .milliseconds(300))
+                window.makeFirstResponder(nil)                        // focus leaves (the export button)
+                try? await Task.sleep(for: .milliseconds(300))
+                let zoom = state.howlaroundSettings["zoom"]
+                check("the slider's value survives focus leaving the field", abs(zoom - 0.64) < 1e-9,
+                      "zoom \(zoom)")
+                check("the field shows it", field.stringValue == "64", "field shows \"\(field.stringValue)\"")
+                // Typing still works: type, then click away.
+                window.makeFirstResponder(field)
+                try? await Task.sleep(for: .milliseconds(200))
+                field.currentEditor()?.selectAll(nil)
+                field.currentEditor()?.insertText("75")
+                try? await Task.sleep(for: .milliseconds(200))
+                window.makeFirstResponder(nil)
+                try? await Task.sleep(for: .milliseconds(300))
+                let typed = state.howlaroundSettings["zoom"]
+                check("a typed value still commits when focus leaves", abs(typed - 0.75) < 1e-9, "zoom \(typed)")
+            }
+            print(failures == 0 ? "FIELDFOCUS-PASS" : "FIELDFOCUS-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         // CRT_FEEDBACK_PRESET_CHECK=1: a Screen Loop preset saves and loads
         // back exactly, and the look presets refuse one with a pointer to the
         // panel (the two kinds live apart).

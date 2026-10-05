@@ -34,6 +34,15 @@ struct HowlaroundPanel: View {
             state.howlPanelOpen = true
             // Your look may have changed since the last draft.
             state.scheduleHowlaroundDraft(delay: .zero)
+            // A sheet puts the keyboard focus in its first text field —
+            // Zoom's — where a stray keystroke would edit it. Start with none.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                for sheet in NSApp.windows where sheet.sheetParent != nil {
+                    if let field = sheet.firstResponder as? NSTextView, field.isFieldEditor {
+                        sheet.makeFirstResponder(nil)
+                    }
+                }
+            }
         }
         .onChange(of: state.sourceTexture != nil || state.videoSource != nil) { _, hasSource in
             if hasSource { state.scheduleHowlaroundDraft(delay: .zero) }
