@@ -126,6 +126,7 @@ struct ContentView: View {
                 || env["CRT_TL_AUTOKEY_TEST"] == "1"
                 || env["CRT_GIF_SELFTEST"] != nil
                 || env["CRT_EXPORT_FORMAT"] != nil || env["CRT_NTSC_SET"] != nil
+                || env["CRT_CROP"] != nil || env["CRT_CROP_CHECK"] != nil
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
                 || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
@@ -174,6 +175,15 @@ struct ContentView: View {
             catch { print("LOOK FAIL: \(error)") }
         }
         if env["CRT_NTSC_OFF"] == "1" { state.ntscEnabled = false }
+        // CRT_CROP="9:16" or "9:16@0.2": crop the source (ratio, position).
+        if let spec = env["CRT_CROP"] {
+            let parts = spec.split(separator: "@")
+            if let ratio = SourceCrop.Ratio(label: String(parts[0])) {
+                state.cropRatio = ratio
+                if parts.count > 1, let p = Double(parts[1]) { state.cropPosition = p }
+                state.cropEnabled = true
+            }
+        }
         if let z = env["CRT_ZOOM"].flatMap(Float.init) { state.zoom = z }
         if let w = env["CRT_DOWNSCALE_W"].flatMap(Int.init) { state.downscaleWidth = w }
         // CRT_GLITCH="vertical_hold=0.6,signal_strength=0.3" — switch the
@@ -240,6 +250,142 @@ struct ContentView: View {
                 check("a typed value still commits when focus leaves", abs(typed - 0.75) < 1e-9, "zoom \(typed)")
             }
             print(failures == 0 ? "FIELDFOCUS-PASS" : "FIELDFOCUS-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_CROP_CHECK=<dir>: the crop through the app, with CRT_SOURCE a
+        // picture or clip in quadrants (red, blue / green, yellow): what's on
+        // screen, the sizes that follow it, PNG and video exports through the
+        // Export buttons' own calls, playback frames, and looks carrying it.
+        if let dir = env["CRT_CROP_CHECK"] {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("CROPCHK \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            let folder = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            func hue(_ image: CGImage?, _ fx: Double, _ fy: Double) -> String {
+                guard let image else { return "none" }
+                var px = [UInt8](repeating: 0, count: image.width * image.height * 4)
+                px.withUnsafeMutableBytes { buf in
+                    CGContext(data: buf.baseAddress, width: image.width, height: image.height,
+                              bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?
+                        .draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+                }
+                let i = (min(image.height - 1, Int(fy * Double(image.height))) * image.width
+                         + min(image.width - 1, Int(fx * Double(image.width)))) * 4
+                let (r, g, b) = (Double(px[i]) / 255, Double(px[i + 1]) / 255, Double(px[i + 2]) / 255)
+                if r > 0.5 && g > 0.5 && b < 0.4 { return "yellow" }
+                if r > 0.5 && g < 0.4 && b < 0.4 { return "red" }
+                if b > 0.5 && r < 0.4 && g < 0.4 { return "blue" }
+                if g > 0.45 && r < 0.4 && b < 0.4 { return "green" }
+                return String(format: "other(%.2f,%.2f,%.2f)", r, g, b)
+            }
+            func size(_ t: MTLTexture?) -> String { t.map { "\($0.width) × \($0.height)" } ?? "none" }
+            /// Wait for what's on screen to reach `width` (a clip re-decodes).
+            func settle(width: Int) async {
+                for _ in 0..<100 where state.sourceTexture?.width != width {
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            func png(_ name: String) async -> CGImage? {
+                let url = folder.appendingPathComponent("\(name).png")
+                let ok = await withCheckedContinuation { c in
+                    state.exportPNG(to: url, size: state.exportVideoSize) { c.resume(returning: $0) }
+                }
+                guard ok, let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+                return CGImageSourceCreateImageAtIndex(src, 0, nil)
+            }
+            guard let full = state.sourcePixelSize, state.sourceTexture != nil else {
+                print("CROPCHK FAIL no source (CRT_SOURCE=<quadrant picture or clip>)"); exit(1)
+            }
+            let video = state.videoSource
+            // The look's own stages would muddy the colors: measure the crop.
+            state.ntscEnabled = false
+            state.glitchEnabled = false
+            state.shaderEnabled = false
+            check("off: the whole picture", state.sourceTexture?.width == full.width
+                  && state.sourceTexture?.height == full.height, size(state.sourceTexture))
+
+            state.cropRatio = .square
+            state.cropPosition = 1
+            state.cropEnabled = true
+            await settle(width: min(full.width, full.height))
+            let side = min(full.width, full.height)
+            check("square: the picture on screen is square", state.sourceTexture?.width == side
+                  && state.sourceTexture?.height == side, size(state.sourceTexture))
+            check("the sizes follow it (aspect, downscale, export)",
+                  abs(state.sourceAspect - 1) < 0.01 && state.downscaleHeight == state.downscaleWidth
+                      && state.exportVideoSize.width == state.exportVideoSize.height,
+                  "aspect \(state.sourceAspect), downscale \(state.downscaleWidth) × \(state.downscaleHeight), export \(state.exportVideoSize)")
+            let right = await png("square-right")
+            check("PNG from the right: blue over yellow", hue(right, 0.6, 0.25) == "blue"
+                  && hue(right, 0.6, 0.75) == "yellow", "\(hue(right, 0.6, 0.25)) / \(hue(right, 0.6, 0.75))")
+            state.cropPosition = 0
+            await settle(width: side)
+            try? await Task.sleep(for: .milliseconds(300))
+            let left = await png("square-left")
+            check("PNG from the left: red over green", hue(left, 0.6, 0.25) == "red"
+                  && hue(left, 0.6, 0.75) == "green", "\(hue(left, 0.6, 0.25)) / \(hue(left, 0.6, 0.75))")
+
+            if let vs = video {
+                // The video export, through the Export button's builder.
+                let url = folder.appendingPathComponent("square-left.mp4")
+                let exportSize = state.exportVideoSize
+                let settings = state.mp4ExportSettings(route: .video, outputURL: url, size: exportSize,
+                                                       bitrate: state.exportBitrate(for: exportSize), codec: .h264)
+                do {
+                    try await Mp4Exporter(context: state.context).export(
+                        source: vs, paramValues: state.paramValues, settings: settings,
+                        ntscSettingsJSON: state.exportNtscJSON, progress: { _ in })
+                    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+                    gen.requestedTimeToleranceBefore = .zero
+                    gen.requestedTimeToleranceAfter = .zero
+                    let frame = try await gen.image(at: CMTime(value: 1, timescale: 30)).image
+                    check("MP4 from the clip: square, red over green",
+                          frame.width == frame.height && hue(frame, 0.6, 0.25) == "red"
+                              && hue(frame, 0.6, 0.75) == "green",
+                          "\(frame.width) × \(frame.height), \(hue(frame, 0.6, 0.25)) / \(hue(frame, 0.6, 0.75))")
+                } catch {
+                    check("MP4 from the clip", false, "\(error)")
+                }
+                // Playback frames come from the pipeline's own decoder.
+                state.ntscEnabled = true
+                state.togglePlayback()
+                try? await Task.sleep(for: .seconds(1.5))
+                let playing = state.sourceTexture, baked = state.processedSourceTexture
+                state.stopPlayback()
+                check("playing: frames are the crop", playing?.width == side && playing?.height == side,
+                      size(playing))
+                check("playing: the VHS stage gets the crop too", baked == nil
+                      || (baked?.width == side && baked?.height == side), size(baked))
+                state.ntscEnabled = false
+            }
+
+            // A look carries a crop that's on; one without leaves it alone.
+            let lookURL = folder.appendingPathComponent("look.json")
+            var look = state.lookDictionary()
+            check("a look saves the crop", (look["crop"] as? [String: Any])?["ratio"] as? String == "1:1")
+            try? JSONSerialization.data(withJSONObject: look).write(to: lookURL)
+            state.cropEnabled = false
+            try? state.loadLook(from: lookURL)
+            check("…and loading it brings it back", state.cropEnabled && state.cropRatio == .square
+                  && state.cropPosition == 0)
+            look["crop"] = nil
+            try? JSONSerialization.data(withJSONObject: look).write(to: lookURL)
+            state.cropRatio = SourceCrop.Ratio(9, 16)
+            try? state.loadLook(from: lookURL)
+            check("a look without a crop leaves yours alone", state.cropEnabled
+                  && state.cropRatio == SourceCrop.Ratio(9, 16))
+
+            state.cropEnabled = false
+            await settle(width: full.width)
+            check("off again: the whole picture", state.sourceTexture?.width == full.width,
+                  size(state.sourceTexture))
+            print(failures == 0 ? "CROPCHK-PASS" : "CROPCHK-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
         // CRT_VIDEO_PNG_CHECK=<dir>: PNG export from a clip — the frame under
@@ -1921,6 +2067,8 @@ private struct Sidebar: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SourcePanel()
+                Divider()
+                CropPanel()
                 Divider()
                 DownscalePanel()
                 Divider()

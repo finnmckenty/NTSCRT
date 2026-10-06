@@ -55,15 +55,20 @@ public final class Mp4Exporter {
         public var loopCount: Int
         /// Video feedback (a camera filming the TV), nil for a normal export.
         public var howlaround: HowlaroundRender?
+        /// A clip's frames are cropped to this as they're decoded. (A still
+        /// arrives cropped already.)
+        public var crop: SourceCrop?
         public init(outputURL: URL, outputWidth: Int, outputHeight: Int,
                     downscale: DownscaleSpec?, presetPath: String,
                     shaderEnabled: Bool,
                     glitch: GlitchSettings?,
                     codec: Codec = .h264, averageBitrate: Int? = nil,
                     loopCount: Int = 1,
-                    howlaround: HowlaroundRender? = nil) {
+                    howlaround: HowlaroundRender? = nil,
+                    crop: SourceCrop? = nil) {
             self.loopCount = max(1, loopCount)
             self.howlaround = howlaround
+            self.crop = crop
             self.shaderEnabled = shaderEnabled
             self.glitch = glitch
             self.outputURL = outputURL
@@ -255,7 +260,7 @@ public final class Mp4Exporter {
         }
         writer.startSession(atSourceTime: .zero)
 
-        let videoReader = try source.makeSequentialReader()
+        let videoReader = try source.makeSequentialReader(crop: settings.crop)
         let totalFrames = source.totalFrames
         let loops = max(1, settings.loopCount)
         let clipDuration = CMTime(seconds: source.durationSeconds, preferredTimescale: 600)
@@ -318,7 +323,7 @@ public final class Mp4Exporter {
                     // with a fresh reader; the clip's own timestamps restart
                     // at zero, so each pass is shifted by its duration.
                     pass += 1
-                    if pass < loops, let next = try? source.makeSequentialReader() {
+                    if pass < loops, let next = try? source.makeSequentialReader(crop: settings.crop) {
                         reader = next
                         passFrame = 0
                         continue

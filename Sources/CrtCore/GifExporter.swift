@@ -29,13 +29,17 @@ public final class GifExporter {
         public var glitch: GlitchSettings?
         /// Video feedback (a camera filming the TV), nil for a normal export.
         public var howlaround: HowlaroundRender?
+        /// A clip's frames are cropped to this as they're decoded. (A still
+        /// arrives cropped already.)
+        public var crop: SourceCrop?
         public init(outputURL: URL, width: Int, height: Int, fps: Int,
                     downscale: DownscaleSpec?, presetPath: String,
                     shaderEnabled: Bool, glitch: GlitchSettings?,
-                    howlaround: HowlaroundRender? = nil) {
+                    howlaround: HowlaroundRender? = nil, crop: SourceCrop? = nil) {
             self.shaderEnabled = shaderEnabled
             self.glitch = glitch
             self.howlaround = howlaround
+            self.crop = crop
             self.outputURL = outputURL
             self.width = width
             self.height = height
@@ -156,7 +160,7 @@ public final class GifExporter {
                                   width: Int(source.pixelSize.width),
                                   height: Int(source.pixelSize.height),
                                   downscale: settings.downscale))
-        let reader = try source.makeSequentialReader()
+        let reader = try source.makeSequentialReader(crop: settings.crop)
         try await Task.detached { [pipeline = self.pipeline] in
             var sourceIndex = 0
             var written = 0

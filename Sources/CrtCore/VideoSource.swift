@@ -73,8 +73,9 @@ public final class VideoSource {
         self.imageGenerator = gen
     }
 
-    /// Decode the frame nearest to `time` and return it as an MTLTexture.
-    public func frame(at time: CMTime) async throws -> MTLTexture {
+    /// Decode the frame nearest to `time` and return it as an MTLTexture,
+    /// cropped if asked.
+    public func frame(at time: CMTime, crop: SourceCrop? = nil) async throws -> MTLTexture {
         // AVAssetImageGenerator produces a CGImage we then upload via MTKTextureLoader.
         // For fewer copies we could attach a custom output, but for scrubbing this is fine.
         let cgImage = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CGImage, Swift.Error>) in
@@ -88,12 +89,21 @@ public final class VideoSource {
                 }
             }
         }
+        // CGImage crops in its own pixel space: top row first, like the
+        // rest of the pipeline.
+        if let crop {
+            let r = crop.rect(width: cgImage.width, height: cgImage.height)
+            if (r.width, r.height) != (cgImage.width, cgImage.height),
+               let cropped = cgImage.cropping(to: CGRect(x: r.x, y: r.y, width: r.width, height: r.height)) {
+                return try cgImageToTexture(cropped)
+            }
+        }
         return try cgImageToTexture(cgImage)
     }
 
-    public func frame(atIndex index: Int) async throws -> MTLTexture {
+    public func frame(atIndex index: Int, crop: SourceCrop? = nil) async throws -> MTLTexture {
         let t = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(frameRate.rounded()))
-        return try await frame(at: t)
+        return try await frame(at: t, crop: crop)
     }
 
     private func cgImageToTexture(_ cg: CGImage) throws -> MTLTexture {
@@ -133,13 +143,23 @@ public final class VideoSource {
         let output: AVAssetReaderTrackOutput
         let device: MTLDevice
         let textureCache: CVMetalTextureCache
+        /// Frames come out cropped to this, copied into `ring` — a frame's
+        /// texture holds until `cropDepth` frames later. Uncropped frames are
+        /// the decoder's own buffers, zero-copy.
+        let crop: SourceCrop?
+        private let ring: CropRing?
+        /// More frames than any consumer holds at once (playback: queue +
+        /// on screen + previous + the two being processed).
+        public static let cropDepth = 12
 
         init(reader: AVAssetReader, output: AVAssetReaderTrackOutput,
-             device: MTLDevice, textureCache: CVMetalTextureCache) {
+             device: MTLDevice, textureCache: CVMetalTextureCache, crop: SourceCrop?) {
             self.reader = reader
             self.output = output
             self.device = device
             self.textureCache = textureCache
+            self.crop = crop
+            self.ring = crop.map { _ in CropRing(device: device, depth: Self.cropDepth) }
             reader.startReading()
         }
 
@@ -148,6 +168,21 @@ public final class VideoSource {
             public let presentationTime: CMTime
             // Hold the underlying CVPixelBuffer alive until the texture is consumed.
             let _retain: CVPixelBuffer
+            /// The cropped copy's memory, when the reader crops.
+            let cropped: (buffer: MTLBuffer, rowBytes: Int)?
+
+            /// The frame's pixels in CPU memory (BGRA, top row first), as
+            /// `texture` shows them.
+            func withPixels<T>(_ body: (UnsafeRawPointer, _ width: Int, _ height: Int, _ rowBytes: Int) -> T) -> T? {
+                if let cropped {
+                    return body(cropped.buffer.contents(), texture.width, texture.height, cropped.rowBytes)
+                }
+                CVPixelBufferLockBaseAddress(_retain, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(_retain, .readOnly) }
+                guard let base = CVPixelBufferGetBaseAddress(_retain) else { return nil }
+                return body(base, CVPixelBufferGetWidth(_retain), CVPixelBufferGetHeight(_retain),
+                            CVPixelBufferGetBytesPerRow(_retain))
+            }
         }
 
         public func nextFrame() -> Frame? {
@@ -156,6 +191,11 @@ public final class VideoSource {
             let pts = CMSampleBufferGetPresentationTimeStamp(sb)
             let w = CVPixelBufferGetWidth(pb)
             let h = CVPixelBufferGetHeight(pb)
+            if let crop, let ring, crop.cut(width: w, height: h) != .none {
+                guard let slot = ring.copy(crop, from: pb) else { return nil }
+                return Frame(texture: slot.texture, presentationTime: pts, _retain: pb,
+                             cropped: (slot.buffer, slot.rowBytes))
+            }
 
             var cvtex: CVMetalTexture?
             let r = CVMetalTextureCacheCreateTextureFromImage(
@@ -166,7 +206,7 @@ public final class VideoSource {
                   let mtl = CVMetalTextureGetTexture(cvtex) else {
                 return nil
             }
-            return Frame(texture: mtl, presentationTime: pts, _retain: pb)
+            return Frame(texture: mtl, presentationTime: pts, _retain: pb, cropped: nil)
         }
     }
 
@@ -177,21 +217,28 @@ public final class VideoSource {
         videoTrack.preferredTransform != .identity
     }
 
+    /// The frame size as displayed: the track's rotation applied, as the
+    /// image-generator path decodes it.
+    public var displaySize: CGSize {
+        let r = CGRect(origin: .zero, size: pixelSize).applying(videoTrack.preferredTransform)
+        return CGSize(width: abs(r.width).rounded(), height: abs(r.height).rounded())
+    }
+
     /// Sequential reader positioned at a frame — the playback path.
     ///
     /// Decoding successive frames by seeking to each one re-decodes from the
     /// preceding keyframe every time: measured 47 ms/frame on a 1176×1764
     /// h264 clip versus 2.8 ms sequentially, which alone overruns a 24 fps
     /// frame budget.
-    public func makeSequentialReader(startingAtFrame index: Int) throws -> SequentialReader {
-        try makeSequentialReader(startFrame: index)
+    public func makeSequentialReader(startingAtFrame index: Int, crop: SourceCrop? = nil) throws -> SequentialReader {
+        try makeSequentialReader(startFrame: index, crop: crop)
     }
 
-    public func makeSequentialReader() throws -> SequentialReader {
-        try makeSequentialReader(startFrame: 0)
+    public func makeSequentialReader(crop: SourceCrop? = nil) throws -> SequentialReader {
+        try makeSequentialReader(startFrame: 0, crop: crop)
     }
 
-    private func makeSequentialReader(startFrame: Int) throws -> SequentialReader {
+    private func makeSequentialReader(startFrame: Int, crop: SourceCrop?) throws -> SequentialReader {
         let reader: AVAssetReader
         do { reader = try AVAssetReader(asset: asset) }
         catch { throw Error.readerSetup("\(error)") }
@@ -211,6 +258,6 @@ public final class VideoSource {
         }
         reader.add(output)
         return SequentialReader(reader: reader, output: output,
-                                device: device, textureCache: textureCache)
+                                device: device, textureCache: textureCache, crop: crop)
     }
 }

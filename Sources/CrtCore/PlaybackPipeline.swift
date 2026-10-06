@@ -187,11 +187,15 @@ public final class PlaybackPipeline {
     /// (expensive) NTSC step so the producer catches up at decode cost.
     private let targetAbsolute = ManagedAtomicInt(0)
     private let poolDepth: Int
+    /// Frames come out of the decoder cropped to this (the clean frame and
+    /// the NTSC stage's input alike).
+    private let crop: SourceCrop?
 
     public init(source: VideoSource, device: MTLDevice,
-                startFrame: Int, config: Config, queueDepth: Int = 3) {
+                startFrame: Int, config: Config, queueDepth: Int = 3, crop: SourceCrop? = nil) {
         self.source = source
         self.device = device
+        self.crop = crop
         self.config = config
         self.queue = BoundedQueue(capacity: queueDepth)
         self.startFrame = max(0, startFrame)
@@ -232,7 +236,7 @@ public final class PlaybackPipeline {
         // is used by exactly one lane of a batch at a time.
         let filters: [NTSCFilter?] = [filter, filter == nil ? nil : NTSCFilter()]
         var appliedJSON: [String?] = [nil, nil]
-        var reader = try? source.makeSequentialReader(startingAtFrame: startFrame)
+        var reader = try? source.makeSequentialReader(startingAtFrame: startFrame, crop: crop)
         var frameIndex = startFrame
         var absolute = startFrame
         let total = max(1, source.totalFrames)
@@ -257,7 +261,7 @@ public final class PlaybackPipeline {
             while batch.count < 2 && !stopFlag.load() {
                 guard let r = reader else { return }
                 guard let frame = r.nextFrame() else {
-                    reader = try? source.makeSequentialReader(startingAtFrame: 0)
+                    reader = try? source.makeSequentialReader(startingAtFrame: 0, crop: crop)
                     frameIndex = 0
                     continue
                 }
@@ -358,25 +362,21 @@ public final class PlaybackPipeline {
     private var slotIndex = 0
     private let slotLock = NSLock()
 
-    /// Copy the decoded frame into the next pool slot (stride-aware).
+    /// Copy the decoded frame (cropped, if the reader crops) into the next
+    /// pool slot (stride-aware).
     private func preparedSlot(for frame: VideoSource.SequentialReader.Frame) -> PoolSlot? {
-        let pb = frame._retain
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-        let w = CVPixelBufferGetWidth(pb)
-        let h = CVPixelBufferGetHeight(pb)
-        let srcRowBytes = CVPixelBufferGetBytesPerRow(pb)
-        guard let slot = nextSlot(width: w, height: h) else { return nil }
-        if srcRowBytes == slot.rowBytes {
-            memcpy(slot.bytes, base, srcRowBytes * h)
-        } else {
-            for y in 0..<h {
-                memcpy(slot.bytes.advanced(by: y * slot.rowBytes),
-                       base.advanced(by: y * srcRowBytes), w * 4)
+        frame.withPixels { base, w, h, srcRowBytes -> PoolSlot? in
+            guard let slot = nextSlot(width: w, height: h) else { return nil }
+            if srcRowBytes == slot.rowBytes {
+                memcpy(slot.bytes, base, srcRowBytes * h)
+            } else {
+                for y in 0..<h {
+                    memcpy(slot.bytes.advanced(by: y * slot.rowBytes),
+                           base.advanced(by: y * srcRowBytes), w * 4)
+                }
             }
-        }
-        return slot
+            return slot
+        } ?? nil
     }
 
     private func nextSlot(width: Int, height: Int) -> PoolSlot? {

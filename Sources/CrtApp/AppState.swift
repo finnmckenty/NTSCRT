@@ -221,7 +221,7 @@ final class AppState {
                                           generation: ntscGeneration)
         cfg.setCacheProbe(cacheProbe)
         let pipe = PlaybackPipeline(source: source, device: context.device,
-                                    startFrame: frame, config: cfg)
+                                    startFrame: frame, config: cfg, crop: activeCrop)
         playbackPipeline = pipe
         pushPipelineConfig()   // fills in the keyframe evaluator if any
         pipe.start()
@@ -318,7 +318,7 @@ final class AppState {
                 self.currentFrameIndex = next
                 self.suppressFrameReload = false
                 do {
-                    self.sourceTexture = try await vs.frame(atIndex: next)
+                    self.sourceTexture = try await vs.frame(atIndex: next, crop: self.activeCrop)
                     self.applyTimeline(atFrame: next)
                     self.tickFrame()
                     self.markChainDirty()
@@ -391,7 +391,7 @@ final class AppState {
                                           generation: ntscGeneration)
         cfg.setCacheProbe(cacheProbe)
         let pipe = PlaybackPipeline(source: vs, device: context.device,
-                                    startFrame: currentFrameIndex, config: cfg)
+                                    startFrame: currentFrameIndex, config: cfg, crop: activeCrop)
         prerenderPipeline = pipe
         prerenderActive = true
         pipe.start()
@@ -470,10 +470,66 @@ final class AppState {
         if let tex = sourceTexture, tex.height > 0 {
             return CGFloat(tex.width) / CGFloat(tex.height)
         }
-        if let vs = videoSource, vs.pixelSize.height > 0 {
-            return vs.pixelSize.width / vs.pixelSize.height
+        if let size = sourcePixelSize, size.height > 0 {
+            let r = activeCrop?.rect(width: size.width, height: size.height) ?? (0, 0, size.width, size.height)
+            return CGFloat(r.2) / CGFloat(max(1, r.3))
         }
         return 16.0 / 9.0
+    }
+
+    // MARK: - crop (before anything else in the chain)
+
+    /// Crop the source to an aspect ratio before anything else sees it: the
+    /// preview, the compare split, the downscale, every export and the
+    /// Screen Loop all get the cropped picture.
+    var cropEnabled: Bool = false { didSet { if cropEnabled != oldValue { cropChanged() } } }
+    var cropRatio: SourceCrop.Ratio = .square { didSet { if cropRatio != oldValue { cropChanged() } } }
+    /// Where the crop sits along the axis it cuts: 0 the left or top, 1 the
+    /// right or bottom.
+    var cropPosition: Double = 0.5 { didSet { if cropPosition != oldValue { cropChanged() } } }
+
+    /// The crop in force, nil when it's off.
+    var activeCrop: SourceCrop? {
+        cropEnabled ? SourceCrop(ratio: cropRatio, position: cropPosition) : nil
+    }
+
+    /// A still as loaded, before cropping.
+    @ObservationIgnored private var uncroppedStill: MTLTexture?
+
+    /// The source's own size, before any crop (a video's as displayed).
+    var sourcePixelSize: (width: Int, height: Int)? {
+        if let tex = uncroppedStill { return (tex.width, tex.height) }
+        if let vs = videoSource { return (Int(vs.displaySize.width), Int(vs.displaySize.height)) }
+        return nil
+    }
+
+    /// What the crop leaves of the source, nil without a source.
+    var croppedSize: (width: Int, height: Int)? {
+        guard let size = sourcePixelSize else { return nil }
+        guard let crop = activeCrop else { return size }
+        let r = crop.rect(width: size.width, height: size.height)
+        return (r.width, r.height)
+    }
+
+    private func croppedStill(_ texture: MTLTexture) -> MTLTexture {
+        guard let crop = activeCrop else { return texture }
+        return (try? crop.apply(to: texture, queue: context.queue)) ?? texture
+    }
+
+    /// Re-crop what's on screen, and drop everything baked from the old crop
+    /// (queued playback frames, the frame cache) — they re-render.
+    private func cropChanged() {
+        noteChainInputEdited()          // first, so a restarted pipeline starts fresh
+        if let still = uncroppedStill {
+            sourceTexture = croppedStill(still)
+        } else if videoSource != nil {
+            if videoPlaying, playbackPipeline != nil {
+                startPipeline(at: currentFrameIndex)
+            } else {
+                Task { await reloadVideoFrame() }
+            }
+        }
+        markChainDirty()
     }
 
     // MARK: - downscale
@@ -1163,7 +1219,8 @@ final class AppState {
             glitch: glitchEnabled ? glitchSettings : nil,
             codec: codec,
             averageBitrate: bitrate,
-            loopCount: route == .video ? max(1, exportLoopCount) : 1)
+            loopCount: route == .video ? max(1, exportLoopCount) : 1,
+            crop: activeCrop)
     }
 
     func gifExportSettings(outputURL: URL,
@@ -1176,7 +1233,8 @@ final class AppState {
             downscale: downscaleSpec,
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
             shaderEnabled: shaderEnabled,
-            glitch: glitchEnabled ? glitchSettings : nil)
+            glitch: glitchEnabled ? glitchSettings : nil,
+            crop: activeCrop)
     }
 
     /// Render the loaded image through the pipeline and write it as a PNG.
@@ -1315,6 +1373,7 @@ final class AppState {
         stopPlayback()
         stopPrerender()
         sourceTexture = nil
+        uncroppedStill = nil
         // Nothing baked for the previous source may survive into the new
         // one — draw() prefers baked/cached input over re-processing.
         processedSourceTexture = nil
@@ -1333,7 +1392,7 @@ final class AppState {
             do {
                 let vs = try await VideoSource(url: url, device: context.device)
                 sourceKind = .video(vs)
-                let tex = try await vs.frame(atIndex: 0)
+                let tex = try await vs.frame(atIndex: 0, crop: activeCrop)
                 sourceTexture = tex
             } catch {
                 sourceError = error.localizedDescription
@@ -1341,7 +1400,8 @@ final class AppState {
         } else {
             do {
                 let tex = try loadTexture(url: url, device: context.device)
-                sourceTexture = tex
+                uncroppedStill = tex
+                sourceTexture = croppedStill(tex)
                 sourceKind = .image
             } catch {
                 sourceError = error.localizedDescription
@@ -1354,8 +1414,11 @@ final class AppState {
     @MainActor
     private func reloadVideoFrame() async {
         guard let vs = videoSource else { return }
+        let index = currentFrameIndex, crop = activeCrop
         do {
-            let tex = try await vs.frame(atIndex: currentFrameIndex)
+            let tex = try await vs.frame(atIndex: index, crop: crop)
+            // A newer reload is on its way (scrubbed on, or the crop changed).
+            guard index == currentFrameIndex, crop == activeCrop else { return }
             sourceTexture = tex
             processedSourceTexture = nil    // draw re-processes on main…
             // …unless the cache has this frame: scrubbing then costs only
@@ -1484,7 +1547,7 @@ final class AppState {
     }
 
     func lookDictionary() -> [String: Any] {
-        [
+        var look: [String: Any] = [
             "version": 1,
             "downscale": [
                 "enabled": downscaleEnabled,
@@ -1525,6 +1588,13 @@ final class AppState {
                 },
             ],
         ]
+        // Only a crop that's on travels with a look: loading a look saved
+        // without one leaves the current crop alone (every look made before
+        // the crop existed would otherwise switch yours off).
+        if cropEnabled {
+            look["crop"] = ["ratio": cropRatio.label, "position": cropPosition] as [String: Any]
+        }
+        return look
     }
 
     func saveLook(to url: URL) throws {
@@ -1545,6 +1615,12 @@ final class AppState {
             throw LookError.badFile
         }
         if dict["kind"] as? String == FeedbackPresets.kind { throw LookError.feedbackPreset }
+        if let c = dict["crop"] as? [String: Any],
+           let label = c["ratio"] as? String, let ratio = SourceCrop.Ratio(label: label) {
+            cropRatio = ratio
+            cropPosition = min(1, max(0, c["position"] as? Double ?? 0.5))
+            cropEnabled = true
+        }
         if let d = dict["downscale"] as? [String: Any] {
             if let v = d["enabled"] as? Bool { downscaleEnabled = v }
             if let v = d["width"] as? Int { downscaleWidth = v }

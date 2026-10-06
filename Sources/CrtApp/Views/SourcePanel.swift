@@ -30,9 +30,10 @@ struct SourcePanel: View {
                     .font(.system(.callout, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if let tex = state.sourceTexture {
+                // The file's own size — the Crop panel shows what's left of it.
+                if state.sourceTexture != nil, let size = state.sourcePixelSize {
                     let frames = state.videoSource.map { "  ·  \($0.totalFrames) frames" } ?? ""
-                    Text("\(tex.width) × \(tex.height) px\(frames)")
+                    Text("\(size.width) × \(size.height) px\(frames)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
