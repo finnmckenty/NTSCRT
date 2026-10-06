@@ -7,7 +7,7 @@
 Full disclosure: **this is two much better projects hacked together.** All of the actual image magic belongs to ntsc-rs and the RetroArch shader community; NTSCRT is the native Mac interface that connects them into one pipeline:
 
 ```
-your image/video → NTSC/VHS signal degradation (full res) → downscale to retro resolution → CRT shader → screen
+your image/video → crop → NTSC/VHS signal (full res) → downscale to retro resolution → TV/VCR glitches → CRT shader → screen
 ```
 
 ## Download
@@ -20,45 +20,80 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 
 ## Using the app
 
-**Toolbar** — file actions live in the window toolbar: **Open** (⌘O) an image (PNG/JPEG/HEIC) or video (MP4/MOV), save/load a **Preset** (your entire configuration as a JSON file — downscale, VHS, shader, view, and the whole timeline: duration, frame rate and every keyframe), or pick one of the bundled presets listed underneath — loading one that carries keyframes opens the timeline so you can see the animation it brought with it, and **Export** (⌘E): a PNG of the picture — or, from a video, of the frame under the playhead; videos to H.264/HEVC .mp4, ProRes .mov (with audio), or animated **GIF**, at your choice of resolution and quality. Scanline detail is brutal on lossy codecs — use the High/Very high quality tiers, or ProRes when it's headed into an edit. Exports are deterministic: same settings + same frame = same pixels. They follow the same switches as the preview: turn the **CRT** or **NTSC** section off and the export leaves that stage out too (with the CRT off you get the downscaled pixels scaled up crisp, exactly as previewed).
+Open an image or video (⌘O, or drop it on the Source panel), shape the look in the sidebar, and export (⌘E).
 
-**Scanline banding.** CRT shaders draw scanlines in *output* pixels, so if the export height isn't a whole multiple of the downscale height, one source line covers a fractional number of rows and the scanlines group into visible bands. Exports handle this automatically — they render at a whole multiple and average down — so you can ask for any size. **Snap size to scanline grid** takes the other route: it rounds the output to the nearest size where every source line gets the same whole number of rows, which keeps scanlines at their crispest but changes your dimensions. As a rule of thumb, crisp scanlines want 3+ output rows per downscale line, so a 320px-wide downscale wants ~960px+ of output.
+### The pipeline (sidebar)
 
-**Loop** repeats the content in the exported file — set it to 3 and a 6-second clip becomes an 18-second file that plays through three times. It's for places that don't loop video on playback (Instagram, say), so you don't have to open an editor just to duplicate a clip. Audio repeats with the picture. GIFs already loop forever on their own, so the field doesn't apply to them.
+The sidebar runs top to bottom in signal order. A section's checkbox or switch turns that stage off.
 
-**GIF** gets its own width and frame rate (6/12/24/30 fps), because it doesn't behave like the video codecs: 256 colors and run-length compression versus full-frame analog noise means files run large — roughly 0.65–0.95 bytes per pixel per frame. A 5-second 480px GIF at 12 fps lands near 8 MB; at 1080px it would be 30 MB+, past what most platforms accept. The panel estimates the size before you export and warns past ~10 MB. GIF stores frame delays in hundredths of a second, so the rates land on that grid (12 fps plays at 12.5, 24 at 25, 30 at 33.3), and 60 fps isn't offered — GIF can't reliably go past 50.
+- **Source**: the loaded image (PNG, JPEG, HEIC) or video (MP4, MOV).
+- **Crop**: cuts the picture to an aspect ratio (square, or portrait and landscape shapes from 3:4 to 1:2) before anything else sees it. Drag the picture in the preview to move the crop; double-click it to center.
+- **Downscale**: the retro resolution the CRT sees (SNES 256 px, VGA 320 px, or any width). **Chunky** keeps hard pixel edges; **Smooth** is softer and steadier on video.
+- **NTSC (TV)**: the analog signal, with composite noise, chroma bleed, head switching, tape speed, and about sixty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases).
+- **Glitch**: a simulated TV and VCR, for dramatic failures like rolling, tearing, bending, snow and tracking noise. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.
+- **CRT**: seven RetroArch CRT shaders (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every parameter exposed. A grayed-out control shows which switch turns it on.
 
-**Preview** — the floating palette holds the display controls. **Compare** (split-square) divides the preview: full pipeline on the left of the line, untouched original on the right — drag the line to move the split. **Integer scale** (grid) locks the image to whole-pixel multiples for perfectly uniform scanlines. Either way the CRT pass itself always renders at a whole multiple of the downscale (at least 6 rows per line — the same supersampling exports use) and is then fitted to the window, so what you see never depends on how big the window is, and zooming in inspects the real rendered pixels. **Animate** (sparkles — the preview's own, distinct from the toolbar's timeline button) runs the preview continuously so tape noise, jitter, and interlacing actually move — leave it on for the real experience. Zoom with the slider (or ⌥-scroll), hold Space to pan when zoomed. The palette fades out when the mouse goes idle; move the mouse to bring it back. Videos get a transport bar docked under the preview — play/pause plus a full-width, frame-accurate scrubber, with all effects applied during playback.
+### Preview
 
-**Animate (timeline)** — toggle **Animate** in the toolbar to keyframe-animate the entire effect chain and render it as video: scrub the playhead, dial in a look, press **Keyframe** to set one, move the playhead, dial in another look, keyframe again. Everything keys together as one master keyframe — parameters you don't change between keys hold still automatically. Click a keyframe to jump to it, and any parameter you change from there updates that keyframe in place, the way After Effects and Premiere behave. Drag a diamond to retime it, pick its interpolation from the dropdown underneath (linear, ease in, ease out, ease in-out, hold), and set the video length and frame rate in the timeline itself — export uses those. Keyframe times are proportional, so changing the duration stretches the whole animation. **Space** plays and pauses while the timeline is showing (when zoomed in, holding Space and dragging still pans). Image sources can export video even without keyframes — tape noise, jitter, and interlacing animate on their own ("VHS motion").
+- **Compare** splits the view: full pipeline on the left, the original on the right. Drag the line to move the split.
+- **Integer scale** snaps the picture to whole-pixel multiples, for perfectly even scanlines.
+- The **sparkles** button keeps tape noise and jitter moving. Leave it on for the real experience.
+- Zoom with the slider or ⌥-scroll; hold Space and drag to pan.
+- Videos get a transport bar with play/pause and a frame-accurate scrubber. While a video is paused, the app renders ahead (the green line under the scrubber), so that stretch then plays back smoothly.
+- The palette fades when the mouse is idle; move the mouse to bring it back.
 
-On a **video**, the timeline replaces the transport bar and takes its length and frame rate from the clip: the playhead *is* the video position, so scrubbing it seeks the footage and keyframes pin parameter changes to moments in the clip. Export applies the animation frame by frame.
+### Animating (timeline)
 
-**Screen Loop** — video feedback, the way it was made before computers: a camcorder pointed at the TV that's showing the camcorder's own picture (the BBC called it howlaround; the 1963 *Doctor Who* titles were made this way). Set up your look, then click **Screen Loop** in the toolbar. Your picture is the room the camera sees, with the TV in it; the TV shows what the camera saw a moment ago, so the picture recurses into a tunnel of copies — and every copy has been through your whole look once more than the one around it, so the noise, color bleed, moiré and tint compound the way they do in the real loop. The knobs are the camera's, and they read in words ("20% right", "10° from the left"). **Framing**: **Zoom** (each copy's size against the one around it — below 100% a tunnel, with its depth shown; above 100% the copies grow and swirl), the **vanishing point** — where the copies converge — which you drag on the preview itself (the green dot; it stays put while you change the zoom and angles, and the camera re-aims at the TV to keep it there), **Roll** (spirals), and the **side** and **vertical angle** the camera sees the screen from (steep angles at high zoom magnify the screen's near side enough to smear it outward). **Movement** — the camera in someone's hands: **Handheld** sways and trembles like a real operator, and since every copy is a trip round the loop older than the one around it, the tunnel follows the camera a moment late and snakes; the **Random seed** picks the motion, the same every time you render it. On top, a deliberate move over the render: **Drift** — pull the blue ring out of the green dot to where the vanishing point should travel, along the arrow between them (drag the arrow to move both, double-click the dot for the middle or the ring for no drift, arrow keys nudge; a faint dashed ring around the green dot shows how far Handheld wanders it) — plus **Push** in or out and **Spin**, easing from your framing — and **Seamless loop** makes the move go out and back and the shake repeat, so a GIF loops without a jump. **Camera**: **Softness**, **Screen brightness** (deep copies fade to black or burn to white), **Contrast**, **Color drift** (white balance against the TV, compounding into teal or orange), **Hue drift**, **Auto exposure** (the loop pulses). **Signal**: a **Luma key** — a video mixer keying your picture's bright parts over the camera's, so your subject stays solid while the feedback trails through the dark parts (**Key the dark parts** for dark subjects on light backgrounds) — the **Delay** (1–20 frames: each copy is that much older, so motion echoes down the tunnel; long delays exaggerate it) and a **Camcorder counter** that gets filmed along with everything else. **Presets** saves and loads the camera's settings, in a folder of their own (presets/Screen Loop) apart from the look presets. A small draft re-renders as you turn the knobs — the whole render up to 10 seconds, the same render as the final one, so it shows the same tunnel and the same moves — and **Render…** writes the full file with the Export settings, which you can change from the panel too (they're the Export button's own settings, shared): a video or GIF, from a still (for the length you choose) or from a whole clip (with its sound).
+Click **Animate** in the toolbar to keyframe the whole effect chain, then export it as video.
 
-**Sidebar** — the creative pipeline, top to bottom in signal order:
+- Move the playhead, set a look, and press **Keyframe**; repeat. Settings you don't change between keys hold still.
+- With the playhead on a keyframe, any change you make updates that keyframe.
+- Drag a diamond to retime it, and pick its easing (linear, ease in, ease out, ease in-out or hold) from the menu below it.
+- Set the length and frame rate in the timeline. Changing the length stretches the whole animation.
+- **Space** plays and pauses. On a video, the timeline *is* the clip: scrubbing seeks the footage.
+- A still can export video even without keyframes; the tape noise and jitter move on their own.
 
-- **Source** — the loaded file (drag & drop onto the panel works too).
-- **Crop** — cut the picture to an aspect ratio before anything else sees it: square, portrait (3:4, 2:3, 9:16, 1:2) or landscape (4:3, 3:2, 16:9, 2:1). To move the crop, drag the picture in the preview along whichever way it cuts (left–right or top–bottom) — the rest of the picture shows dimmed around it while you drag — and double-click the picture to center it. The section shares the Downscale panel and starts closed. Everything after it — the preview, the downscale's height, every export's size, the Screen Loop — works from the cropped picture. A look saved with a crop brings it back; a look without one leaves yours as it is.
-- **Downscale** — the retro horizontal resolution the CRT shader sees (SNES 256px, VGA 320px, or any custom width — height always follows your source's aspect ratio) and how it samples: **Chunky** takes one source pixel per block for hard pixel edges (best for pixel art), **Smooth** averages the whole block — softer, and steady on detailed video.
-- **NTSC (TV)** — the analog signal stage: composite noise, chroma bleed, head switching, tracking noise, tape speed, edge wave, and about sixty more. These are ntsc-rs's own settings — preset JSON copy/pastes both ways with the [ntsc-rs desktop app](https://github.com/ntsc-rs/ntsc-rs/releases).
-- **Glitch** — a simulated TV receiver and VCR, for the dramatic failures: the picture rolling, tearing into diagonal bands, bending at the top, losing its color, breaking up in snow. Nothing here is drawn — the TV's sync circuits (a horizontal AFC phase-locked loop, a vertical oscillator locked by the sync pulses, the color burst gate and color killer) are simulated scan line by scan line, and the glitches are how they respond when you mistune a knob or damage the signal. So they combine the way real ones did: lower the **signal strength** and you get snow, then flickering color, then the color killer, then broken sync, in that order. **Reception** has the TV's knobs (vertical and horizontal hold, AFC response, brightness — which reveals the blanking and sync pulses) and signal faults (ghosts from reflections, mains hum); **Tape** has the VCR's (tracking error with its noise bar, head switching with the top-of-picture bend it causes, time-base jitter, tape crinkle, head clog, picture search, dropouts and the deck's dropout compensation). It's on by default with every knob healthy, and a healthy set is pixel-identical to having the section off. All of it animates on the timeline and is saved in presets. Design after Trevor Blackwell's analogtv from xscreensaver.
-- **CRT** — seven RetroArch CRT presets (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every runtime parameter exposed. Grayed-out controls tell you which switch activates them — many CRT parameters only apply when their feature (curvature, mask, geometry mode…) is on.
+### Exporting
 
-**Tips**
+Click **Export** (⌘E). Exports use the same switches as the preview, and the same settings always give the same pixels.
 
-- Every value next to a slider is a text field — click and type exact numbers.
-- Double-click a slider's knob to send it to where its effect is weakest — zero for strengths and amounts, 1 for brightness/contrast/saturation multipliers, flat for curvature, the default for controls that shape an effect rather than set its amount (frequencies, gammas, beam shapes).
-- The effect reads best on game-art-style content: dark scenes, bright sprites, hard edges. Photos work too, but analog artifacts live on contrast.
-- High-resolution sources: turn on **Intensity → Scale with video size** in the NTSC panel so artifact sizes track your input, and expect the NTSC stage to take longer per frame.
+- **PNG**: the picture, or the frame under the playhead on a video.
+- **Video**: H.264 or HEVC .mp4, or ProRes .mov, with audio. Scanlines are hard on codecs, so use High quality or above, or ProRes for editing.
+- **GIF**: its own width and frame rate. The panel estimates the file size and warns past about 10 MB (a 5-second, 480 px GIF is around 8 MB).
+- **Loop** repeats the content inside the file (3 turns a 6-second clip into 18 seconds), for places that don't loop video.
+- **Snap size to scanline grid** picks a nearby size where every scanline lands evenly. Without it, exports still avoid banding by rendering larger and scaling down.
+
+### Screen Loop
+
+Video feedback, the analog way: a camcorder filming a TV that shows the camcorder's own picture. The 1963 *Doctor Who* titles were made like this. Click **Screen Loop** in the toolbar.
+
+- Your picture becomes a tunnel of copies. Each copy has been through your whole look once more than the one around it, so noise and color errors compound.
+- Drag the green dot on the preview to set the vanishing point. Pull the blue ring out of it to make the point drift during the render.
+- **Zoom** sets how deep the tunnel goes. Other knobs set the camera angle, handheld shake, push, spin, softness, color, and a luma key that keeps your subject solid.
+- **Seamless loop** makes every move go out and back, so a GIF loops without a jump.
+- A short draft re-renders as you work. **Render…** writes the full file with your export settings.
+- Screen Loop presets are saved separately from looks.
+
+### Presets
+
+- **Preset** in the toolbar saves or loads your whole setup as a JSON file: every section, plus the timeline and its keyframes.
+- The bundled presets are listed in the same menu. Loading one with keyframes opens the timeline.
+- A preset saved with a crop brings it back. One without a crop leaves yours alone.
+
+### Tips
+
+- Every number next to a slider is a text field: click it and type.
+- Double-click a slider's knob to send it to its weakest setting.
+- Analog artifacts show best on contrast: dark backgrounds, bright sprites, hard edges.
+- For high-resolution sources, turn on **Intensity → Scale with video size** in the NTSC panel, so artifacts keep their size.
 
 ## Limitations
 
 - The Intel half of the universal build is community-tested, not author-tested (see the note up top).
-- The NTSC stage runs on the CPU at your source's full resolution — with **Animate** on or during video playback, 4K+ sources will noticeably drop the preview frame rate. Exports always render every frame regardless.
-- Video playback decodes and runs the analog stage on a background pipeline and plays in real time, dropping the occasional frame when a spike hits (the NLE approach) rather than slowing down. On top of that, finished frames are kept in a RAM preview (the After Effects model): while a video sits paused the app keeps rendering ahead through the clip — the green line under the scrubber shows how far it has got — and once a loop is covered it plays with no per-frame CPU work at all, and scrubbing inside the green is instant. Any change to the NTSC, downscale or timeline settings starts it over. The cache is capped at a quarter of memory (at most 1 GB, roughly a minute of 320px-wide frames); past that the rest of the clip streams live. Exports always render every frame regardless.
-- A few crt-royale parameters are compile-time disabled in the shader itself (marked "static in this shader build") — they do nothing in RetroArch either.
-- No undo — save Presets before big experiments.
+- The NTSC stage runs on the CPU at your source's full resolution, so 4K sources slow the preview down. Exports always render every frame.
+- Video playback runs in real time and drops the occasional frame under heavy settings. The render-ahead cache holds up to a quarter of memory (at most 1 GB).
+- A few crt-royale parameters are switched off inside the shader itself (marked "static in this shader build"). They do nothing in RetroArch either.
+- No undo. Save a preset before big experiments.
 
 ## Building from source
 
