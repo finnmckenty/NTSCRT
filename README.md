@@ -2,9 +2,9 @@
 
 ![NTSCRT — the full NTSC + CRT pipeline on the left of the compare split, untouched source on the right, with a keyframed animation on the timeline below](docs/header.webp)
 
-**Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through a real analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) — composite artifacts, tape noise, head switching) and then through RetroArch's CRT shaders (via [librashader](https://github.com/SnowflakePowered/librashader) — scanlines, phosphor masks, glow), frame-identical to RetroArch itself.
+**Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through an analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs): composite artifacts, tape noise, head switching), a simulated TV and VCR for the dramatic glitches, and the CRT shaders RetroArch uses (via [librashader](https://github.com/SnowflakePowered/librashader): scanlines, phosphor masks, glow).
 
-Full disclosure: **this is two much better projects hacked together.** All of the actual image magic belongs to ntsc-rs and the RetroArch shader community; NTSCRT is the native Mac interface that connects them into one pipeline:
+Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Glitch stage, Screen Loop video feedback, cropping, a keyframe timeline, and video and GIF export.
 
 ```
 your image/video → crop → NTSC/VHS signal (full res) → downscale to retro resolution → TV/VCR glitches → CRT shader → screen
