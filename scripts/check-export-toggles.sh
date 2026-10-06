@@ -23,7 +23,11 @@ cd "$(dirname "$0")/.."
 
 BIN=".build/release/crt-app"
 [ -f "$BIN" ] || { echo "build first: swift build -c release --product crt-app"; exit 1; }
-IMG="${1:-docs/header.webp}"
+# Flat gray by default: a picture with lines of its own (the old default,
+# docs/header.webp, at the default 320-px chunky downscale) shows row
+# structure with the CRT off too and fails the on > 3 × off rule on
+# routes that are fine.
+IMG="${1:-TestAssets/flat-gray.png}"
 [ -f "$IMG" ] || { echo "no source image: $IMG"; exit 1; }
 
 OUT=$(mktemp -d)
