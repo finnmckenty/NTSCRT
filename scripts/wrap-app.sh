@@ -35,6 +35,13 @@ if [[ -d presets ]]; then
     cp "presets/Screen Loop/"*.json "$APP/Contents/Resources/presets/Screen Loop/" 2>/dev/null || true
   fi
 fi
+# The shader presets, carried the way the release bundle carries them. A
+# copy launched from a release bundle at this path reads its shaders from
+# here: without them, rewrapping underneath it broke its next export
+# ("preset_create … No such file", 2026-10-05). Launched from this bundle,
+# the dev build still prefers CRT_PRESETS below — the live Vendor tree.
+mkdir -p "$APP/Contents/Resources/slang-shaders"
+cp -R Vendor/slang-shaders/crt Vendor/slang-shaders/include "$APP/Contents/Resources/slang-shaders/"
 # Optional VHS stage dylib (the app runs without it).
 if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
   cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/ntscrs_capi.dylib"
@@ -89,3 +96,6 @@ codesign --force --deep --sign - "$APP" >/dev/null
 
 echo "built: $APP"
 echo "run:   open $APP"
+if pgrep -f "$PWD/$APP/Contents/MacOS/NTSCRT" >/dev/null; then
+  echo "note:  NTSCRT is running from this bundle — quit and reopen it to get this build."
+fi

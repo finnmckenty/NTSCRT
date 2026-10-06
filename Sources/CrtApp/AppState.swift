@@ -525,11 +525,99 @@ final class AppState {
         } else if videoSource != nil {
             if videoPlaying, playbackPipeline != nil {
                 startPipeline(at: currentFrameIndex)
+                lastCropRestart = .now
             } else {
-                Task { await reloadVideoFrame() }
+                reloadForCrop()
             }
         }
         markChainDirty()
+    }
+
+    /// A paused clip re-decodes its frame for a new crop one decode at a
+    /// time: while one runs, further changes just ask for one more after it
+    /// — and its result shows even if the crop has moved on meanwhile (a
+    /// drag would otherwise discard every decode until it stopped).
+    @ObservationIgnored private var cropReloadRunning = false
+    @ObservationIgnored private var cropReloadAgain = false
+
+    private func reloadForCrop() {
+        if cropReloadRunning { cropReloadAgain = true; return }
+        cropReloadRunning = true
+        Task { @MainActor in
+            repeat {
+                cropReloadAgain = false
+                await reloadVideoFrame(keepIfCropMoved: true)
+            } while cropReloadAgain
+            cropReloadRunning = false
+        }
+    }
+
+    // MARK: dragging the crop on the preview
+
+    /// True while the picture is being dragged to move the crop.
+    private(set) var cropDragging = false
+    /// The whole source while dragging, to show what the crop leaves out
+    /// (dimmed, around the picture). nil until it's decoded.
+    private(set) var cropDragContext: CGImage?
+    @ObservationIgnored private var cropDragContextKey: String?
+    @ObservationIgnored private var lastCropRestart = ContinuousClock.now
+    @ObservationIgnored private var pendingCropPosition: Double?
+    /// The size the preview shows the picture at, in points (set by the
+    /// preview as it lays out; the drag maps pointer motion through it).
+    @ObservationIgnored var previewDisplaySize: CGSize = .zero
+
+    /// Which way the picture can be dragged: the axis the crop cuts.
+    var cropDragAxis: SourceCrop.Cut {
+        guard let crop = activeCrop, let size = sourcePixelSize, zoom <= 1.001 else { return .none }
+        return crop.cut(width: size.width, height: size.height)
+    }
+
+    func beginCropDrag() {
+        cropDragging = true
+        pendingCropPosition = nil
+        Task { await loadCropDragContext() }
+    }
+
+    /// Move the crop to `position` mid-drag. A still re-crops at once, a
+    /// paused clip one decode at a time; a playing clip restarts its decoder
+    /// for each change, so it takes one every 0.2 s and the last at the end.
+    func dragCrop(to position: Double) {
+        let p = min(1, max(0, position))
+        if videoPlaying, lastCropRestart.duration(to: .now) < .milliseconds(200) {
+            pendingCropPosition = p
+            return
+        }
+        pendingCropPosition = nil
+        cropPosition = p
+    }
+
+    func endCropDrag() {
+        if let p = pendingCropPosition { cropPosition = p }
+        pendingCropPosition = nil
+        cropDragging = false
+    }
+
+    /// The uncropped picture: a still's own, or a clip's current frame
+    /// (decoded once per frame).
+    private func loadCropDragContext() async {
+        if let still = uncroppedStill {
+            let key = "still-\(ObjectIdentifier(still).hashValue)"
+            guard key != cropDragContextKey else { return }
+            guard let staging = makeStagingTexture(device: context.device, width: still.width, height: still.height),
+                  let cb = context.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+            blit.copy(from: still, to: staging)
+            if staging.storageMode == .managed { blit.synchronize(resource: staging) }
+            blit.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            cropDragContext = try? makeCGImage(from: staging)
+            cropDragContextKey = key
+        } else if let vs = videoSource {
+            let key = "\(ObjectIdentifier(vs).hashValue)-\(currentFrameIndex)"
+            guard key != cropDragContextKey else { return }
+            cropDragContextKey = key
+            cropDragContext = try? await vs.cgImage(atIndex: currentFrameIndex)
+        }
     }
 
     // MARK: - downscale
@@ -1412,13 +1500,13 @@ final class AppState {
     }
 
     @MainActor
-    private func reloadVideoFrame() async {
+    private func reloadVideoFrame(keepIfCropMoved: Bool = false) async {
         guard let vs = videoSource else { return }
         let index = currentFrameIndex, crop = activeCrop
         do {
             let tex = try await vs.frame(atIndex: index, crop: crop)
             // A newer reload is on its way (scrubbed on, or the crop changed).
-            guard index == currentFrameIndex, crop == activeCrop else { return }
+            guard index == currentFrameIndex, keepIfCropMoved || crop == activeCrop else { return }
             sourceTexture = tex
             processedSourceTexture = nil    // draw re-processes on main…
             // …unless the cache has this frame: scrubbing then costs only

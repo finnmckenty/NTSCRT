@@ -375,6 +375,12 @@ struct PreviewView: NSViewRepresentable {
                 integerScale: state.integerScale,
                 maxLongEdge: Self.maxTargetLongEdge)
             scaling = plan
+            // The picture's size on screen in points, for dragging the crop.
+            if let v = view, v.bounds.width > 0, size.width > 0 {
+                let k = size.width / v.bounds.width
+                state.previewDisplaySize = CGSize(width: CGFloat(plan.displayWidth) / k,
+                                                  height: CGFloat(plan.displayHeight) / k)
+            }
             if Self.scaleLog {
                 let key = "\(Int(size.width))x\(Int(size.height))/\(plan.renderWidth)/\(plan.displayWidth)"
                 if key != Self.lastScaleLogKey {
@@ -528,6 +534,9 @@ final class PreviewMTKView: MTKView {
     private var spaceDown: Bool = false
     private var spaceCursorPushed: Bool = false
     private var draggingCompareLine: Bool = false
+    /// Dragging the picture to slide the crop (see dragCrop).
+    private var draggingCrop: Bool = false
+    private var dragStartCropPosition: Double = 0.5
     private var dragStartMouse: NSPoint = .zero
     private var dragStartPanX: Float = 0
     private var dragStartPanY: Float = 0
@@ -572,6 +581,10 @@ final class PreviewMTKView: MTKView {
                 NSCursor.resizeLeftRight.set()
                 return
             }
+        }
+        if state.cropDragAxis != .none {
+            (draggingCrop ? NSCursor.closedHand : NSCursor.openHand).set()
+            return
         }
         NSCursor.arrow.set()
     }
@@ -632,6 +645,44 @@ final class PreviewMTKView: MTKView {
                 return
             }
         }
+        // Anywhere else on a cropped picture: drag it to move the crop,
+        // double-click it to center the crop.
+        if state.cropDragAxis != .none {
+            if event.clickCount == 2 {
+                state.cropPosition = 0.5
+                return
+            }
+            draggingCrop = true
+            dragStartCropPosition = state.cropPosition
+            state.beginCropDrag()
+            NSCursor.closedHand.set()
+        }
+    }
+
+    /// Slide the crop so the picture follows the pointer: a point of motion
+    /// is as many source pixels as the picture shows per point, and the crop
+    /// moves the other way — dragging the picture right shows more of its
+    /// left.
+    private func dragCrop(to p: NSPoint) {
+        guard let state = appState, let full = state.sourcePixelSize, let crop = state.activeCrop else { return }
+        let r = crop.rect(width: full.width, height: full.height)
+        let display = state.previewDisplaySize
+        switch state.cropDragAxis {
+        case .width:
+            let slack = Double(full.width - r.width)
+            guard slack > 0, display.width > 0 else { return }
+            let pixels = Double(p.x - dragStartMouse.x) * Double(r.width) / Double(display.width)
+            state.dragCrop(to: dragStartCropPosition - pixels / slack)
+        case .height:
+            let slack = Double(full.height - r.height)
+            guard slack > 0, display.height > 0 else { return }
+            // NSView's y runs up: the pointer going down takes the picture down
+            // and the crop up.
+            let pixels = Double(p.y - dragStartMouse.y) * Double(r.height) / Double(display.height)
+            state.dragCrop(to: dragStartCropPosition + pixels / slack)
+        case .none:
+            break
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -640,6 +691,10 @@ final class PreviewMTKView: MTKView {
 
         if draggingCompareLine {
             state.compareLineX = clampedCompareX(p)
+            return
+        }
+        if draggingCrop {
+            dragCrop(to: p)
             return
         }
         if spaceDown && state.zoom > 1.0 {
@@ -658,6 +713,11 @@ final class PreviewMTKView: MTKView {
 
     override func mouseUp(with event: NSEvent) {
         draggingCompareLine = false
+        if draggingCrop {
+            draggingCrop = false
+            appState?.endCropDrag()
+            NSCursor.openHand.set()
+        }
         if spaceDown { NSCursor.openHand.set() }
     }
 

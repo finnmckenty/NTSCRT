@@ -101,6 +101,22 @@ public final class VideoSource {
         return try cgImageToTexture(cgImage)
     }
 
+    /// A frame as a CGImage, whole (for showing what a crop leaves out).
+    public func cgImage(atIndex index: Int) async throws -> CGImage {
+        let time = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(frameRate.rounded()))
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CGImage, Swift.Error>) in
+            imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, result, error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else if let image, result == .succeeded {
+                    cont.resume(returning: image)
+                } else {
+                    cont.resume(throwing: Error.decodeFailed("AVAssetImageGenerator returned \(result.rawValue)"))
+                }
+            }
+        }
+    }
+
     public func frame(atIndex index: Int, crop: SourceCrop? = nil) async throws -> MTLTexture {
         let t = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(frameRate.rounded()))
         return try await frame(at: t, crop: crop)

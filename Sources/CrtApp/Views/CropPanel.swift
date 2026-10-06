@@ -3,11 +3,13 @@ import CrtCore
 
 /// Crop the source to an aspect ratio before anything else sees it. The
 /// ratio grid follows Midjourney's: square on its own, the portrait shapes
-/// above the same shapes in landscape. Picking one turns the crop on;
-/// Position slides it along whichever axis it cuts.
+/// above the same shapes in landscape. Picking one turns the crop on; dragging
+/// the picture in the preview slides the crop (PreviewView, with the rest of
+/// the picture shown dimmed around it meanwhile — CropContextOverlay).
+/// Closed by default: it shares the Downscale section and room is short.
 struct CropPanel: View {
     @Environment(AppState.self) private var state
-    @State private var expanded = true
+    @State private var expanded = false
 
     var body: some View {
         @Bindable var state = state
@@ -80,27 +82,16 @@ struct CropPanel: View {
 
     // MARK: position
 
-    /// Where the crop sits, along the axis it cuts — or a note that the
-    /// picture is already this shape.
+    /// How to move the crop — or a note that the picture is already this shape.
     @ViewBuilder private var position: some View {
-        @Bindable var state = state
         if state.cropEnabled, let size = state.sourcePixelSize {
-            switch SourceCrop(ratio: state.cropRatio).cut(width: size.width, height: size.height) {
-            case .none:
+            if SourceCrop(ratio: state.cropRatio).cut(width: size.width, height: size.height) == .none {
                 Text("The picture is already this shape — nothing to crop.")
                     .font(.caption).foregroundStyle(.secondary)
-            case let cut:
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Position").font(.subheadline).foregroundStyle(.secondary)
-                    PropertySlider(value: $state.cropPosition, range: 0...1, neutral: 0.5)
-                    HStack {
-                        Text(cut == .width ? "Left" : "Top")
-                        Spacer()
-                        Text(cut == .width ? "Right" : "Bottom")
-                    }
-                    .font(.caption2).foregroundStyle(.secondary)
-                }
-                .help("Where the crop sits in the picture. Double-click the knob for the middle.")
+            } else {
+                Text("Drag the picture to move the crop; double-click it to center.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -47,7 +47,13 @@ struct ContentView: View {
                     Color(white: 0.04)
                     PreviewView()
                         .aspectRatio(state.sourceAspect, contentMode: .fit)
+                        .anchorPreference(key: PreviewFrameKey.self, value: .bounds) { $0 }
                         .padding(8)
+                }
+                // While the picture is dragged to move the crop: the rest of
+                // the source, dimmed, around it.
+                .overlayPreferenceValue(PreviewFrameKey.self) { anchor in
+                    CropContextOverlay(anchor: anchor)
                 }
                 .overlay(alignment: .bottom) {
                     ViewPalette()
@@ -127,6 +133,7 @@ struct ContentView: View {
                 || env["CRT_GIF_SELFTEST"] != nil
                 || env["CRT_EXPORT_FORMAT"] != nil || env["CRT_NTSC_SET"] != nil
                 || env["CRT_CROP"] != nil || env["CRT_CROP_CHECK"] != nil
+                || env["CRT_CROP_DRAG_CHECK"] != nil
                 || env["CRT_NTSC_OFF"] == "1" || env["CRT_INTEGER_OFF"] == "1"
                 || env["CRT_DUMP_NTSC_LAYOUT"] == "1" || env["CRT_PANEL_BENCH"] == "1"
                 || env["CRT_PRESET_ROUNDTRIP"] != nil || env["CRT_LOAD_BUILTIN"] != nil
@@ -386,6 +393,92 @@ struct ContentView: View {
             check("off again: the whole picture", state.sourceTexture?.width == full.width,
                   size(state.sourceTexture))
             print(failures == 0 ? "CROPCHK-PASS" : "CROPCHK-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_CROP_DRAG_CHECK=<dir>: dragging the picture to move the crop,
+        // through the preview's own mouse handlers (with CRT_SOURCE a picture
+        // in quadrants: red, blue / green, yellow): the crop follows the
+        // pointer, the rest of the picture shows dimmed meanwhile (a window
+        // capture lands in <dir>), double-click centers, the ends hold, a
+        // vertical cut drags up and down, and a zoomed preview doesn't drag.
+        if let dir = env["CRT_CROP_DRAG_CHECK"] {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("CROPDRAG \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            let folder = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            func views(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(views) }
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView.map { views($0).contains { $0 is PreviewMTKView } } ?? false }),
+                  let preview = views(window.contentView!).compactMap({ $0 as? PreviewMTKView }).first,
+                  let full = state.sourcePixelSize else {
+                print("CROPDRAG FAIL no preview or source"); exit(1)
+            }
+            state.cropRatio = .square
+            state.cropPosition = 0.5
+            state.cropEnabled = true
+            try? await Task.sleep(for: .milliseconds(800))
+            let center = preview.convert(NSPoint(x: preview.bounds.midX, y: preview.bounds.midY), to: nil)
+            func event(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                   clickCount: clicks, pressure: type == .leftMouseUp ? 0 : 1)!
+            }
+            /// Press at the middle, move by (dx, dy) points in steps, then
+            /// `during` while still held, then let go.
+            func drag(_ dx: CGFloat, _ dy: CGFloat, during: () async -> Void = {}) async {
+                preview.mouseDown(with: event(.leftMouseDown, center))
+                for i in 1...10 {
+                    let f = CGFloat(i) / 10
+                    preview.mouseDragged(with: event(.leftMouseDragged, NSPoint(x: center.x + dx * f, y: center.y + dy * f)))
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                await during()
+                preview.mouseUp(with: event(.leftMouseUp, NSPoint(x: center.x + dx, y: center.y + dy)))
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            check("a square crop of a wide picture drags sideways", state.cropDragAxis == .width)
+            let shown = state.previewDisplaySize
+            let crop = SourceCrop(ratio: .square)
+            let r = crop.rect(width: full.width, height: full.height)
+            // Far enough right that the crop should go from the middle to a quarter.
+            let slack = Double(full.width - r.width)
+            let points = CGFloat(0.25 * slack) * shown.width / CGFloat(r.width)
+            var sawDimmed = false
+            await drag(points, 0) {
+                for _ in 0..<50 where state.cropDragContext == nil { try? await Task.sleep(for: .milliseconds(20)) }
+                sawDimmed = state.cropDragging && state.cropDragContext != nil
+                try? await Task.sleep(for: .milliseconds(400))
+                let shot = Process()
+                shot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                shot.arguments = ["-l", "\(window.windowNumber)", "-o", folder.appendingPathComponent("dragging.png").path]
+                try? shot.run(); shot.waitUntilExit()
+            }
+            check("dragging right by that much moves the crop to a quarter", abs(state.cropPosition - 0.25) < 0.01,
+                  String(format: "%.4f (shown %.0f × %.0f pt)", state.cropPosition, shown.width, shown.height))
+            check("meanwhile the whole picture is there to show dimmed", sawDimmed)
+            check("and it goes when you let go", !state.cropDragging)
+            preview.mouseDown(with: event(.leftMouseDown, center, clicks: 1))
+            preview.mouseUp(with: event(.leftMouseUp, center, clicks: 1))
+            preview.mouseDown(with: event(.leftMouseDown, center, clicks: 2))
+            preview.mouseUp(with: event(.leftMouseUp, center, clicks: 2))
+            try? await Task.sleep(for: .milliseconds(300))
+            check("double-click centers it", state.cropPosition == 0.5, "\(state.cropPosition)")
+            await drag(shown.width * 3, 0)
+            check("dragged past the end, it holds at the left edge", state.cropPosition == 0, "\(state.cropPosition)")
+            // A cut across the height drags up and down: pointer down, crop up.
+            state.cropRatio = SourceCrop.Ratio(2, 1)
+            state.cropPosition = 0.5
+            try? await Task.sleep(for: .milliseconds(600))
+            check("a 2:1 crop of this picture drags up and down", state.cropDragAxis == .height)
+            await drag(0, -20)
+            check("dragging down moves the crop up", state.cropPosition < 0.5, "\(state.cropPosition)")
+            state.zoom = 2
+            check("zoomed in, the picture doesn't drag the crop", state.cropDragAxis == .none)
+            state.zoom = 1
+            print(failures == 0 ? "CROPDRAG-PASS" : "CROPDRAG-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
         // CRT_VIDEO_PNG_CHECK=<dir>: PNG export from a clip — the frame under
@@ -2062,15 +2155,63 @@ private struct PaletteFrameKey: PreferenceKey {
     }
 }
 
+/// Where the preview sits, for the crop's context overlay.
+private struct PreviewFrameKey: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = value ?? nextValue()
+    }
+}
+
+/// While the picture is dragged to move the crop, the whole source drawn
+/// dimmed around it — so you can see what the crop leaves out (the
+/// Photoshop crop tool's look), lined up so the crop sits exactly on the
+/// picture as the preview shows it.
+private struct CropContextOverlay: View {
+    @Environment(AppState.self) private var state
+    let anchor: Anchor<CGRect>?
+
+    var body: some View {
+        GeometryReader { proxy in
+            if state.cropDragging, let anchor, let image = state.cropDragContext,
+               let full = state.sourcePixelSize, let crop = state.activeCrop,
+               state.previewDisplaySize.width > 0 {
+                let frame = proxy[anchor]
+                let shown = state.previewDisplaySize
+                let picture = CGRect(x: frame.midX - shown.width / 2, y: frame.midY - shown.height / 2,
+                                     width: shown.width, height: shown.height)
+                let r = crop.rect(width: full.width, height: full.height)
+                let k = picture.width / CGFloat(max(1, r.width))
+                let whole = CGRect(x: picture.minX - CGFloat(r.x) * k, y: picture.minY - CGFloat(r.y) * k,
+                                   width: CGFloat(full.width) * k, height: CGFloat(full.height) * k)
+                Canvas { ctx, size in
+                    var outside = Path(CGRect(origin: .zero, size: size))
+                    outside.addRect(picture)
+                    var dimmed = ctx
+                    dimmed.clip(to: outside, style: FillStyle(eoFill: true))
+                    dimmed.draw(Image(decorative: image, scale: 1), in: whole)
+                    dimmed.fill(Path(whole), with: .color(.black.opacity(0.55)))
+                    ctx.stroke(Path(picture.insetBy(dx: -0.5, dy: -0.5)), with: .color(.white.opacity(0.8)),
+                               lineWidth: 1)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 private struct Sidebar: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SourcePanel()
                 Divider()
-                CropPanel()
-                Divider()
-                DownscalePanel()
+                // Crop and Downscale share a section: both reshape the
+                // picture before the chain, and one divider less saves room.
+                VStack(alignment: .leading, spacing: 10) {
+                    CropPanel()
+                    DownscalePanel()
+                }
                 Divider()
                 NtscPanel()
                 Divider()
