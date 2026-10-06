@@ -1,0 +1,30 @@
+{
+  "kind" : "ntscrt-video-feedback",
+  "seconds" : 2,
+  "values" : {
+    "auto_exposure" : 1,
+    "brightness" : 1,
+    "center_x" : 0.35745212994836484,
+    "center_y" : 0.5,
+    "color_drift" : 0,
+    "contrast" : 1.3647857666015626,
+    "counter" : 0,
+    "delay" : 6,
+    "drift_x" : 0.024505195026758908,
+    "drift_y" : -0.44829093158347677,
+    "focus" : 0,
+    "hue_drift" : 14.139404296875,
+    "key" : 0.57920425990596414,
+    "key_invert" : 1,
+    "loop" : 1,
+    "push" : 0,
+    "roll" : 0,
+    "seed" : 1,
+    "shake" : 0.40000000000000002,
+    "spin" : 0,
+    "tilt" : 0,
+    "turn" : 4.16107177734375,
+    "zoom" : 0.71242780036908293
+  },
+  "version" : 2
+}
