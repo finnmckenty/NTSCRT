@@ -142,7 +142,8 @@ struct ContentView: View {
                 || env["CRT_HOWL_RENDER"] != nil || env["CRT_HOWL_DRAFT_CHECK"] != nil
                 || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1"
                 || env["CRT_FEEDBACK_PRESET_CHECK"] != nil
-                || env["CRT_FIELD_FOCUS_CHECK"] != nil || env["CRT_PAD_E2E"] != nil else { return }
+                || env["CRT_FIELD_FOCUS_CHECK"] != nil || env["CRT_PAD_E2E"] != nil
+                || env["CRT_VIDEO_PNG_CHECK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -239,6 +240,61 @@ struct ContentView: View {
                 check("a typed value still commits when focus leaves", abs(typed - 0.75) < 1e-9, "zoom \(typed)")
             }
             print(failures == 0 ? "FIELDFOCUS-PASS" : "FIELDFOCUS-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_VIDEO_PNG_CHECK=<dir>: PNG export from a clip — the frame under
+        // the playhead, through the Export button's own render (exportPNG).
+        // Two frames are two pictures; the same frame twice is the same file
+        // (its VHS noise is seeded by frame number, as in a video export);
+        // the size is the export size. Also draws the Export popover there.
+        if let dir = env["CRT_VIDEO_PNG_CHECK"] {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("VIDEOPNG \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            guard let vs = state.videoSource, vs.totalFrames > 41 else {
+                print("VIDEOPNG FAIL needs a clip of 42+ frames (CRT_SOURCE=<clip>)"); exit(1)
+            }
+            let folder = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            func export(frame i: Int, as name: String) async -> (data: Data, size: CGSize)? {
+                state.currentFrameIndex = i
+                let version = state.sourceVersion
+                for _ in 0..<50 where state.sourceVersion == version {
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                let url = folder.appendingPathComponent("\(name).png")
+                let ok = await withCheckedContinuation { c in
+                    state.exportPNG(to: url, size: state.exportVideoSize) { c.resume(returning: $0) }
+                }
+                guard ok, let data = try? Data(contentsOf: url), let image = NSImage(data: data),
+                      let rep = image.representations.first else { return nil }
+                return (data, CGSize(width: rep.pixelsWide, height: rep.pixelsHigh))
+            }
+            let a = await export(frame: 10, as: "frame-10")
+            let b = await export(frame: 40, as: "frame-40")
+            let again = await export(frame: 10, as: "frame-10-again")
+            check("frame 10 exports", a != nil)
+            check("frame 40 is a different picture", a != nil && b != nil && a!.data != b!.data)
+            check("frame 10 again is the same file", a != nil && again != nil && a!.data == again!.data)
+            let want = state.exportVideoSize
+            check("at the export size", a?.size == CGSize(width: want.width, height: want.height),
+                  "\(a.map { "\(Int($0.size.width)) × \(Int($0.size.height))" } ?? "none"), want \(want.width) × \(want.height)")
+            check("the VHS stage was on (so the seed mattered)", state.ntscEnabled && state.ntscAvailable)
+            // The popover, as the toolbar button shows it with a clip loaded.
+            let host = NSHostingView(rootView: ExportPopover().environment(state)
+                .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .dark))
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.frame = CGRect(origin: .zero, size: host.fittingSize)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            try? await Task.sleep(for: .milliseconds(500))
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent("popover.png"))
+            }
+            print(failures == 0 ? "VIDEOPNG-PASS" : "VIDEOPNG-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
         // CRT_PAD_E2E=1: the vanishing-point dots on the real panel, driven

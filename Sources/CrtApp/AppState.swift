@@ -1201,13 +1201,17 @@ final class AppState {
             return
         }
 
+        // A video frame's noise is seeded by its frame number, as a video
+        // export seeds it, so the PNG is that frame of the exported clip —
+        // the same every time. A still's follows the preview.
+        let seed = videoSource != nil ? currentFrameIndex + 1 : frameCounter
         do {
             var input = source
             var spec = downscaleSpec
             if ntscEnabled, let stage = ntscStage {
                 input = try pipeline.prepareChainInput(
                     source: source, downscale: spec,
-                    ntsc: stage, frameCount: frameCounter)
+                    ntsc: stage, frameCount: seed)
                 spec = nil
             }
             // Same scanline-banding guard the video/GIF paths use (only the
@@ -1223,7 +1227,7 @@ final class AppState {
                                    chain: exportChain, bypass: ShaderBypass(context: context),
                                    supersample: supersample, glitch: glitchFrame,
                                    inputTexture: input, outputTexture: target,
-                                   downscale: spec, frameCount: frameCounter)
+                                   downscale: spec, frameCount: seed)
         } catch {
             exportStatus = "Render failed: \(error.localizedDescription)"
             exportWorking = false

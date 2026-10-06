@@ -40,19 +40,30 @@ struct ExportPopover: View {
     var body: some View {
         @Bindable var state = state
         VStack(alignment: .leading, spacing: 10) {
-            Text(isVideo ? "Export video" : "Export image")
+            Text("Export")
                 .font(.headline)
 
             // The options themselves are shared with the Screen Loop
             // panel (ExportOptions.swift) — one source of truth.
             ExportSizeOptions()
 
-            if !isVideo {
+            // A PNG is always on offer: the picture, or a clip's frame under
+            // the playhead.
+            HStack(spacing: 8) {
                 Button(state.exportWorking ? "Exporting…" : "Export PNG…") { exportPNG() }
                     .disabled(state.sourceTexture == nil || state.chain == nil || state.exportWorking)
+                if isVideo {
+                    Text("This frame (\(frameTime))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
 
-                Divider()
+            Divider()
 
+            if isVideo {
+                Text(String(format: "The whole clip (%.1f s)", state.effectiveTimelineDuration))
+                    .font(.caption).bold()
+            } else {
                 Text(hasKeyframes ? "Video from this image (keyframe animation)"
                                   : "Video from this image (VHS motion)")
                     .font(.caption).bold()
@@ -88,6 +99,13 @@ struct ExportPopover: View {
         }
         .padding(14)
         .frame(width: 300)
+    }
+
+    /// Where the playhead is in a clip, "0:05.12".
+    private var frameTime: String {
+        let fps = Double(max(1, state.videoSource?.frameRate ?? 1))
+        let t = Double(state.currentFrameIndex) / fps
+        return String(format: "%d:%05.2f", Int(t) / 60, t.truncatingRemainder(dividingBy: 60))
     }
 
     /// "18-07-26 17.42.09" — date + time so repeated exports don't collide.
@@ -131,10 +149,12 @@ struct ExportPopover: View {
         return max(1, Int((state.timelineDuration * Double(state.gifFPS)).rounded()))
     }
 
-    // MARK: - PNG (image source)
+    // MARK: - PNG (an image, or a clip's current frame)
 
     private func exportPNG() {
         guard state.sourceTexture != nil else { return }
+        // A clip holds still on the frame being saved.
+        if state.videoPlaying { state.stopPlayback() }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
