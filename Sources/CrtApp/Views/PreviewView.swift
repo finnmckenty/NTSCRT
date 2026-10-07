@@ -534,9 +534,13 @@ final class PreviewMTKView: MTKView {
     private var spaceDown: Bool = false
     private var spaceCursorPushed: Bool = false
     private var draggingCompareLine: Bool = false
-    /// Dragging the picture to slide the crop (see dragCrop).
-    private var draggingCrop: Bool = false
-    private var dragStartCropPosition: Double = 0.5
+    /// A drag adjusting the crop: moving it, or resizing it from a corner
+    /// (see cropGrab(at:) and dragCrop(to:)), and the crop when it began.
+    private var cropGrab: CropGrab?
+    private var dragStartCrop: SourceCrop?
+
+    enum Corner { case topLeft, topRight, bottomLeft, bottomRight }
+    enum CropGrab { case move, corner(Corner) }
     private var dragStartMouse: NSPoint = .zero
     private var dragStartPanX: Float = 0
     private var dragStartPanY: Float = 0
@@ -582,11 +586,50 @@ final class PreviewMTKView: MTKView {
                 return
             }
         }
-        if state.cropDragAxis != .none {
-            (draggingCrop ? NSCursor.closedHand : NSCursor.openHand).set()
-            return
+        switch cropGrab ?? cropGrab(at: p) {
+        case .corner(let c)?:
+            Self.resizeCursor(c).set()
+        case .move? where state.cropRoom.x || state.cropRoom.y:
+            (cropGrab == nil ? NSCursor.openHand : NSCursor.closedHand).set()
+        default:
+            NSCursor.arrow.set()
         }
-        NSCursor.arrow.set()
+    }
+
+    private static func resizeCursor(_ corner: Corner) -> NSCursor {
+        if #available(macOS 15, *) {
+            let position: NSCursor.FrameResizePosition = switch corner {
+            case .topLeft: .topLeft
+            case .topRight: .topRight
+            case .bottomLeft: .bottomLeft
+            case .bottomRight: .bottomRight
+            }
+            return NSCursor.frameResize(position: position, directions: .all)
+        }
+        return NSCursor.crosshair
+    }
+
+    // MARK: crop handles
+
+    /// The picture as the preview shows it, in this view's coordinates (y
+    /// up) — at zoom 1, centered at the size the preview reports.
+    var pictureRect: NSRect? {
+        guard let size = appState?.previewDisplaySize, size.width > 0, size.height > 0 else { return nil }
+        return NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    /// What a click at `p` takes hold of: a corner of the picture (resize),
+    /// the picture itself (move), or nothing — and nothing at all unless the
+    /// crop can be edited here.
+    func cropGrab(at p: NSPoint) -> CropGrab? {
+        guard let state = appState, state.cropEditable, let r = pictureRect else { return nil }
+        let corners: [(Corner, NSPoint)] = [(.topLeft, NSPoint(x: r.minX, y: r.maxY)),
+                                            (.topRight, NSPoint(x: r.maxX, y: r.maxY)),
+                                            (.bottomLeft, NSPoint(x: r.minX, y: r.minY)),
+                                            (.bottomRight, NSPoint(x: r.maxX, y: r.minY))]
+        if let c = corners.first(where: { hypot($0.1.x - p.x, $0.1.y - p.y) <= 14 }) { return .corner(c.0) }
+        return r.contains(p) ? .move : nil
     }
 
     // MARK: keyboard
@@ -645,43 +688,56 @@ final class PreviewMTKView: MTKView {
                 return
             }
         }
-        // Anywhere else on a cropped picture: drag it to move the crop,
-        // double-click it to center the crop.
-        if state.cropDragAxis != .none {
+        // Anywhere else on a cropped picture: drag it to move the crop, or a
+        // corner to resize it. Double-click the picture to center the crop,
+        // a corner for the largest crop again.
+        if let grab = cropGrab(at: p), let crop = state.activeCrop {
             if event.clickCount == 2 {
-                state.cropPosition = 0.5
+                var c = crop
+                if case .corner = grab { c.scale = 1 } else { c.x = 0.5; c.y = 0.5 }
+                state.setCrop(c)
                 return
             }
-            draggingCrop = true
-            dragStartCropPosition = state.cropPosition
-            state.beginCropDrag()
-            NSCursor.closedHand.set()
+            if case .move = grab, !(state.cropRoom.x || state.cropRoom.y) { return }   // nothing to move
+            cropGrab = grab
+            dragStartCrop = crop
+            if case .corner(let c) = grab {
+                state.beginCropDrag(.resize)
+                Self.resizeCursor(c).set()
+            } else {
+                state.beginCropDrag(.move)
+                NSCursor.closedHand.set()
+            }
         }
     }
 
-    /// Slide the crop so the picture follows the pointer: a point of motion
-    /// is as many source pixels as the picture shows per point, and the crop
-    /// moves the other way — dragging the picture right shows more of its
-    /// left.
+    /// Adjust the crop as the pointer moves, in source pixels: a point of
+    /// motion is as many as the picture shows per point. Moving, the crop goes
+    /// the other way so the picture follows the pointer. Resizing, the corner
+    /// opposite the one held stays put and the size follows the pointer,
+    /// the ratio kept; it's shown meanwhile and applied on release.
     private func dragCrop(to p: NSPoint) {
-        guard let state = appState, let full = state.sourcePixelSize, let crop = state.activeCrop else { return }
-        let r = crop.rect(width: full.width, height: full.height)
-        let display = state.previewDisplaySize
-        switch state.cropDragAxis {
-        case .width:
-            let slack = Double(full.width - r.width)
-            guard slack > 0, display.width > 0 else { return }
-            let pixels = Double(p.x - dragStartMouse.x) * Double(r.width) / Double(display.width)
-            state.dragCrop(to: dragStartCropPosition - pixels / slack)
-        case .height:
-            let slack = Double(full.height - r.height)
-            guard slack > 0, display.height > 0 else { return }
-            // NSView's y runs up: the pointer going down takes the picture down
-            // and the crop up.
-            let pixels = Double(p.y - dragStartMouse.y) * Double(r.height) / Double(display.height)
-            state.dragCrop(to: dragStartCropPosition + pixels / slack)
-        case .none:
-            break
+        guard let state = appState, let grab = cropGrab, let start = dragStartCrop,
+              let full = state.sourcePixelSize, let pic = pictureRect else { return }
+        let r0 = start.rect(width: full.width, height: full.height)
+        let k = Double(pic.width) / Double(max(1, r0.width))        // points per source pixel
+        switch grab {
+        case .move:
+            // NSView's y runs up; the picture's runs down.
+            let dx = Double(p.x - dragStartMouse.x) / k, dy = Double(dragStartMouse.y - p.y) / k
+            state.dragCrop(to: start.placed(x: Double(r0.x) - dx, y: Double(r0.y) - dy, width: Double(r0.width),
+                                            inWidth: full.width, height: full.height))
+        case .corner(let c):
+            let left = c == .topLeft || c == .bottomLeft, top = c == .topLeft || c == .topRight
+            let anchorX = left ? Double(r0.x + r0.width) : Double(r0.x)
+            let anchorY = top ? Double(r0.y + r0.height) : Double(r0.y)
+            let pointerX = Double(r0.x) + Double(p.x - pic.minX) / k
+            let pointerY = Double(r0.y) + Double(pic.maxY - p.y) / k
+            let ratio = start.ratio.value
+            let w = max(abs(pointerX - anchorX), abs(pointerY - anchorY) * ratio)
+            let h = w / ratio
+            state.previewCropResize(start.placed(x: left ? anchorX - w : anchorX, y: top ? anchorY - h : anchorY,
+                                                 width: w, inWidth: full.width, height: full.height))
         }
     }
 
@@ -693,7 +749,7 @@ final class PreviewMTKView: MTKView {
             state.compareLineX = clampedCompareX(p)
             return
         }
-        if draggingCrop {
+        if cropGrab != nil {
             dragCrop(to: p)
             return
         }
@@ -713,10 +769,11 @@ final class PreviewMTKView: MTKView {
 
     override func mouseUp(with event: NSEvent) {
         draggingCompareLine = false
-        if draggingCrop {
-            draggingCrop = false
+        if cropGrab != nil {
+            cropGrab = nil
+            dragStartCrop = nil
             appState?.endCropDrag()
-            NSCursor.openHand.set()
+            updateCursor(at: convert(event.locationInWindow, from: nil))
         }
         if spaceDown { NSCursor.openHand.set() }
     }

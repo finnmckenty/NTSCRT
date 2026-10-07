@@ -27,7 +27,7 @@ Open an image or video (⌘O, or drop it on the Source panel), shape the look in
 The sidebar runs top to bottom in signal order. A section's checkbox or switch turns that stage off.
 
 - **Source**: the loaded image (PNG, JPEG, HEIC) or video (MP4, MOV).
-- **Crop**: cuts the picture to an aspect ratio (square, or portrait and landscape shapes from 3:4 to 1:2) before anything else sees it. Drag the picture in the preview to move the crop; double-click it to center.
+- **Crop**: cuts the picture to an aspect ratio (square, or portrait and landscape shapes from 3:4 to 1:2) before anything else sees it. Drag the picture in the preview to move the crop, or a corner to zoom in (to cut black borders, say); double-click to center.
 - **Downscale**: the retro resolution the CRT sees (SNES 256 px, VGA 320 px, or any width). **Chunky** keeps hard pixel edges; **Smooth** is softer and steadier on video.
 - **NTSC (TV)**: the analog signal, with composite noise, chroma bleed, head switching, tape speed, and about sixty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases).
 - **Glitch**: a simulated TV and VCR, for dramatic failures like rolling, tearing, bending, snow and tracking noise. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.

@@ -207,7 +207,7 @@ public final class VideoSource {
             let pts = CMSampleBufferGetPresentationTimeStamp(sb)
             let w = CVPixelBufferGetWidth(pb)
             let h = CVPixelBufferGetHeight(pb)
-            if let crop, let ring, crop.cut(width: w, height: h) != .none {
+            if let crop, let ring, crop.crops(width: w, height: h) {
                 guard let slot = ring.copy(crop, from: pb) else { return nil }
                 return Frame(texture: slot.texture, presentationTime: pts, _retain: pb,
                              cropped: (slot.buffer, slot.rowBytes))

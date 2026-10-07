@@ -3,11 +3,13 @@ import Metal
 import CoreVideo
 
 /// A crop of the source picture to an aspect ratio, before anything else in
-/// the chain sees it. The crop keeps as much of the picture as the ratio
-/// allows and cuts the rest from one axis — the sides of a picture that's too
-/// wide, the top and bottom of one that's too tall — with `position` saying
-/// where along that axis it sits (0 the left or top edge, 1 the right or
-/// bottom, 0.5 the middle).
+/// the chain sees it. At `scale` 1 it keeps as much of the picture as the
+/// ratio allows, cutting the rest from one axis — the sides of a picture
+/// that's too wide, the top and bottom of one that's too tall. A larger
+/// scale zooms in: the crop shrinks inside that largest one (2: half its
+/// width and height), with room to move both ways. `x` and `y` say where it
+/// sits wherever there's room: 0 the left (top) edge, 1 the right (bottom),
+/// 0.5 the middle.
 public struct SourceCrop: Equatable, Sendable {
     public struct Ratio: Equatable, Hashable, Sendable {
         public let width: Int
@@ -32,17 +34,29 @@ public struct SourceCrop: Equatable, Sendable {
     public static let portrait = [Ratio(3, 4), Ratio(2, 3), Ratio(9, 16), Ratio(1, 2)]
     public static let landscape = [Ratio(4, 3), Ratio(3, 2), Ratio(16, 9), Ratio(2, 1)]
 
-    public var ratio: Ratio
-    public var position: Double
+    /// Zooming in stops at an eighth of the largest crop's width.
+    public static let maxScale = 8.0
 
-    public init(ratio: Ratio, position: Double = 0.5) {
+    public var ratio: Ratio
+    public var x: Double
+    public var y: Double
+    public var scale: Double
+
+    public init(ratio: Ratio, x: Double = 0.5, y: Double = 0.5, scale: Double = 1) {
         self.ratio = ratio
-        self.position = position
+        self.x = x
+        self.y = y
+        self.scale = scale
     }
 
-    /// Which way a picture of this size gets cut: its width (it's too wide
-    /// for the ratio), its height (too tall), or nothing (within half a
-    /// percent of the ratio already).
+    /// The largest crop, placed `position` along whichever axis it cuts.
+    public init(ratio: Ratio, position: Double) {
+        self.init(ratio: ratio, x: position, y: position)
+    }
+
+    /// Which way the largest crop cuts a picture of this size: its width
+    /// (it's too wide for the ratio), its height (too tall), or nothing
+    /// (within half a percent of the ratio already).
     public enum Cut: Equatable, Sendable { case width, height, none }
 
     public func cut(width: Int, height: Int) -> Cut {
@@ -52,21 +66,45 @@ public struct SourceCrop: Equatable, Sendable {
         return aspect > ratio.value ? .width : .height
     }
 
+    /// The largest crop for the ratio in a picture of this size.
+    public func largest(width: Int, height: Int) -> (width: Int, height: Int) {
+        switch cut(width: width, height: height) {
+        case .none: return (width, height)
+        case .width: return (Self.even(Double(height) * ratio.value, within: width), height)
+        case .height: return (width, Self.even(Double(width) / ratio.value, within: height))
+        }
+    }
+
     /// The crop in a picture of this size, in whole pixels: x, y, width,
     /// height. Sizes are even where the picture allows (video codecs and
     /// chroma like them), and the crop always lies inside the picture.
     public func rect(width: Int, height: Int) -> (x: Int, y: Int, width: Int, height: Int) {
-        let p = min(1, max(0, position))
-        switch cut(width: width, height: height) {
-        case .none:
-            return (0, 0, width, height)
-        case .width:
-            let w = Self.even(Double(height) * ratio.value, within: width)
-            return (Int((Double(width - w) * p).rounded()), 0, w, height)
-        case .height:
-            let h = Self.even(Double(width) / ratio.value, within: height)
-            return (0, Int((Double(height - h) * p).rounded()), width, h)
-        }
+        let base = largest(width: width, height: height)
+        let s = min(Self.maxScale, max(1, scale))
+        let w = s < 1.0001 ? base.width : Self.even(Double(base.width) / s, within: base.width)
+        let h = s < 1.0001 ? base.height : Self.even(Double(base.height) / s, within: base.height)
+        let px = min(1, max(0, x)), py = min(1, max(0, y))
+        return (Int((Double(width - w) * px).rounded()), Int((Double(height - h) * py).rounded()), w, h)
+    }
+
+    /// Whether it takes anything away from a picture of this size.
+    public func crops(width: Int, height: Int) -> Bool {
+        let r = rect(width: width, height: height)
+        return r.width != width || r.height != height
+    }
+
+    /// The crop that keeps the pixel rectangle (x, y, w) of a picture of
+    /// this size — the inverse of `rect`, for dragging: the scale from the
+    /// width (held to 1…maxScale), the place from the corner, held inside.
+    public func placed(x left: Double, y top: Double, width w: Double, inWidth width: Int, height: Int) -> SourceCrop {
+        let base = largest(width: width, height: height)
+        let s = min(Self.maxScale, max(1, Double(base.width) / max(1, w)))
+        var c = SourceCrop(ratio: ratio, x: x, y: y, scale: s)
+        let r = c.rect(width: width, height: height)
+        let roomX = Double(width - r.width), roomY = Double(height - r.height)
+        if roomX > 0 { c.x = min(1, max(0, left / roomX)) }
+        if roomY > 0 { c.y = min(1, max(0, top / roomY)) }
+        return c
     }
 
     private static func even(_ length: Double, within limit: Int) -> Int {

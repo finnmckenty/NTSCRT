@@ -67,6 +67,45 @@ final class SourceCropTests: XCTestCase {
         XCTAssertEqual(SourceCrop(ratio: .init(1, 2)).cut(width: 1080, height: 1080), .width)
     }
 
+    func testZoomingInShrinksTheCropAndFreesBothWays() {
+        // Twice in on a square crop of 640 × 360: half the largest crop (360²).
+        let middle = SourceCrop(ratio: .square, scale: 2).rect(width: 640, height: 360)
+        XCTAssertEqual(middle.width, 180)
+        XCTAssertEqual(middle.height, 180)
+        XCTAssertEqual(middle.x, (640 - 180) / 2)
+        XCTAssertEqual(middle.y, (360 - 180) / 2)
+        let corner = SourceCrop(ratio: .square, x: 1, y: 1, scale: 2).rect(width: 640, height: 360)
+        XCTAssertEqual(corner.x, 460)
+        XCTAssertEqual(corner.y, 180)
+        // A picture's own shape crops once zoomed in (cutting black borders).
+        let own = SourceCrop(ratio: .init(16, 9))
+        XCTAssertFalse(own.crops(width: 640, height: 360))
+        var zoomed = own
+        zoomed.scale = 1.25
+        XCTAssertTrue(zoomed.crops(width: 640, height: 360))
+        XCTAssertEqual(zoomed.rect(width: 640, height: 360).width, 512)
+        // Held to 1…maxScale.
+        XCTAssertEqual(SourceCrop(ratio: .square, scale: 0.3).rect(width: 640, height: 360).width, 360)
+        XCTAssertEqual(SourceCrop(ratio: .square, scale: 100).rect(width: 640, height: 360).width, 46)
+    }
+
+    func testAPixelRectangleMapsBackToTheCrop() {
+        // `placed` undoes `rect`: the crop that keeps a rectangle the drag drew.
+        let c = SourceCrop(ratio: .square)
+        let placed = c.placed(x: 100, y: 60, width: 180, inWidth: 640, height: 360)
+        XCTAssertEqual(placed.scale, 2, accuracy: 1e-9)
+        let r = placed.rect(width: 640, height: 360)
+        XCTAssertEqual(r.x, 100)
+        XCTAssertEqual(r.y, 60)
+        XCTAssertEqual(r.width, 180)
+        // Pushed past the picture's edge, it stays inside.
+        let past = c.placed(x: 600, y: -40, width: 180, inWidth: 640, height: 360).rect(width: 640, height: 360)
+        XCTAssertEqual(past.x, 460)
+        XCTAssertEqual(past.y, 0)
+        // Wider than the largest crop: the largest crop.
+        XCTAssertEqual(c.placed(x: 0, y: 0, width: 5000, inWidth: 640, height: 360).scale, 1)
+    }
+
     func testRatioLabelsRoundTrip() {
         for r in [SourceCrop.Ratio.square] + SourceCrop.portrait + SourceCrop.landscape {
             XCTAssertEqual(SourceCrop.Ratio(label: r.label), r)
@@ -201,6 +240,15 @@ final class SourceCropTests: XCTestCase {
         let sequentialTop = try XCTUnwrap(try clip.makeSequentialReader(
             crop: SourceCrop(ratio: .init(2, 1), position: 0)).nextFrame())
         XCTAssertEqual(try hue(of: sequentialTop.texture, 0.25, 0.2), .red)
+        // Zoomed in on the clip's own shape: both paths crop it.
+        let zoom = SourceCrop(ratio: .init(16, 9), x: 1, y: 1, scale: 2)
+        let zoomedFrame = try XCTUnwrap(try clip.makeSequentialReader(crop: zoom).nextFrame())
+        XCTAssertEqual(zoomedFrame.texture.width, 320)
+        XCTAssertEqual(zoomedFrame.texture.height, 180)
+        XCTAssertEqual(try hue(of: zoomedFrame.texture, 0.5, 0.5), .yellow)
+        let zoomedSeek = try await clip.frame(atIndex: 3, crop: zoom)
+        XCTAssertEqual(zoomedSeek.width, 320)
+        XCTAssertEqual(try hue(of: zoomedSeek, 0.5, 0.5), .yellow)
         // No crop: the whole frame, as before.
         let whole = try XCTUnwrap(try clip.makeSequentialReader().nextFrame())
         XCTAssertEqual(whole.texture.width, 640)

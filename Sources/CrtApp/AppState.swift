@@ -484,14 +484,33 @@ final class AppState {
     /// Screen Loop all get the cropped picture.
     var cropEnabled: Bool = false { didSet { if cropEnabled != oldValue { cropChanged() } } }
     var cropRatio: SourceCrop.Ratio = .square { didSet { if cropRatio != oldValue { cropChanged() } } }
-    /// Where the crop sits along the axis it cuts: 0 the left or top, 1 the
-    /// right or bottom.
-    var cropPosition: Double = 0.5 { didSet { if cropPosition != oldValue { cropChanged() } } }
+    /// Where the crop sits wherever there's room: 0 the left (top), 1 the
+    /// right (bottom).
+    var cropX: Double = 0.5 { didSet { if cropX != oldValue { cropChanged() } } }
+    var cropY: Double = 0.5 { didSet { if cropY != oldValue { cropChanged() } } }
+    /// 1: the largest crop for the ratio; more zooms in (see SourceCrop).
+    var cropScale: Double = 1 { didSet { if cropScale != oldValue { cropChanged() } } }
 
     /// The crop in force, nil when it's off.
     var activeCrop: SourceCrop? {
-        cropEnabled ? SourceCrop(ratio: cropRatio, position: cropPosition) : nil
+        cropEnabled ? SourceCrop(ratio: cropRatio, x: cropX, y: cropY, scale: cropScale) : nil
     }
+
+    /// Set the crop's ratio, place and scale together: one re-crop, not one
+    /// per field (each re-crop of a paused clip is a decode).
+    func setCrop(_ crop: SourceCrop) {
+        let before = SourceCrop(ratio: cropRatio, x: cropX, y: cropY, scale: cropScale)
+        guard crop != before else { return }
+        batchingCrop = true
+        cropRatio = crop.ratio
+        cropX = crop.x
+        cropY = crop.y
+        cropScale = crop.scale
+        batchingCrop = false
+        cropChanged()
+    }
+
+    @ObservationIgnored private var batchingCrop = false
 
     /// A still as loaded, before cropping.
     @ObservationIgnored private var uncroppedStill: MTLTexture?
@@ -519,6 +538,7 @@ final class AppState {
     /// Re-crop what's on screen, and drop everything baked from the old crop
     /// (queued playback frames, the frame cache) — they re-render.
     private func cropChanged() {
+        guard !batchingCrop else { return }
         noteChainInputEdited()          // first, so a restarted pipeline starts fresh
         if let still = uncroppedStill {
             sourceTexture = croppedStill(still)
@@ -554,47 +574,63 @@ final class AppState {
 
     // MARK: dragging the crop on the preview
 
-    /// True while the picture is being dragged to move the crop.
-    private(set) var cropDragging = false
+    /// A drag on the preview: moving the crop (applied as it goes) or
+    /// resizing it from a corner (shown as it goes, applied on release).
+    enum CropDrag { case move, resize }
+    private(set) var cropDrag: CropDrag?
+    var cropDragging: Bool { cropDrag != nil }
+    /// Where a resize would put the crop, while its corner is dragged.
+    private(set) var cropResizePreview: SourceCrop?
     /// The whole source while dragging, to show what the crop leaves out
     /// (dimmed, around the picture). nil until it's decoded.
     private(set) var cropDragContext: CGImage?
     @ObservationIgnored private var cropDragContextKey: String?
     @ObservationIgnored private var lastCropRestart = ContinuousClock.now
-    @ObservationIgnored private var pendingCropPosition: Double?
+    @ObservationIgnored private var pendingCropMove: SourceCrop?
     /// The size the preview shows the picture at, in points (set by the
-    /// preview as it lays out; the drag maps pointer motion through it).
+    /// preview as it lays out; drags map pointer motion through it).
     @ObservationIgnored var previewDisplaySize: CGSize = .zero
 
-    /// Which way the picture can be dragged: the axis the crop cuts.
-    var cropDragAxis: SourceCrop.Cut {
-        guard let crop = activeCrop, let size = sourcePixelSize, zoom <= 1.001 else { return .none }
-        return crop.cut(width: size.width, height: size.height)
+    /// Whether the crop can be adjusted on the preview: it's on, there's a
+    /// picture, and the preview isn't zoomed in.
+    var cropEditable: Bool { activeCrop != nil && sourcePixelSize != nil && zoom <= 1.001 }
+
+    /// Which ways the crop can move: wherever it's smaller than the picture.
+    var cropRoom: (x: Bool, y: Bool) {
+        guard cropEditable, let crop = activeCrop, let size = sourcePixelSize else { return (false, false) }
+        let r = crop.rect(width: size.width, height: size.height)
+        return (r.width < size.width, r.height < size.height)
     }
 
-    func beginCropDrag() {
-        cropDragging = true
-        pendingCropPosition = nil
+    func beginCropDrag(_ kind: CropDrag) {
+        cropDrag = kind
+        pendingCropMove = nil
+        cropResizePreview = nil
         Task { await loadCropDragContext() }
     }
 
-    /// Move the crop to `position` mid-drag. A still re-crops at once, a
-    /// paused clip one decode at a time; a playing clip restarts its decoder
-    /// for each change, so it takes one every 0.2 s and the last at the end.
-    func dragCrop(to position: Double) {
-        let p = min(1, max(0, position))
+    /// Move the crop mid-drag. A still re-crops at once, a paused clip one
+    /// decode at a time; a playing clip restarts its decoder for each change,
+    /// so it takes one every 0.2 s and the last at the end.
+    func dragCrop(to crop: SourceCrop) {
         if videoPlaying, lastCropRestart.duration(to: .now) < .milliseconds(200) {
-            pendingCropPosition = p
+            pendingCropMove = crop
             return
         }
-        pendingCropPosition = nil
-        cropPosition = p
+        pendingCropMove = nil
+        setCrop(crop)
+    }
+
+    /// Where a corner drag would resize the crop to.
+    func previewCropResize(_ crop: SourceCrop) {
+        cropResizePreview = crop
     }
 
     func endCropDrag() {
-        if let p = pendingCropPosition { cropPosition = p }
-        pendingCropPosition = nil
-        cropDragging = false
+        if let crop = cropResizePreview ?? pendingCropMove { setCrop(crop) }
+        pendingCropMove = nil
+        cropResizePreview = nil
+        cropDrag = nil
     }
 
     /// The uncropped picture: a still's own, or a clip's current frame
@@ -1680,7 +1716,7 @@ final class AppState {
         // without one leaves the current crop alone (every look made before
         // the crop existed would otherwise switch yours off).
         if cropEnabled {
-            look["crop"] = ["ratio": cropRatio.label, "position": cropPosition] as [String: Any]
+            look["crop"] = ["ratio": cropRatio.label, "x": cropX, "y": cropY, "scale": cropScale] as [String: Any]
         }
         return look
     }
@@ -1705,8 +1741,12 @@ final class AppState {
         if dict["kind"] as? String == FeedbackPresets.kind { throw LookError.feedbackPreset }
         if let c = dict["crop"] as? [String: Any],
            let label = c["ratio"] as? String, let ratio = SourceCrop.Ratio(label: label) {
-            cropRatio = ratio
-            cropPosition = min(1, max(0, c["position"] as? Double ?? 0.5))
+            // Looks from before the crop could zoom have one position, for
+            // the axis it cut.
+            let position = c["position"] as? Double ?? 0.5
+            func unit(_ key: String) -> Double { min(1, max(0, c[key] as? Double ?? position)) }
+            setCrop(SourceCrop(ratio: ratio, x: unit("x"), y: unit("y"),
+                               scale: min(SourceCrop.maxScale, max(1, c["scale"] as? Double ?? 1))))
             cropEnabled = true
         }
         if let d = dict["downscale"] as? [String: Any] {

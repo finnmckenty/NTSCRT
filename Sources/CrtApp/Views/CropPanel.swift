@@ -33,7 +33,8 @@ struct CropPanel: View {
                 if let size = state.croppedSize, state.cropEnabled {
                     HStack {
                         Spacer()
-                        Text("→ \(size.width) × \(size.height)")
+                        Text("→ \(size.width) × \(size.height)" + (state.cropScale > 1.005
+                             ? String(format: " · %.1f× in", state.cropScale) : ""))
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .help("What the crop leaves of the source, in its pixels.")
@@ -82,17 +83,15 @@ struct CropPanel: View {
 
     // MARK: position
 
-    /// How to move the crop — or a note that the picture is already this shape.
+    /// How to move and size the crop on the preview.
     @ViewBuilder private var position: some View {
         if state.cropEnabled, let size = state.sourcePixelSize {
-            if SourceCrop(ratio: state.cropRatio).cut(width: size.width, height: size.height) == .none {
-                Text("The picture is already this shape — nothing to crop.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("Drag the picture to move the crop; double-click it to center.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            let crop = SourceCrop(ratio: state.cropRatio, x: state.cropX, y: state.cropY, scale: state.cropScale)
+            Text(crop.crops(width: size.width, height: size.height)
+                 ? "Drag the picture to move the crop, or a corner to zoom in or out. Double-click the picture to center it, a corner for the full size."
+                 : "The picture is already this shape. Drag a corner of the picture to zoom in.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
