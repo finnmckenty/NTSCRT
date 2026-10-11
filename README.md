@@ -58,6 +58,7 @@ Click **Animate** in the toolbar to keyframe the whole effect chain, then export
 Click **Export** (⌘E). Exports use the same switches as the preview, and the same settings always give the same pixels.
 
 - **PNG**: the picture, or the frame under the playhead on a video.
+- **Viewport**: exactly what the preview shows, zoom and all, at your screen's real pixels (2× on a Retina display). Use it for close-ups that show off the scanlines.
 - **Video**: H.264 or HEVC .mp4, or ProRes .mov, with audio. Scanlines are hard on codecs, so use High quality or above, or ProRes for editing.
 - **GIF**: its own width and frame rate. The panel estimates the file size and warns past about 10 MB (a 5-second, 480 px GIF is around 8 MB).
 - **Loop** repeats the content inside the file (3 turns a 6-second clip into 18 seconds), for places that don't loop video.

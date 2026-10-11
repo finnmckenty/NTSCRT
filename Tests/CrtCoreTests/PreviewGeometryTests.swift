@@ -94,4 +94,41 @@ final class PreviewGeometryTests: XCTestCase {
         XCTAssertEqual(a.x, b.x - 0.1, accuracy: 1e-6)
         XCTAssertEqual(a.y, b.y + 0.05, accuracy: 1e-6)
     }
+
+    /// Export viewport copies `visiblePicture`: every pixel in it shows the
+    /// picture, the pixels just past each edge don't (or are off the
+    /// drawable). Covers the letterboxed fit, zoom spilling into the bars,
+    /// pan, and Fill.
+    func testVisiblePictureIsExactlyThePixelsThatShowThePicture() {
+        let cases: [(Bool, Float, (Float, Float))] = [
+            (true, 1, (0, 0)), (true, 1.3, (0, 0)), (true, 2.41, (0.1, -0.2)),
+            (true, 4, (0.3, 0.3)), (false, 1, (0, 0)), (false, 3, (-0.2, 0.1)),
+        ]
+        for (dw, dh) in drawables {
+            for (integer, zoom, pan) in cases {
+                let (_, g) = geometry(dw, dh, integer: integer, zoom: zoom, pan: pan)
+                let label = "\(dw)x\(dh) integer=\(integer) zoom=\(zoom) pan=\(pan)"
+                guard let r = g.visiblePicture else { return XCTFail(label) }
+                let midX = r.x + r.width / 2, midY = r.y + r.height / 2
+                for (px, py) in [(r.x, midY), (r.x + r.width - 1, midY), (midX, r.y),
+                                 (midX, r.y + r.height - 1), (r.x, r.y),
+                                 (r.x + r.width - 1, r.y + r.height - 1)] {
+                    XCTAssertNotNil(g.uv(px: px, py: py), "inside \((px, py)) \(label)")
+                }
+                for (px, py) in [(r.x - 1, midY), (r.x + r.width, midY),
+                                 (midX, r.y - 1), (midX, r.y + r.height)]
+                    where (0..<dw).contains(px) && (0..<dh).contains(py) {
+                    XCTAssertNil(g.uv(px: px, py: py), "outside \((px, py)) \(label)")
+                }
+            }
+            // At fit with integer scale it is the letterboxed frame; Fill
+            // and zoomed-in pictures cover the drawable.
+            let (_, fit) = geometry(dw, dh, integer: true)
+            XCTAssertEqual(fit.visiblePicture?.width, fit.targetWidth)
+            XCTAssertEqual(fit.visiblePicture?.height, fit.targetHeight)
+            let (_, fill) = geometry(dw, dh, integer: false)
+            XCTAssertEqual(fill.visiblePicture?.width, dw)
+            XCTAssertEqual(fill.visiblePicture?.height, dh)
+        }
+    }
 }

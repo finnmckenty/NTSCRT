@@ -1361,6 +1361,43 @@ final class AppState {
             crop: activeCrop)
     }
 
+    // MARK: - Export viewport (what the preview shows, at display pixels)
+
+    /// A pending Export viewport. The preview's next draw copies the picture
+    /// it presents — zoom, pan, compare split and all, letterbox trimmed — at
+    /// the drawable's resolution (2× points on a Retina screen), then hands
+    /// it to finishViewportCapture.
+    @ObservationIgnored var viewportCaptureRequest: (url: URL, completion: ((Bool) -> Void)?)?
+    /// The picture's visible size in display pixels, kept by the preview
+    /// for the Export popover's readout.
+    @ObservationIgnored var viewportPixelSize: (width: Int, height: Int)?
+    /// Display pixels per point, from the preview's window.
+    @ObservationIgnored var viewportScale: CGFloat = 2
+
+    func exportViewport(to url: URL, completion: ((Bool) -> Void)? = nil) {
+        guard sourceTexture != nil else { completion?(false); return }
+        viewportCaptureRequest = (url, completion)
+        exportStatus = "Capturing the viewport…"
+        markViewDirty()
+    }
+
+    /// Called by the preview once the GPU has copied the picture into
+    /// `staging`. Tagged at the screen's density, as a macOS screenshot is,
+    /// so it opens at the size it was on screen.
+    func finishViewportCapture(staging: MTLTexture, scale: CGFloat,
+                               url: URL, completion: ((Bool) -> Void)?) {
+        var ok = false
+        do {
+            let cg = try makeCGImage(from: staging)
+            try writePNG(cg, to: url, dpi: 72 * Double(scale))
+            exportStatus = "Wrote \(url.lastPathComponent) (\(staging.width) × \(staging.height))"
+            ok = true
+        } catch {
+            exportStatus = "Write failed: \(error.localizedDescription)"
+        }
+        completion?(ok)
+    }
+
     /// Render the loaded image through the pipeline and write it as a PNG.
     /// Here rather than in the popover so the headless export check drives
     /// exactly what the Export button does.

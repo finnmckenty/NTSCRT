@@ -299,9 +299,12 @@ struct PreviewView: NSViewRepresentable {
             }
 
             // Final composite into the drawable (compare line + zoom + pan).
-            composite(primaryIn: primary,
-                      secondaryIn: state.compareEnabled ? (secondaryTarget ?? primary) : primary,
-                      into: drawable.texture, cb: cb)
+            let geometry = composite(primaryIn: primary,
+                                     secondaryIn: state.compareEnabled ? (secondaryTarget ?? primary) : primary,
+                                     into: drawable.texture, cb: cb)
+            if let geometry {
+                captureViewport(from: drawable.texture, geometry: geometry, cb: cb)
+            }
 
             cb.present(drawable)
             // CRT_COMPOSITE_DUMP=<path.png>: write the drawable's actual
@@ -448,13 +451,14 @@ struct PreviewView: NSViewRepresentable {
 
         // MARK: - composite (fit + letterbox + compare + zoom/pan)
 
+        @discardableResult
         private func composite(primaryIn: MTLTexture,
                                secondaryIn: MTLTexture,
                                into dst: MTLTexture,
-                               cb: MTLCommandBuffer) {
+                               cb: MTLCommandBuffer) -> PreviewGeometry? {
             // The plan comes from renderTargetSize() on the chain render;
             // composite-only draws (zoom, pan, compare) reuse it.
-            guard let plan = scaling else { return }
+            guard let plan = scaling else { return nil }
             let geometry = PreviewGeometry.make(
                 plan: plan, drawableWidth: dst.width, drawableHeight: dst.height,
                 integerScale: state.integerScale,
@@ -471,6 +475,49 @@ struct PreviewView: NSViewRepresentable {
                 if key != Self.lastScaleLogKey {
                     Self.lastScaleLogKey = key
                     fputs("[scale] drawable \(dst.width)x\(dst.height) chain-render \(primaryIn.width)x\(primaryIn.height) displayed \(geometry.targetWidth)x\(geometry.targetHeight) sampled \(sampled.width)x\(sampled.height) delta \(dx),\(dy) \(dx % 2 == 0 && dy % 2 == 0 ? "even" : "ODD")\n", stderr)
+                }
+            }
+            return geometry
+        }
+
+        // MARK: - Export viewport
+
+        /// Keeps the popover's size readout current and, when an Export
+        /// viewport is pending, copies the frame being presented.
+        private func captureViewport(from drawable: MTLTexture, geometry: PreviewGeometry,
+                                     cb: MTLCommandBuffer) {
+            let region = geometry.visiblePicture.map { MTLRegionMake2D($0.x, $0.y, $0.width, $0.height) }
+            let size = region.map { (width: $0.size.width, height: $0.size.height) }
+            if size?.width != state.viewportPixelSize?.width
+                || size?.height != state.viewportPixelSize?.height {
+                state.viewportPixelSize = size
+            }
+            if let v = view, v.bounds.width > 0 {
+                state.viewportScale = v.drawableSize.width / v.bounds.width
+            }
+            guard let request = state.viewportCaptureRequest else { return }
+            state.viewportCaptureRequest = nil
+            let scale = state.viewportScale
+            guard let region,
+                  let staging = makeStagingTexture(device: state.context.device,
+                                                   width: region.size.width,
+                                                   height: region.size.height),
+                  let blit = cb.makeBlitCommandEncoder() else {
+                state.exportStatus = "Couldn't capture the viewport"
+                request.completion?(false)
+                return
+            }
+            blit.copy(from: drawable, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: region.origin, sourceSize: region.size,
+                      to: staging, destinationSlice: 0, destinationLevel: 0,
+                      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            if staging.storageMode == .managed { blit.synchronize(resource: staging) }
+            blit.endEncoding()
+            let state = state
+            cb.addCompletedHandler { _ in
+                DispatchQueue.main.async {
+                    state.finishViewportCapture(staging: staging, scale: scale,
+                                                url: request.url, completion: request.completion)
                 }
             }
         }

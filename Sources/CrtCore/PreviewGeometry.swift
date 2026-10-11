@@ -68,6 +68,26 @@ public struct PreviewGeometry: Equatable {
         return SIMD2(u, v)
     }
 
+    /// The drawable pixels that show the picture — the inverse of
+    /// `uv(px:py:)` at the image's edges: a pixel shows it when its center
+    /// samples inside. Zoomed in, the picture spills past the letterbox
+    /// frame into the bars; it never reaches past the drawable. Export
+    /// viewport copies exactly this.
+    public var visiblePicture: (x: Int, y: Int, width: Int, height: Int)? {
+        /// First and one-past-last pixel whose center lands in [0, 1].
+        func span(offset: Int, size: Int, pan: Float, limit: Int) -> (Int, Int) {
+            func center(_ u: Float) -> Float {
+                Float(offset) + Float(size) * ((u - 0.5 + pan) * zoom + 0.5) - 0.5
+            }
+            return (max(0, Int(center(0).rounded(.up))),
+                    min(limit, Int(center(1).rounded(.down)) + 1))
+        }
+        let (x0, x1) = span(offset: offsetX, size: targetWidth, pan: panX, limit: drawableWidth)
+        let (y0, y1) = span(offset: offsetY, size: targetHeight, pan: panY, limit: drawableHeight)
+        guard x1 > x0, y1 > y0 else { return nil }
+        return (x0, y0, x1 - x0, y1 - y0)
+    }
+
     /// Row of a `textureHeight`-row texture that nearest sampling picks for
     /// drawable row `py` (at the horizontal center).
     public func texelRow(py: Int, textureHeight: Int) -> Int? {

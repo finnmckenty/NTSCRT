@@ -87,6 +87,18 @@ struct ExportPopover: View {
             }
             .disabled(state.sourceTexture == nil || state.chain == nil || state.exportWorking)
 
+            Divider()
+
+            // Last and set apart: it ignores the size above and copies the
+            // preview as drawn — scanlines at screen pixels, zoom and all.
+            Text("The viewport").font(.caption).bold()
+            HStack(spacing: 8) {
+                Button("Export viewport…") { exportViewport() }
+                    .disabled(state.sourceTexture == nil || state.exportWorking)
+                Text(viewportCaption)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             if state.exportWorking {
                 ProgressView(value: state.exportProgress)
                     .progressViewStyle(.linear)
@@ -164,6 +176,22 @@ struct ExportPopover: View {
         // The render itself lives in AppState so the headless export check
         // drives exactly what this button does.
         state.exportPNG(to: url, size: outputSize)
+    }
+
+    // MARK: - viewport (the preview as drawn)
+
+    /// "1,412 × 1,412 screen pixels" — what the preview shows right now.
+    private var viewportCaption: String {
+        guard let size = state.viewportPixelSize else { return "As shown, at screen pixels" }
+        return "\(size.width.formatted()) × \(size.height.formatted()) screen pixels"
+    }
+
+    private func exportViewport() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "crt viewport \(exportTimestamp).png"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        state.exportViewport(to: url)
     }
 
     // MARK: - GIF (still or video source)

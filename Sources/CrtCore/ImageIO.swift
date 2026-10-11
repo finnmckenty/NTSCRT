@@ -63,7 +63,9 @@ public func makeCGImage(from texture: MTLTexture) throws -> CGImage {
 }
 
 /// Write a CGImage as a PNG file at `url`.
-public func writePNG(_ image: CGImage, to url: URL) throws {
+/// `dpi` tags the file's density (144 for a Retina capture); nil leaves the
+/// default 72.
+public func writePNG(_ image: CGImage, to url: URL, dpi: Double? = nil) throws {
     let pngType: CFString = {
         if #available(macOS 11.0, *) { return UTType.png.identifier as CFString }
         return "public.png" as CFString
@@ -71,7 +73,10 @@ public func writePNG(_ image: CGImage, to url: URL) throws {
     guard let dest = CGImageDestinationCreateWithURL(url as CFURL, pngType, 1, nil) else {
         throw ImageIOError.writeFailed("CGImageDestination")
     }
-    CGImageDestinationAddImage(dest, image, nil)
+    let props: CFDictionary? = dpi.map {
+        [kCGImagePropertyDPIWidth: $0, kCGImagePropertyDPIHeight: $0] as CFDictionary
+    }
+    CGImageDestinationAddImage(dest, image, props)
     if !CGImageDestinationFinalize(dest) {
         throw ImageIOError.writeFailed("CGImageDestination finalize")
     }

@@ -151,7 +151,7 @@ struct ContentView: View {
                 || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1"
                 || env["CRT_FEEDBACK_PRESET_CHECK"] != nil
                 || env["CRT_FIELD_FOCUS_CHECK"] != nil || env["CRT_PAD_E2E"] != nil
-                || env["CRT_VIDEO_PNG_CHECK"] != nil else { return }
+                || env["CRT_VIDEO_PNG_CHECK"] != nil || env["CRT_VIEWPORT_CHECK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -586,6 +586,101 @@ struct ContentView: View {
                 try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent("popover.png"))
             }
             print(failures == 0 ? "VIDEOPNG-PASS" : "VIDEOPNG-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_VIEWPORT_CHECK=<dir>: Export viewport through the call its
+        // button makes (exportViewport) — at fit, then zoomed and panned so
+        // the picture spills into the letterbox bars. Each file is the size
+        // the preview reports, in display pixels, tagged at the screen's
+        // density, with picture (not background) on all four edges. Also
+        // draws the Export popover there.
+        if let dir = env["CRT_VIEWPORT_CHECK"] {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("VIEWPORT \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            let folder = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            func capture(_ name: String) async -> (image: CGImage, dpi: Double)? {
+                state.markViewDirty()
+                try? await Task.sleep(for: .milliseconds(600))
+                let url = folder.appendingPathComponent("\(name).png")
+                let ok = await withCheckedContinuation { c in
+                    state.exportViewport(to: url) { c.resume(returning: $0) }
+                }
+                guard ok, let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                      let image = CGImageSourceCreateImageAtIndex(src, 0, nil),
+                      let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+                else { return nil }
+                return (image, (props[kCGImagePropertyDPIWidth] as? Double) ?? 72)
+            }
+            /// The composite paints out-of-picture pixels (0.05, 0.05, 0.06).
+            func edgesArePicture(_ image: CGImage) -> Bool {
+                let w = image.width, h = image.height
+                guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                          bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                else { return false }
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+                func isBackground(_ x: Int, _ y: Int) -> Bool {
+                    let i = (y * w + x) * 4
+                    return abs(Int(px[i]) - 13) <= 2 && abs(Int(px[i + 1]) - 13) <= 2
+                        && abs(Int(px[i + 2]) - 15) <= 2
+                }
+                // A whole edge of background means the copy took in a bar.
+                func edgeAllBackground(_ points: [(Int, Int)]) -> Bool { points.allSatisfy(isBackground) }
+                return !edgeAllBackground((0..<h).map { (0, $0) })
+                    && !edgeAllBackground((0..<h).map { (w - 1, $0) })
+                    && !edgeAllBackground((0..<w).map { ($0, 0) })
+                    && !edgeAllBackground((0..<w).map { ($0, h - 1) })
+            }
+            try? await Task.sleep(for: .milliseconds(1500))
+            let scale = state.viewportScale
+            print("VIEWPORT scale \(scale), preview \(state.previewDisplaySize)")
+            let fit = await capture("fit")
+            let fitSize = state.viewportPixelSize
+            check("fit exports", fit != nil)
+            if let fit, let fitSize {
+                check("fit is the size the preview reports",
+                      fit.image.width == fitSize.width && fit.image.height == fitSize.height,
+                      "\(fit.image.width) × \(fit.image.height)")
+                if state.integerScale {
+                    let shown = state.previewDisplaySize
+                    check("fit is the picture at display pixels (points × \(scale))",
+                          fit.image.width == Int((shown.width * scale).rounded())
+                            && fit.image.height == Int((shown.height * scale).rounded()),
+                          "\(shown.width) × \(shown.height) pt")
+                }
+                check("fit is tagged at the screen's density", fit.dpi == 72 * Double(scale), "\(fit.dpi) dpi")
+                check("fit has picture on every edge", edgesArePicture(fit.image))
+            }
+            state.zoom = 2.41
+            state.panX = 0.1
+            state.panY = -0.1
+            let zoomed = await capture("zoomed")
+            check("zoomed exports", zoomed != nil)
+            if let zoomed, let fitSize, let now = state.viewportPixelSize {
+                check("zoomed is the size the preview reports",
+                      zoomed.image.width == now.width && zoomed.image.height == now.height,
+                      "\(zoomed.image.width) × \(zoomed.image.height)")
+                check("zoomed spills past the fit frame (or fills the view)",
+                      zoomed.image.width >= fitSize.width && zoomed.image.height >= fitSize.height)
+                check("zoomed has picture on every edge", edgesArePicture(zoomed.image))
+            }
+            let host = NSHostingView(rootView: ExportPopover().environment(state)
+                .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .dark))
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.frame = CGRect(origin: .zero, size: host.fittingSize)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            try? await Task.sleep(for: .milliseconds(500))
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent("popover.png"))
+            }
+            print(failures == 0 ? "VIEWPORT-PASS" : "VIEWPORT-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
         // CRT_PAD_E2E=1: the vanishing-point dots on the real panel, driven
