@@ -142,6 +142,7 @@ struct ContentView: View {
                 || env["CRT_ZOOM"] != nil
                 || env["CRT_DOWNSCALE_W"] != nil || env["CRT_CACHE_CHECK"] != nil
                 || env["CRT_EXPORT_TOGGLE_CHECK"] != nil || env["CRT_GLITCH"] != nil
+                || env["CRT_DIGITAL"] != nil || env["CRT_DIGITAL_GALLERY"] != nil
                 || env["CRT_GLITCH_EXPORT_CHECK"] != nil
                 || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil
                 || env["CRT_SLIDER_SELFTEST"] != nil || env["CRT_SLIDER_E2E"] != nil
@@ -151,7 +152,8 @@ struct ContentView: View {
                 || env["CRT_HOWL_PANEL_SNAPSHOT"] != nil || env["CRT_SHOW_HOWL"] == "1"
                 || env["CRT_FEEDBACK_PRESET_CHECK"] != nil
                 || env["CRT_FIELD_FOCUS_CHECK"] != nil || env["CRT_PAD_E2E"] != nil
-                || env["CRT_VIDEO_PNG_CHECK"] != nil || env["CRT_VIEWPORT_CHECK"] != nil else { return }
+                || env["CRT_VIDEO_PNG_CHECK"] != nil || env["CRT_VIEWPORT_CHECK"] != nil
+                || env["CRT_DIGITAL_CHECK"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -204,6 +206,48 @@ struct ContentView: View {
                 let kv = pair.split(separator: "=", maxSplits: 1)
                 if kv.count == 2, let v = Double(kv[1]) { state.setGlitchValue(String(kv[0]), v) }
             }
+        }
+        // CRT_DIGITAL="minidv" or "video_call,data_loss=0.5" — switch the
+        // Digital video stage on with a format (DigitalFormat ids), then
+        // these knobs (DigitalParam ids).
+        if let spec = env["CRT_DIGITAL"] {
+            let parts = spec.split(separator: ",")
+            if let f = parts.first.flatMap({ DigitalFormat.byID[String($0)] }) { state.applyDigitalFormat(f) }
+            for pair in parts {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                if kv.count == 2, let v = Double(kv[1]) { state.setDigitalValue(String(kv[0]), v) }
+            }
+            state.setDigitalEnabled(true)
+        }
+        // CRT_DIGITAL_GALLERY=<dir> (with a still): every format's chain
+        // input — the Digital stage alone, at its capture size, frame 9 —
+        // as <dir>/<format>.png, to look the formats over.
+        if let dir = env["CRT_DIGITAL_GALLERY"], let still = state.sourceTexture {
+            let folder = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let pipe = Pipeline(context: state.context)
+            for f in DigitalFormat.all {
+                state.applyDigitalFormat(f)
+                let input = DigitalFrameInput(
+                    frameIndex: 9,
+                    captureSize: DigitalFrameInput.captureSize(width: still.width, height: still.height,
+                                                               downscale: state.downscaleSpec),
+                    sourceFPS: 30, settings: state.digitalSettings)
+                guard let out = try? pipe.prepareChainInput(source: still, downscale: state.downscaleSpec,
+                                                            ntsc: nil, digital: (DigitalStage(), input),
+                                                            frameCount: 10),
+                      let staging = makeStagingTexture(device: state.context.device, width: out.width, height: out.height),
+                      let cb = state.context.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder()
+                else { print("GALLERY FAIL \(f.id)"); continue }
+                blit.copy(from: out, to: staging)
+                if staging.storageMode == .managed { blit.synchronize(resource: staging) }
+                blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+                if let cg = try? makeCGImage(from: staging) {
+                    try? writePNG(cg, to: folder.appendingPathComponent("\(f.id).png"))
+                    print("GALLERY \(f.id) \(out.width)x\(out.height)")
+                }
+            }
+            exit(0)
         }
         // CRT_HOWL="zoom=0.8,center_x=0.1" sets Screen Loop knobs for the
         // other Screen Loop hooks (old ids and the old drift are read too).
@@ -681,6 +725,152 @@ struct ContentView: View {
                 try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent("popover.png"))
             }
             print(failures == 0 ? "VIEWPORT-PASS" : "VIEWPORT-FAIL \(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        // CRT_DIGITAL_CHECK=<dir> (with CRT_SOURCE=<clip of 100+ frames>,
+        // ideally with motion and a cut): the Digital video stage across
+        // its paths. The pre-render producer (the playback path: every
+        // frame in order) fills the frame cache; then frames are jumped to
+        // out of order on the main thread (re-running from keyframes and
+        // datamosh checkpoints, decoding earlier frames) — every one must
+        // match the cache byte for byte. Also: a format sets the Downscale,
+        // MP4/GIF exports run with the stage, a look round-trips it, and
+        // the panel is drawn to <dir>/panel.png.
+        if let dir = env["CRT_DIGITAL_CHECK"] {
+            var failures = 0
+            func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+                print("DIGITAL \(ok ? "PASS" : "FAIL") \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+                if !ok { failures += 1 }
+            }
+            let folder = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            guard let vs = state.videoSource, vs.totalFrames >= 100 else {
+                print("DIGITAL FAIL needs a clip of 100+ frames (CRT_SOURCE=<clip>)"); exit(1)
+            }
+            func readback(_ t: MTLTexture) -> [UInt8] {
+                guard let staging = makeStagingTexture(device: state.context.device, width: t.width, height: t.height),
+                      let cb = state.context.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder()
+                else { return [] }
+                blit.copy(from: t, to: staging)
+                if staging.storageMode == .managed { blit.synchronize(resource: staging) }
+                blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+                var bytes = [UInt8](repeating: 0, count: t.width * t.height * 4)
+                bytes.withUnsafeMutableBytes {
+                    staging.getBytes($0.baseAddress!, bytesPerRow: t.width * 4,
+                                     from: MTLRegionMake2D(0, 0, t.width, t.height), mipmapLevel: 0)
+                }
+                return bytes
+            }
+
+            // NTSC off: its noise is seeded differently paused and playing,
+            // which would hide what this checks.
+            state.ntscEnabled = false
+            state.applyDigitalFormat(DigitalFormat.byID["video_call"]!)
+            check("a format sets the Downscale", state.downscaleEnabled && state.downscaleWidth == 320
+                  && state.downscalePreset == "Video call (320px)", state.downscalePreset)
+            check("the format is recognized", state.digitalFormat?.id == "video_call")
+            state.setDigitalValue("keyframe_interval", 1)
+            state.setDigitalValue("datamosh", 0.6)
+            state.setDigitalValue("data_loss", 0.4)
+            check("edited values read as Custom", state.digitalFormat == nil)
+            state.setDigitalEnabled(true)
+            check("switching on keeps the edited values", state.digitalSettings["datamosh"] == 0.6)
+
+            // 1. The producer fills the cache, in order.
+            let started = ContinuousClock.now
+            var waited = 0
+            while state.chainInputCache.count(matching: state.currentCacheStamp) < vs.totalFrames && waited < 600 {
+                try? await Task.sleep(for: .milliseconds(100)); waited += 1
+            }
+            let secs = Double(started.duration(to: .now).components.seconds)
+                + Double(started.duration(to: .now).components.attoseconds) / 1e18
+            let cachedCount = state.chainInputCache.count(matching: state.currentCacheStamp)
+            check("pre-render cached every frame", cachedCount == vs.totalFrames,
+                  "\(cachedCount)/\(vs.totalFrames) in \(String(format: "%.1f", secs)) s (\(String(format: "%.0f", Double(cachedCount) / max(secs, 0.01))) fps incl. debounce)")
+
+            // 2. Jumping around on the main thread gives the same frames.
+            let stage = DigitalStage()
+            let clip = DigitalClipFrames(source: vs, crop: state.activeCrop)
+            let pipe = Pipeline(context: state.context)
+            for n in [75, 5, 119, 37, 61, 62, 30, 89] where n < vs.totalFrames {
+                guard let reader = try? vs.makeSequentialReader(startingAtFrame: n, crop: state.activeCrop),
+                      let frame = reader.nextFrame(),
+                      let cached = state.chainInputCache.lookup(frame: n, stamp: state.currentCacheStamp)
+                else { check("frame \(n) available", false); continue }
+                let input = DigitalFrameInput(
+                    frameIndex: n,
+                    captureSize: DigitalFrameInput.captureSize(width: frame.texture.width, height: frame.texture.height,
+                                                               downscale: state.downscaleSpec),
+                    sourceFPS: state.digitalSourceFPS, settings: state.digitalSettings,
+                    history: state.digitalHistory, earlier: clip.visitor)
+                do {
+                    let out = try pipe.prepareChainInput(source: frame.texture, downscale: state.downscaleSpec,
+                                                         ntsc: nil, digital: (stage, input), frameCount: n + 1)
+                    let a = readback(out), b = readback(cached)
+                    var diff = 0
+                    for i in 0..<min(a.count, b.count) where a[i] != b[i] { diff += 1 }
+                    check("frame \(n) jumped to = played (re-ran \(stage.renderer.lastRunLength))",
+                          a.count == b.count && diff == 0, "\(diff) bytes differ")
+                    if n == 62 {
+                        try? writePNG(makeCGImage(from: {
+                            let t = makeStagingTexture(device: state.context.device, width: out.width, height: out.height)!
+                            t.replace(region: MTLRegionMake2D(0, 0, out.width, out.height), mipmapLevel: 0,
+                                      withBytes: a, bytesPerRow: out.width * 4)
+                            return t
+                        }()), to: folder.appendingPathComponent("frame-62.png"))
+                    }
+                } catch {
+                    check("frame \(n) renders", false, "\(error)")
+                }
+            }
+
+            // 3. Exports run with the stage.
+            let mp4 = folder.appendingPathComponent("digital.mp4")
+            do {
+                try await Mp4Exporter(context: state.context).export(
+                    source: vs, paramValues: state.paramValues,
+                    settings: state.mp4ExportSettings(route: .video, outputURL: mp4, size: (640, 360),
+                                                      bitrate: 8_000_000, codec: .h264),
+                    ntscSettingsJSON: nil) { _ in }
+                let bytes = (try? FileManager.default.attributesOfItem(atPath: mp4.path)[.size] as? Int) ?? 0
+                check("MP4 export", bytes > 10_000, "\(bytes) bytes")
+            } catch { check("MP4 export", false, "\(error)") }
+            let gif = folder.appendingPathComponent("digital.gif")
+            do {
+                try await GifExporter(context: state.context).exportVideo(
+                    source: vs, paramValues: state.paramValues,
+                    settings: state.gifExportSettings(outputURL: gif, size: (320, 180)),
+                    ntscSettingsJSON: nil) { _ in }
+                let bytes = (try? FileManager.default.attributesOfItem(atPath: gif.path)[.size] as? Int) ?? 0
+                check("GIF export", bytes > 10_000, "\(bytes) bytes")
+            } catch { check("GIF export", false, "\(error)") }
+
+            // 4. Looks keep it.
+            let look = folder.appendingPathComponent("look.json")
+            let before = state.digitalValues
+            do {
+                try state.saveLook(to: look)
+                state.applyDigitalFormat(DigitalFormat.byID["minidv"]!)
+                state.setDigitalEnabled(false)
+                try state.loadLook(from: look)
+                check("a look restores the stage", state.digitalEnabled && state.digitalValues == before
+                      && state.downscaleWidth == 320)
+            } catch { check("look round trip", false, "\(error)") }
+
+            // 5. The panel, as the sidebar shows it.
+            let host = NSHostingView(rootView: DigitalVideoPanel().environment(state).frame(width: 300)
+                .padding(16).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .dark))
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.frame = CGRect(origin: .zero, size: host.fittingSize)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            try? await Task.sleep(for: .milliseconds(500))
+            host.frame = CGRect(origin: .zero, size: host.fittingSize)
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent("panel.png"))
+            }
+            print(failures == 0 ? "DIGITAL-PASS" : "DIGITAL-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
         // CRT_PAD_E2E=1: the vanishing-point dots on the real panel, driven
@@ -2383,6 +2573,8 @@ private struct Sidebar: View {
                     CropPanel()
                     DownscalePanel()
                 }
+                Divider()
+                DigitalVideoPanel()
                 Divider()
                 NtscPanel()
                 Divider()

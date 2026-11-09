@@ -27,6 +27,8 @@ public final class GifExporter {
         public var shaderEnabled: Bool
         /// The glitch stage, nil when off. Required, like `shaderEnabled`.
         public var glitch: GlitchSettings?
+        /// The Digital video stage, nil when off. Required, like `glitch`.
+        public var digital: DigitalExport?
         /// Video feedback (a camera filming the TV), nil for a normal export.
         public var howlaround: HowlaroundRender?
         /// A clip's frames are cropped to this as they're decoded. (A still
@@ -34,10 +36,11 @@ public final class GifExporter {
         public var crop: SourceCrop?
         public init(outputURL: URL, width: Int, height: Int, fps: Int,
                     downscale: DownscaleSpec?, presetPath: String,
-                    shaderEnabled: Bool, glitch: GlitchSettings?,
+                    shaderEnabled: Bool, glitch: GlitchSettings?, digital: DigitalExport?,
                     howlaround: HowlaroundRender? = nil, crop: SourceCrop? = nil) {
             self.shaderEnabled = shaderEnabled
             self.glitch = glitch
+            self.digital = digital
             self.howlaround = howlaround
             self.crop = crop
             self.outputURL = outputURL
@@ -128,6 +131,7 @@ public final class GifExporter {
                 if ctx.howl?.isCancelled == true { throw CancellationError() }
                 let glitch = try ctx.applyFrameParams(frameParams?(i, totalFrames))
                 let image = try ctx.renderFrame(source: source, frameIndex: i + 1,
+                                                digitalFrame: i, digitalFPS: Double(settings.fps),
                                                 pipeline: pipeline, sourceVersion: 0,
                                                 time: Double(i) / Double(max(1, settings.fps)),
                                                 glitch: glitch)
@@ -161,6 +165,7 @@ public final class GifExporter {
                                   height: Int(source.pixelSize.height),
                                   downscale: settings.downscale))
         let reader = try source.makeSequentialReader(crop: settings.crop)
+        ctx.clipFrames = settings.digital.map { _ in DigitalClipFrames(source: source, crop: settings.crop) }
         try await Task.detached { [pipeline = self.pipeline] in
             var sourceIndex = 0
             var written = 0
@@ -176,6 +181,7 @@ public final class GifExporter {
                     }
                     let image = try ctx.renderFrame(source: frame.texture,
                                                     frameIndex: written + 1,
+                                                    digitalFrame: sourceIndex, digitalFPS: sourceFPS,
                                                     pipeline: pipeline,
                                                     sourceVersion: nil,   // new pixels each frame
                                                     time: Double(sourceIndex) / sourceFPS,
@@ -202,6 +208,9 @@ public final class GifExporter {
         let bypass: ShaderBypass
         let glitchRenderer: GlitchRenderer?
         let ntscStage: NtscStage?
+        let digitalStage: DigitalStage?
+        /// A clip's earlier frames, for the Digital stage's re-runs.
+        var clipFrames: DigitalClipFrames?
         let target: MTLTexture
         /// Set when the requested size would alias the scanlines.
         let supersample: SupersampledPass?
@@ -234,6 +243,7 @@ public final class GifExporter {
                 stage = s
             }
             self.ntscStage = stage
+            self.digitalStage = settings.howlaround == nil ? settings.digital.map { _ in DigitalStage() } : nil
 
             if settings.shaderEnabled {
                 let c = try LRShaderChain(presetPath: settings.presetPath,
@@ -288,7 +298,10 @@ public final class GifExporter {
         ///   for every frame, so the readback is reusable), nil for video —
         ///   passing a constant there would freeze frame one for the whole
         ///   clip.
-        func renderFrame(source: MTLTexture, frameIndex: Int, pipeline: Pipeline,
+        /// - Parameter digitalFrame: the frame for the Digital stage — the
+        ///   clip's own frame number (GIFs skip frames), at `digitalFPS`.
+        func renderFrame(source: MTLTexture, frameIndex: Int,
+                         digitalFrame: Int, digitalFPS: Double, pipeline: Pipeline,
                          sourceVersion: Int?, time: Double,
                          glitch: GlitchSettings?) throws -> CGImage {
             // With a howlaround the camera's picture replaces the source, and
@@ -299,9 +312,15 @@ public final class GifExporter {
             }
             var input = scene
             var downscale = settings.downscale
-            if let stage = ntscStage {
+            if ntscStage != nil || digitalStage != nil {
+                let digital = zip(digitalStage, settings.digital).map { stage, d in
+                    (stage, d.input(frame: digitalFrame, width: scene.width, height: scene.height,
+                                    downscale: downscale, sourceFPS: digitalFPS,
+                                    earlier: clipFrames?.visitor))
+                }
                 input = try pipeline.prepareChainInput(source: scene, downscale: downscale,
-                                                       ntsc: stage, frameCount: frameIndex,
+                                                       ntsc: ntscStage, digital: digital,
+                                                       frameCount: frameIndex,
                                                        sourceVersion: howl == nil ? sourceVersion : nil)
                 downscale = nil
             }

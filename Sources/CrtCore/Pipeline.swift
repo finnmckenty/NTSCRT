@@ -67,21 +67,33 @@ public final class Pipeline {
     }
 
     /// Synchronously produce the chain input for a frame that needs the
-    /// ntsc-rs stage: the CPU effect runs at the source's full resolution
-    /// (matching how ntsc-rs is used standalone; its scale_settings can
-    /// scale artifacts with video size), then the degraded signal is
-    /// downscaled for the shader. The result replaces both `inputTexture`
-    /// and `downscale` in a subsequent `encode` call (pass downscale: nil).
-    /// - Parameter sourceVersion: identifies `source`'s contents so the NTSC
-    ///   stage can skip re-reading unchanged pixels (see NtscStage.process).
+    /// CPU stages — Digital video, then ntsc-rs: they run at the source's
+    /// full resolution (matching how ntsc-rs is used standalone; its
+    /// scale_settings can scale artifacts with video size), then the
+    /// degraded signal is downscaled for the shader. The result replaces both
+    /// `inputTexture` and `downscale` in a subsequent `encode` call (pass
+    /// downscale: nil). With both stages on they share one readback.
+    /// - Parameter sourceVersion: identifies `source`'s contents so the
+    ///   stages can skip re-reading unchanged pixels (see NtscStage.process).
     public func prepareChainInput(source: MTLTexture,
                                   downscale: DownscaleSpec?,
-                                  ntsc: NtscStage,
+                                  ntsc: NtscStage?,
+                                  digital: (stage: DigitalStage, input: DigitalFrameInput)? = nil,
                                   frameCount: Int,
                                   sourceVersion: Int? = nil) throws -> MTLTexture {
-        let processed = try ntsc.process(input: source, frameIndex: frameCount,
+        let processed: MTLTexture
+        if let ntsc {
+            processed = try ntsc.process(input: source, frameIndex: frameCount,
                                          inputVersion: sourceVersion,
+                                         prefilter: digital.map { $0.stage.prefilter($0.input) },
                                          device: context.device, queue: context.queue)
+        } else if let digital {
+            processed = try digital.stage.process(input: source, frame: digital.input,
+                                                  inputVersion: sourceVersion,
+                                                  device: context.device, queue: context.queue)
+        } else {
+            processed = source
+        }
         guard let spec = downscale else { return processed }
 
         guard let cb = context.queue.makeCommandBuffer() else {

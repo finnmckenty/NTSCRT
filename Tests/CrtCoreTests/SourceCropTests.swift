@@ -206,7 +206,7 @@ final class SourceCropTests: XCTestCase {
         let url = tmp.appendingPathComponent("quadrants.mp4")
         let settings = Mp4Exporter.Settings(outputURL: url, outputWidth: 640, outputHeight: 360,
                                             downscale: nil, presetPath: "", shaderEnabled: false,
-                                            glitch: nil, codec: .h264, averageBitrate: 8_000_000)
+                                            glitch: nil, digital: nil, codec: .h264, averageBitrate: 8_000_000)
         try await Mp4Exporter(context: context).exportStill(source: quadrants(width: 640, height: 360),
                                                             totalFrames: 8, fps: 12, paramValues: [:],
                                                             settings: settings, progress: { _ in })
@@ -257,7 +257,7 @@ final class SourceCropTests: XCTestCase {
 
     func testThePlaybackPipelineHandsOutCroppedFrames() async throws {
         let clip = try await makeClip()
-        let config = PlaybackPipeline.Config(enabled: false, baseJSON: nil, perFrameJSON: nil, generation: 0)
+        let config = PlaybackPipeline.Config(enabled: false, baseJSON: nil, perFrameJSON: nil, generation: 0, digital: nil)
         let pipe = PlaybackPipeline(source: clip, device: context.device, startFrame: 0, config: config,
                                     crop: SourceCrop(ratio: .init(1, 2), position: 0))
         pipe.start()
@@ -281,7 +281,7 @@ final class SourceCropTests: XCTestCase {
         // clip squeezed into a square would show blue and yellow at x 0.6.
         let gif = tmp.appendingPathComponent("cropped.gif")
         let gs = GifExporter.Settings(outputURL: gif, width: 120, height: 120, fps: 12, downscale: nil,
-                                      presetPath: "", shaderEnabled: false, glitch: nil, crop: crop)
+                                      presetPath: "", shaderEnabled: false, glitch: nil, digital: nil, crop: crop)
         try await GifExporter(context: context).exportVideo(source: clip, paramValues: [:], settings: gs,
                                                             progress: { _ in })
         let src = try XCTUnwrap(CGImageSourceCreateWithURL(gif as CFURL, nil))
@@ -291,7 +291,7 @@ final class SourceCropTests: XCTestCase {
         // MP4, the same.
         let mp4 = tmp.appendingPathComponent("cropped.mp4")
         let ms = Mp4Exporter.Settings(outputURL: mp4, outputWidth: 240, outputHeight: 240, downscale: nil,
-                                      presetPath: "", shaderEnabled: false, glitch: nil,
+                                      presetPath: "", shaderEnabled: false, glitch: nil, digital: nil,
                                       codec: .h264, averageBitrate: 8_000_000, crop: crop)
         try await Mp4Exporter(context: context).export(source: clip, paramValues: [:], settings: ms,
                                                        progress: { _ in })

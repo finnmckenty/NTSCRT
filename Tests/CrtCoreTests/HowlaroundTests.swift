@@ -419,7 +419,7 @@ final class HowlaroundTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("howl-\(UUID().uuidString).gif")
         let s = GifExporter.Settings(outputURL: url, width: N, height: N, fps: 12, downscale: nil,
-                                     presetPath: "", shaderEnabled: false, glitch: nil,
+                                     presetPath: "", shaderEnabled: false, glitch: nil, digital: nil,
                                      howlaround: howl.map { HowlaroundRender(settings: $0, length: Double(frames) / 12,
                                                                              cancel: cancel) })
         try await GifExporter(context: context).exportStill(source: source, totalFrames: frames,

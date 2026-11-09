@@ -217,16 +217,17 @@ struct PreviewView: NSViewRepresentable {
 
                 var allRendered = true
 
-                // ntsc-rs stage: synchronously produce the degraded chain
-                // input (downscale + CPU effect); both compare sides then
-                // consume it with no further downscaling.
+                // CPU stages (Digital video, then ntsc-rs): synchronously
+                // produce the degraded chain input (CPU effects + downscale);
+                // both compare sides then consume it with no further
+                // downscaling.
                 var chainSource = source
                 var spec = state.downscaleSpec
-                if state.ntscEnabled, let cached = state.cachedChainInput {
+                if state.bakesChainInput, let cached = state.cachedChainInput {
                     // Frame cache hit: NTSC and downscale already applied.
                     chainSource = cached
                     spec = nil
-                } else if state.ntscEnabled, let baked = state.processedSourceTexture {
+                } else if state.bakesChainInput, let baked = state.processedSourceTexture {
                     // Pipelined playback already ran the NTSC stage on a
                     // background thread. Downscale into a texture of our own
                     // so the frame cache can keep it (pool memory is
@@ -242,11 +243,13 @@ struct PreviewView: NSViewRepresentable {
                     } else {
                         chainSource = baked
                     }
-                } else if state.ntscEnabled, let stage = state.ntscStage {
+                } else if state.bakesChainInput {
                     do {
                         chainSource = try state.pipeline.prepareChainInput(
                             source: source, downscale: spec,
-                            ntsc: stage, frameCount: state.frameCounter,
+                            ntsc: state.ntscEnabled ? state.ntscStage : nil,
+                            digital: state.previewDigitalFrame(width: source.width, height: source.height),
+                            frameCount: state.frameCounter,
                             sourceVersion: state.sourceVersion)
                         spec = nil
                     } catch {

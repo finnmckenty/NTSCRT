@@ -78,7 +78,7 @@ final class ExportGlitchTests: XCTestCase {
             let s = Mp4Exporter.Settings(outputURL: tmp.appendingPathComponent(name),
                                          outputWidth: size.w, outputHeight: size.h,
                                          downscale: downscale, presetPath: "",
-                                         shaderEnabled: false, glitch: glitch,
+                                         shaderEnabled: false, glitch: glitch, digital: nil,
                                          codec: .h264, averageBitrate: 12_000_000)
             try await Mp4Exporter(context: context).exportStill(
                 source: source(), totalFrames: 6, fps: 12, paramValues: [:], settings: s,
@@ -97,7 +97,7 @@ final class ExportGlitchTests: XCTestCase {
             let s = GifExporter.Settings(outputURL: tmp.appendingPathComponent(name),
                                          width: size.w, height: size.h, fps: 12,
                                          downscale: downscale, presetPath: "",
-                                         shaderEnabled: false, glitch: glitch)
+                                         shaderEnabled: false, glitch: glitch, digital: nil)
             try await GifExporter(context: context).exportStill(
                 source: source(), totalFrames: 4, paramValues: [:], settings: s, progress: { _ in })
             return try await frame(s.outputURL)
@@ -115,7 +115,7 @@ final class ExportGlitchTests: XCTestCase {
         let s = Mp4Exporter.Settings(outputURL: tmp.appendingPathComponent("keyed.mp4"),
                                      outputWidth: size.w, outputHeight: size.h,
                                      downscale: downscale, presetPath: "",
-                                     shaderEnabled: false, glitch: GlitchSettings(),
+                                     shaderEnabled: false, glitch: GlitchSettings(), digital: nil,
                                      codec: .h264, averageBitrate: 12_000_000)
         let brokenNow = broken
         try await Mp4Exporter(context: context).exportStill(

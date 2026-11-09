@@ -25,9 +25,19 @@ let package = Package(
                 .linkedFramework("Foundation"),
             ]
         ),
+        // The Digital video stage's codec: per-pixel CPU work that runs
+        // ~150× slower unoptimized, which would make debug builds (and the
+        // dev hooks that run them) useless for judging it. So it's always
+        // optimized; it has no dependencies to keep it that simple.
+        .target(
+            name: "CrtCodec",
+            path: "Sources/CrtCodec",
+            swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))],
+            linkerSettings: [.linkedFramework("Accelerate")]
+        ),
         .target(
             name: "CrtCore",
-            dependencies: ["CrtAppBridge"],
+            dependencies: ["CrtAppBridge", "CrtCodec"],
             path: "Sources/CrtCore",
             linkerSettings: [
                 .linkedFramework("Metal"),
@@ -69,7 +79,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CrtCoreTests",
-            dependencies: ["CrtCore", "CrtAppBridge"],
+            dependencies: ["CrtCore", "CrtAppBridge", "CrtCodec"],
             path: "Tests/CrtCoreTests"
         ),
         .executableTarget(

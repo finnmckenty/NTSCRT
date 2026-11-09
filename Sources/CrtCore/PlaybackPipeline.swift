@@ -42,6 +42,30 @@ public final class PlaybackPipeline {
         let retain: CVPixelBuffer
     }
 
+    /// The Digital video stage for playback (nil = off): it runs on every
+    /// decoded frame, in order, ahead of NTSC.
+    public struct Digital: @unchecked Sendable {
+        public var settings: DigitalSettings
+        public var history: DigitalHistory?
+        public var downscale: DownscaleSpec?
+        public var sourceFPS: Double
+        public init(settings: DigitalSettings, history: DigitalHistory?,
+                    downscale: DownscaleSpec?, sourceFPS: Double) {
+            self.settings = settings
+            self.history = history
+            self.downscale = downscale
+            self.sourceFPS = sourceFPS
+        }
+
+        func input(frame: Int, width: Int, height: Int, earlier: DigitalFrameVisitor?) -> DigitalFrameInput {
+            DigitalFrameInput(frameIndex: frame,
+                              captureSize: DigitalFrameInput.captureSize(width: width, height: height,
+                                                                         downscale: downscale),
+                              sourceFPS: sourceFPS, settings: settings, history: history,
+                              earlier: earlier)
+        }
+    }
+
     /// NTSC settings snapshot, updated from the main thread when the user
     /// edits values. Bumping the generation invalidates queued frames.
     public final class Config {
@@ -51,6 +75,7 @@ public final class PlaybackPipeline {
         /// Per-frame settings for keyframed playback (frame index → JSON).
         private var perFrameJSON: (@Sendable (Int) -> String?)?
         private var generation: Int
+        private var digital: Digital?
         /// Frame-cache probe: (frameIndex, generation) → already cached, so
         /// the producer skips the NTSC step for that frame (it still decodes
         /// it — the clean frame feeds the compare side).
@@ -60,33 +85,37 @@ public final class PlaybackPipeline {
             lock.lock(); isCached = probe; lock.unlock()
         }
 
+        /// - Parameter enabled: the NTSC stage.
         public init(enabled: Bool, baseJSON: String?,
                     perFrameJSON: (@Sendable (Int) -> String?)?,
-                    generation: Int) {
+                    generation: Int, digital: Digital?) {
             self.enabled = enabled
             self.baseJSON = baseJSON
             self.perFrameJSON = perFrameJSON
             self.generation = generation
+            self.digital = digital
         }
 
         public func update(enabled: Bool, baseJSON: String?,
                            perFrameJSON: (@Sendable (Int) -> String?)?,
-                           generation: Int) {
+                           generation: Int, digital: Digital?) {
             lock.lock()
             self.enabled = enabled
             self.baseJSON = baseJSON
             self.perFrameJSON = perFrameJSON
             self.generation = generation
+            self.digital = digital
             lock.unlock()
         }
 
         func snapshot() -> (enabled: Bool, baseJSON: String?,
                             perFrameJSON: (@Sendable (Int) -> String?)?,
                             generation: Int,
-                            isCached: (@Sendable (Int, Int) -> Bool)?) {
+                            isCached: (@Sendable (Int, Int) -> Bool)?,
+                            digital: Digital?) {
             lock.lock()
             defer { lock.unlock() }
-            return (enabled, baseJSON, perFrameJSON, generation, isCached)
+            return (enabled, baseJSON, perFrameJSON, generation, isCached, digital)
         }
     }
 
@@ -252,7 +281,22 @@ public final class PlaybackPipeline {
             let generation: Int
             let json: String?
             let wantsNtsc: Bool
+            /// The frame is emitted processed (NTSC and/or Digital video).
+            let wantsOutput: Bool
+            /// Already holds the Digital video stage's picture.
+            let slot: PoolSlot?
         }
+
+        // The Digital video stage keeps a stream's state from frame to
+        // frame, so it sees every decoded frame in order — late and cached
+        // ones too, in scratch memory rather than a pool slot (a burst of
+        // them would otherwise cycle through slots still queued or on
+        // screen). Its
+        // re-runs from a keyframe (at start, after a seek) decode earlier
+        // frames with a reader of their own.
+        let digitalRenderer = DigitalVideoRenderer()
+        let clipFrames = DigitalClipFrames(source: source, crop: crop)
+        var scratch: [UInt8] = []
 
         while !stopFlag.load() {
             // Decode up to two frames for one parallel batch.
@@ -269,15 +313,36 @@ public final class PlaybackPipeline {
                 // on arrival — decode them (h264 needs the sequence) but skip
                 // the NTSC cost, so catch-up runs at decode speed.
                 let hopeless = targetAbsolute.load() - absolute > 0
+                let snap = config.snapshot()
+                let cached = snap.isCached?(frameIndex, snap.generation) ?? false
+                var digitalSlot: PoolSlot?
+                if let digital = snap.digital {
+                    if hopeless || cached {
+                        frame.withPixels { base, w, h, rb in
+                            if scratch.count != w * h * 4 { scratch = [UInt8](repeating: 0, count: w * h * 4) }
+                            scratch.withUnsafeMutableBytes { dst in
+                                for y in 0..<h { memcpy(dst.baseAddress! + y * w * 4, base + y * rb, w * 4) }
+                                digital.input(frame: frameIndex, width: w, height: h, earlier: clipFrames.visitor)
+                                    .apply(digitalRenderer, pixels: dst.baseAddress!, width: w, height: h, rowBytes: w * 4)
+                            }
+                        }
+                    } else if let slot = preparedSlot(for: frame) {
+                        digital.input(frame: frameIndex, width: slot.width, height: slot.height,
+                                      earlier: clipFrames.visitor)
+                            .apply(digitalRenderer, pixels: slot.bytes, width: slot.width,
+                                   height: slot.height, rowBytes: slot.rowBytes)
+                        digitalSlot = slot
+                    }
+                }
                 if !hopeless {
-                    let snap = config.snapshot()
                     batch.append(Pending(frame: frame,
                                          frameIndex: frameIndex,
                                          absolute: absolute,
                                          generation: snap.generation,
                                          json: snap.perFrameJSON?(frameIndex) ?? snap.baseJSON,
-                                         wantsNtsc: snap.enabled
-                                             && !(snap.isCached?(frameIndex, snap.generation) ?? false)))
+                                         wantsNtsc: snap.enabled && !cached,
+                                         wantsOutput: (snap.enabled || snap.digital != nil) && !cached,
+                                         slot: digitalSlot))
                 }
                 frameIndex = (frameIndex + 1) % total
                 absolute += 1
@@ -293,7 +358,8 @@ public final class PlaybackPipeline {
             // memory, so there's no upload afterwards.
             let tNtsc = DispatchTime.now().uptimeNanoseconds
             var slots: [PoolSlot?] = batch.map { p in
-                p.wantsNtsc ? preparedSlot(for: p.frame) : nil
+                guard p.wantsOutput else { return nil }
+                return p.slot ?? preparedSlot(for: p.frame)
             }
             if batch.contains(where: { $0.wantsNtsc }) {
                 let batchCopy = batch

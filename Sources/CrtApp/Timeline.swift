@@ -36,6 +36,9 @@ struct Keyframe: Identifiable {
     /// Glitch-stage knobs (GlitchParam ids). Empty in keyframes saved
     /// before the stage existed: they then leave the knobs alone.
     var glitchValues: [String: Double] = [:]
+    /// Digital video knobs (DigitalParam ids); empty in keyframes saved
+    /// before the stage existed.
+    var digitalValues: [String: Double] = [:]
 }
 
 /// Value-captured interpolation engine, safe to hand to the exporter's
@@ -145,6 +148,23 @@ struct TimelineEvaluator: @unchecked Sendable {
     /// keyframes don't carry.
     func glitchSettings(at t: Double, base: [String: Double]) -> GlitchSettings {
         GlitchSettings(values: base.merging(glitchValues(at: t)) { _, new in new })
+    }
+
+    /// Sliders interpolate; choices hold until the next keyframe. The
+    /// structure controls (frame rate, keyframe interval, color resolution)
+    /// are left out: they hold for a whole render.
+    func digitalValues(at t: Double) -> [String: Double] {
+        let (a, b, u) = segment(at: t)
+        var out: [String: Double] = [:]
+        for (id, va) in a.digitalValues where !DigitalParam.structureIDs.contains(id) {
+            let vb = b.digitalValues[id] ?? va
+            out[id] = (u == 0 || (DigitalParam.byID[id]?.isChoice ?? false)) ? va : va + (vb - va) * u
+        }
+        return out
+    }
+
+    func digitalSettings(at t: Double, base: [String: Double]) -> DigitalSettings {
+        DigitalSettings(values: base.merging(digitalValues(at: t)) { _, new in new })
     }
 
     func ntscJSON(at t: Double) -> String? {

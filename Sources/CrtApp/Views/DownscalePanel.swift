@@ -103,6 +103,8 @@ struct DownscalePanel: View {
                 if let p = Self.presets.first(where: { $0.label == state.downscalePreset }),
                    p.width != $0 {
                     state.downscalePreset = "Custom"
+                } else if !state.downscalePreset.hasSuffix("(\($0)px)") {
+                    state.downscalePreset = "Custom"
                 }
             }
         )
@@ -122,6 +124,11 @@ struct DownscalePanel: View {
         if let p = Self.presets.first(where: { $0.label == state.downscalePreset }),
            p.width == state.downscaleWidth {
             return p.label
+        }
+        // A Digital video format names its own resolution ("MiniDV (720px)").
+        if DigitalFormat.all.contains(where: { state.downscalePreset == "\($0.name) (\($0.width)px)" }),
+           state.downscalePreset.hasSuffix("(\(state.downscaleWidth)px)") {
+            return state.downscalePreset
         }
         return "Custom (\(state.downscaleWidth)px)"
     }

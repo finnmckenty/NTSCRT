@@ -71,6 +71,10 @@ public final class NtscStage {
         NTSCFilter.settingsDescriptorsJSON()
     }
 
+    /// CPU work on the clean pixels before the effect (the Digital video
+    /// stage, which sits ahead of NTSC), sharing this stage's readback.
+    public typealias Prefilter = (_ pixels: UnsafeMutableRawPointer, _ width: Int, _ height: Int, _ rowBytes: Int) -> Void
+
     /// Apply the effect to `input` and return a texture holding the result.
     /// The returned texture is owned by this stage and reused across calls —
     /// consume it before the next `process` call.
@@ -84,6 +88,7 @@ public final class NtscStage {
     public func process(input: MTLTexture,
                         frameIndex: Int,
                         inputVersion: Int? = nil,
+                        prefilter: Prefilter? = nil,
                         device: MTLDevice,
                         queue: MTLCommandQueue) throws -> MTLTexture {
         let w = input.width, h = input.height
@@ -139,6 +144,9 @@ public final class NtscStage {
             cleanBytes.withUnsafeBytes { src in
                 dst.copyMemory(from: src)
             }
+        }
+        if let prefilter {
+            bytes.withUnsafeMutableBytes { prefilter($0.baseAddress!, w, h, rowBytes) }
         }
         var ok = false
         bytes.withUnsafeMutableBytes { raw in

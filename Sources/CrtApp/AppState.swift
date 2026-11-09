@@ -175,7 +175,8 @@ final class AppState {
         playbackPipeline.config.update(enabled: ntscEnabled,
                                baseJSON: ntscStage?.settingsJSON(),
                                perFrameJSON: perFrameNtscJSON(),
-                               generation: ntscGeneration)
+                               generation: ntscGeneration,
+                               digital: digitalPlayback)
     }
 
     /// Held while a video plays. Without it App Nap coalesces every timing
@@ -218,7 +219,8 @@ final class AppState {
         let cfg = PlaybackPipeline.Config(enabled: ntscEnabled,
                                           baseJSON: ntscStage?.settingsJSON(),
                                           perFrameJSON: nil,
-                                          generation: ntscGeneration)
+                                          generation: ntscGeneration,
+                                          digital: digitalPlayback)
         cfg.setCacheProbe(cacheProbe)
         let pipe = PlaybackPipeline(source: source, device: context.device,
                                     startFrame: frame, config: cfg, crop: activeCrop)
@@ -281,7 +283,7 @@ final class AppState {
         // The producer skips NTSC for frames the cache holds (processed is
         // nil then); serve those from the cache. A miss here — evicted, or
         // a stamp mismatch — falls through to main-thread processing.
-        if out.processed == nil, ntscEnabled, !Self.frameCacheOff {
+        if out.processed == nil, bakesChainInput, !Self.frameCacheOff {
             cachedChainInput = chainInputCache.lookup(frame: out.frameIndex,
                                                       stamp: currentCacheStamp)
             if cachedChainInput != nil { playbackCacheHits += 1 }
@@ -377,7 +379,7 @@ final class AppState {
 
     private func startPrerender() {
         stopPrerender()
-        guard !Self.frameCacheOff, let vs = videoSource, ntscEnabled,
+        guard !Self.frameCacheOff, let vs = videoSource, bakesChainInput,
               !videoPlaying, !exportInProgress,
               !(vs.needsPreferredTransform || Self.forceSeekDecode) else { return }
         let total = max(1, vs.totalFrames)
@@ -385,10 +387,11 @@ final class AppState {
             updateCachedRanges(force: true)
             return
         }
-        let cfg = PlaybackPipeline.Config(enabled: true,
+        let cfg = PlaybackPipeline.Config(enabled: ntscEnabled,
                                           baseJSON: ntscStage?.settingsJSON(),
                                           perFrameJSON: perFrameNtscJSON(),
-                                          generation: ntscGeneration)
+                                          generation: ntscGeneration,
+                                          digital: digitalPlayback)
         cfg.setCacheProbe(cacheProbe)
         let pipe = PlaybackPipeline(source: vs, device: context.device,
                                     startFrame: currentFrameIndex, config: cfg, crop: activeCrop)
@@ -688,6 +691,22 @@ final class AppState {
     private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
+    // MARK: - Digital video (a camera and codec ahead of NTSC — CrtCodec)
+
+    /// Off by default: unlike Glitch, a codec changes the picture as soon as
+    /// it runs. The first time it's switched on, its format is applied —
+    /// resolution (the Downscale) included.
+    var digitalEnabled: Bool = false { didSet { markChainDirty(); noteChainInputEdited() } }
+    private(set) var digitalValues: [String: Double] = DigitalParam.defaultValues
+    var digitalSettings: DigitalSettings { DigitalSettings(values: digitalValues) }
+    /// Whether a format (or a look's settings) has been applied, so
+    /// switching the stage on doesn't reset what's been chosen.
+    @ObservationIgnored private var digitalFormatApplied = false
+    /// The preview's codec (main thread). Playback and exports run their own.
+    @ObservationIgnored private(set) lazy var digitalStage = DigitalStage()
+    /// A clip's earlier frames for the preview's re-runs.
+    @ObservationIgnored private var digitalClipFrames: (key: String, frames: DigitalClipFrames)?
+
     // MARK: - Screen Loop (video feedback render — CrtCore/Howlaround.swift)
 
     /// The howlaround camera's knobs (the Howlaround panel).
@@ -751,6 +770,120 @@ final class AppState {
         glitchValues = glitchValues.merging(values) { _, new in new }
         markChainDirty()
     }
+
+    func setDigitalValue(_ id: String, _ value: Double) {
+        digitalValues[id] = value
+        autoKeyIfParked()
+        markChainDirty()
+        noteChainInputEdited()
+    }
+
+    func setDigitalEnabled(_ on: Bool) {
+        if on && !digitalFormatApplied {
+            applyDigitalFormat(DigitalFormat.matching(values: digitalValues, width: downscaleWidth)
+                               ?? DigitalFormat.all[0])
+        }
+        digitalEnabled = on
+    }
+
+    /// A format's settings, and its resolution as the Downscale's.
+    func applyDigitalFormat(_ f: DigitalFormat) {
+        digitalValues = DigitalParam.defaultValues.merging(f.values) { _, new in new }
+        digitalFormatApplied = true
+        downscaleEnabled = true
+        downscaleWidth = f.width
+        downscalePreset = "\(f.name) (\(f.width)px)"
+        autoKeyIfParked()
+        markChainDirty()
+        noteChainInputEdited()
+    }
+
+    /// The format the current settings and resolution are, if any.
+    var digitalFormat: DigitalFormat? {
+        guard downscaleEnabled else { return nil }
+        return DigitalFormat.matching(values: digitalValues, width: downscaleWidth)
+    }
+
+    /// Timeline scrub/playback: merge keyed values without auto-keying. The
+    /// frame cache stays — it was baked with the same keyframes.
+    private func applyDigitalValues(_ values: [String: Double]) {
+        guard !values.isEmpty else { return }
+        let merged = digitalValues.merging(values) { _, new in new }
+        guard merged != digitalValues else { return }
+        digitalValues = merged
+        markChainDirty()
+    }
+
+    /// The frame number the Digital stage gets for what's on screen: a
+    /// clip's own, the timeline's on a still, else the Animate counter.
+    var digitalFrameIndex: Int {
+        if videoSource != nil { return currentFrameIndex }
+        if timelineEnabled { return Int((playheadT * Double(max(1, timelineTotalFrames - 1))).rounded()) }
+        return frameCounter
+    }
+
+    /// The clip's frame rate, or the timeline's for a still.
+    var digitalSourceFPS: Double {
+        if let vs = videoSource { return Double(max(1, vs.frameRate)) }
+        return Double(max(1, timelineFPS))
+    }
+
+    /// How the Digital knobs vary over the timeline, by frame (a still's
+    /// export wraps around it pass after pass). nil without keyframes.
+    var digitalHistory: DigitalHistory? {
+        guard timelineEnabled, !timelineKeys.isEmpty, let ev = makeTimelineEvaluator() else { return nil }
+        let total = timelineTotalFrames
+        let base = digitalValues
+        var hasher = Hasher()
+        hasher.combine(ntscGeneration)
+        hasher.combine(total)
+        // The base only matters for keyframes saved without the stage's
+        // values; hashing it otherwise would restart the stream every time
+        // the playhead applies keyed values.
+        if timelineKeys.contains(where: { $0.digitalValues.isEmpty }) {
+            for k in base.keys.sorted() { hasher.combine(k); hasher.combine(base[k]) }
+        }
+        return DigitalHistory(id: hasher.finalize()) { n in
+            let i = ((n % total) + total) % total
+            let t = total > 1 ? Double(i) / Double(total - 1) : 0
+            return ev.digitalSettings(at: t, base: base)
+        }
+    }
+
+    /// The stage's input for the frame on screen, nil when it's off.
+    func previewDigitalFrame(width: Int, height: Int) -> (stage: DigitalStage, input: DigitalFrameInput)? {
+        guard digitalEnabled else { return nil }
+        var earlier: DigitalFrameVisitor?
+        if let vs = videoSource {
+            let key = "\(ObjectIdentifier(vs).hashValue)-\(String(describing: activeCrop))"
+            if digitalClipFrames?.key != key {
+                digitalClipFrames = (key, DigitalClipFrames(source: vs, crop: activeCrop))
+            }
+            earlier = digitalClipFrames?.frames.visitor
+        }
+        let input = DigitalFrameInput(
+            frameIndex: digitalFrameIndex,
+            captureSize: DigitalFrameInput.captureSize(width: width, height: height, downscale: downscaleSpec),
+            sourceFPS: digitalSourceFPS, settings: digitalSettings, history: digitalHistory,
+            earlier: earlier)
+        return (digitalStage, input)
+    }
+
+    /// For exports: the settings and their keyframes, nil when off.
+    var digitalExport: DigitalExport? {
+        digitalEnabled ? DigitalExport(settings: digitalSettings, history: digitalHistory) : nil
+    }
+
+    /// For playback's producer, nil when off.
+    private var digitalPlayback: PlaybackPipeline.Digital? {
+        guard digitalEnabled else { return nil }
+        return .init(settings: digitalSettings, history: digitalHistory,
+                     downscale: downscaleSpec, sourceFPS: digitalSourceFPS)
+    }
+
+    /// Whether anything runs ahead of the downscale (and so whether there's
+    /// a baked chain input to cache).
+    var bakesChainInput: Bool { (ntscEnabled && ntscStage != nil) || digitalEnabled }
 
     /// The preview's receiver. Exports run their own from time zero; PNG
     /// export reuses this one so a still is exactly what's on screen.
@@ -953,6 +1086,7 @@ final class AppState {
             setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
             applyNtscValues(ev.ntscValues(at: playheadT))
             applyGlitchValues(ev.glitchValues(at: playheadT))
+            applyDigitalValues(ev.digitalValues(at: playheadT))
         }
     }
 
@@ -967,12 +1101,14 @@ final class AppState {
         let snapshot = Keyframe(t: playheadT,
                                 shaderParams: paramValues,
                                 ntscValues: ntscValues,
-                                glitchValues: glitchValues)
+                                glitchValues: glitchValues,
+                                digitalValues: digitalValues)
         if let i = timelineKeys.firstIndex(where: { abs($0.t - playheadT) < max(0.005, parkedTolerance) }) {
             var k = timelineKeys[i]
             k.shaderParams = snapshot.shaderParams
             k.ntscValues = snapshot.ntscValues
             k.glitchValues = snapshot.glitchValues
+            k.digitalValues = snapshot.digitalValues
             timelineKeys[i] = k
         } else {
             timelineKeys.append(snapshot)
@@ -1020,6 +1156,7 @@ final class AppState {
             setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
             applyNtscValues(ev.ntscValues(at: playheadT))
             applyGlitchValues(ev.glitchValues(at: playheadT))
+            applyDigitalValues(ev.digitalValues(at: playheadT))
         }
     }
 
@@ -1049,6 +1186,7 @@ final class AppState {
         timelineKeys[i].shaderParams = paramValues
         timelineKeys[i].ntscValues = ntscValues
         timelineKeys[i].glitchValues = glitchValues
+        timelineKeys[i].digitalValues = digitalValues
     }
 
     // MARK: - Space: play/pause on the timeline
@@ -1341,6 +1479,7 @@ final class AppState {
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
             shaderEnabled: shaderEnabled,
             glitch: glitchEnabled ? glitchSettings : nil,
+            digital: digitalExport,
             codec: codec,
             averageBitrate: bitrate,
             loopCount: route == .video ? max(1, exportLoopCount) : 1,
@@ -1358,6 +1497,7 @@ final class AppState {
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
             shaderEnabled: shaderEnabled,
             glitch: glitchEnabled ? glitchSettings : nil,
+            digital: digitalExport,
             crop: activeCrop)
     }
 
@@ -1427,10 +1567,11 @@ final class AppState {
         do {
             var input = source
             var spec = downscaleSpec
-            if ntscEnabled, let stage = ntscStage {
+            let digital = previewDigitalFrame(width: source.width, height: source.height)
+            if (ntscEnabled && ntscStage != nil) || digital != nil {
                 input = try pipeline.prepareChainInput(
                     source: source, downscale: spec,
-                    ntsc: stage, frameCount: seed)
+                    ntsc: ntscEnabled ? ntscStage : nil, digital: digital, frameCount: seed)
                 spec = nil
             }
             // Same scanline-banding guard the video/GIF paths use (only the
@@ -1725,6 +1866,10 @@ final class AppState {
                 "preset": selectedPreset.id,
                 "params": paramValues.mapValues { Double($0) },
             ],
+            "digital": [
+                "enabled": digitalEnabled,
+                "values": digitalValues,
+            ] as [String: Any],
             "glitch": [
                 "enabled": glitchEnabled,
                 "values": glitchValues,
@@ -1745,6 +1890,7 @@ final class AppState {
                         "shader": k.shaderParams.mapValues { Double($0) },
                         "ntsc": k.ntscValues,
                         "glitch": k.glitchValues,
+                        "digital": k.digitalValues,
                     ] as [String: Any]
                 },
             ],
@@ -1827,6 +1973,16 @@ final class AppState {
             glitchValues = GlitchParam.defaultValues
             glitchEnabled = true
         }
+        // Looks from before the Digital video stage leave it off. The
+        // Downscale they carry is the resolution either way.
+        if let d = dict["digital"] as? [String: Any] {
+            let values = (d["values"] as? [String: Double]) ?? [:]
+            digitalValues = DigitalParam.defaultValues.merging(values) { _, new in new }
+            digitalFormatApplied = true
+            digitalEnabled = (d["enabled"] as? Bool) ?? false
+        } else {
+            digitalEnabled = false
+        }
         noteChainInputEdited()
         if let v = dict["view"] as? [String: Any] {
             if let b = v["integerScale"] as? Bool { integerScale = b }
@@ -1843,8 +1999,9 @@ final class AppState {
                     let shader = (k["shader"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
                     let ntsc = k["ntsc"] as? [String: Any] ?? [:]
                     let glitch = k["glitch"] as? [String: Double] ?? [:]
+                    let digital = k["digital"] as? [String: Double] ?? [:]
                     return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc,
-                                    glitchValues: glitch)
+                                    glitchValues: glitch, digitalValues: digital)
                 }.sorted { $0.t < $1.t }
             }
             if let e = t["enabled"] as? Bool { timelineEnabled = e && timelineAvailable }

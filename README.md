@@ -2,12 +2,12 @@
 
 ![NTSCRT — the full NTSC + CRT pipeline on the left of the compare split, untouched source on the right, with a keyframed animation on the timeline below](docs/header.webp)
 
-**Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through an analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs): composite artifacts, tape noise, head switching), a simulated TV and VCR for the dramatic glitches, and the CRT shaders RetroArch uses (via [librashader](https://github.com/SnowflakePowered/librashader): scanlines, phosphor masks, glow).
+**Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through an optional digital camera and codec (webcam, video call, MiniDV), an analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs): composite artifacts, tape noise, head switching), a simulated TV and VCR for the dramatic glitches, and the CRT shaders RetroArch uses (via [librashader](https://github.com/SnowflakePowered/librashader): scanlines, phosphor masks, glow).
 
-Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Glitch stage, Screen Loop video feedback, cropping, a keyframe timeline, and video and GIF export.
+Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Digital video and Glitch stages, Screen Loop video feedback, cropping, a keyframe timeline, and video and GIF export.
 
 ```
-your image/video → crop → NTSC/VHS signal (full res) → downscale to retro resolution → TV/VCR glitches → CRT shader → screen
+your image/video → crop → digital camera + codec → NTSC/VHS signal (full res) → downscale to retro resolution → TV/VCR glitches → CRT shader → screen
 ```
 
 ## Download
@@ -29,6 +29,7 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 - **Source**: the loaded image (PNG, JPEG, HEIC) or video (MP4, MOV).
 - **Crop**: cuts the picture to an aspect ratio (square, or portrait and landscape shapes from 3:4 to 1:2) before anything else sees it. Drag the picture in the preview to move the crop, or a corner to zoom in (to cut black borders, say); double-click to center.
 - **Downscale**: the retro resolution the CRT sees (SNES 256 px, VGA 320 px, or any width). **Chunky** keeps hard pixel edges; **Smooth** is softer and steadier on video.
+- **Digital video** (off by default): footage recorded digitally before it goes out as an analog signal, like webcam video dubbed to VHS. Pick a format (Webcam, Video call, MiniDV, Early web video, Datamosh), which also sets the Downscale resolution, then adjust frame rate, sensor noise, quality, keyframes, lost data and datamoshing. It runs a real codec, so blocks, smears and datamoshing come out of the compression rather than being drawn.
 - **NTSC (TV)**: the analog signal, with composite noise, chroma bleed, head switching, tape speed, and about sixty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases).
 - **Glitch**: a simulated TV and VCR, for dramatic failures like rolling, tearing, bending, snow and tracking noise. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.
 - **CRT**: seven RetroArch CRT shaders (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every parameter exposed. A grayed-out control shows which switch turns it on.

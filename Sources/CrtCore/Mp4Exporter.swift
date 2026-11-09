@@ -46,6 +46,9 @@ public final class Mp4Exporter {
         /// The glitch stage (simulated TV receiver), nil when it's off.
         /// Required for the same reason as `shaderEnabled`.
         public var glitch: GlitchSettings?
+        /// The Digital video stage, nil when it's off. Required, like
+        /// `glitch`. (Not applied under a howlaround yet.)
+        public var digital: DigitalExport?
         public var codec: Codec
         /// Target average bitrate in bits/s (H.264/HEVC only; ProRes ignores it).
         public var averageBitrate: Int?
@@ -62,6 +65,7 @@ public final class Mp4Exporter {
                     downscale: DownscaleSpec?, presetPath: String,
                     shaderEnabled: Bool,
                     glitch: GlitchSettings?,
+                    digital: DigitalExport?,
                     codec: Codec = .h264, averageBitrate: Int? = nil,
                     loopCount: Int = 1,
                     howlaround: HowlaroundRender? = nil,
@@ -71,6 +75,7 @@ public final class Mp4Exporter {
             self.crop = crop
             self.shaderEnabled = shaderEnabled
             self.glitch = glitch
+            self.digital = digital
             self.outputURL = outputURL
             self.outputWidth = outputWidth
             self.outputHeight = outputHeight
@@ -163,6 +168,9 @@ public final class Mp4Exporter {
                                        queue: context.queue)
         let bypass = ShaderBypass(context: context)
         let glitchRenderer = try settings.glitch.map { _ in try GlitchRenderer(context: context) }
+        let digital = settings.howlaround == nil ? settings.digital : nil
+        let digitalStage = digital.map { _ in DigitalStage() }
+        let clipFrames = digital.map { _ in DigitalClipFrames(source: source, crop: settings.crop) }
 
         // Remove any existing file at the output path.
         try? FileManager.default.removeItem(at: settings.outputURL)
@@ -361,10 +369,15 @@ public final class Mp4Exporter {
                 }
                 var frameInput = scene
                 var frameDownscale = settings.downscale
-                if let stage = ntscStage {
+                if ntscStage != nil || digitalStage != nil {
+                    let digitalFrame = zip(digitalStage, digital).map { stage, d in
+                        (stage, d.input(frame: passFrame, width: scene.width, height: scene.height,
+                                        downscale: frameDownscale, sourceFPS: Double(source.frameRate),
+                                        earlier: clipFrames?.visitor))
+                    }
                     frameInput = try self.pipeline.prepareChainInput(
                         source: scene, downscale: frameDownscale,
-                        ntsc: stage, frameCount: passFrame + 1)
+                        ntsc: ntscStage, digital: digitalFrame, frameCount: passFrame + 1)
                     frameDownscale = nil
                 }
                 let glitchFrame = zip(glitchRenderer, frameGlitch).map { pair in
@@ -509,6 +522,8 @@ public final class Mp4Exporter {
                                        queue: context.queue)
         let bypass = ShaderBypass(context: context)
         let glitchRenderer = try settings.glitch.map { _ in try GlitchRenderer(context: context) }
+        let digital = settings.howlaround == nil ? settings.digital : nil
+        let digitalStage = digital.map { _ in DigitalStage() }
         // Small outputs would otherwise alias the shader's scanlines into
         // bands (see ScanlineGrid); nil when the size is already fine.
         let chainInput = ScanlineGrid.chainInputSize(width: source.width, height: source.height,
@@ -621,10 +636,14 @@ public final class Mp4Exporter {
                 }
                 var frameInput = scene
                 var frameDownscale = settings.downscale
-                if let stage = ntscStage {
+                if ntscStage != nil || digitalStage != nil {
+                    let digitalFrame = zip(digitalStage, digital).map { stage, d in
+                        (stage, d.input(frame: frameIndex, width: scene.width, height: scene.height,
+                                        downscale: frameDownscale, sourceFPS: Double(fps), earlier: nil))
+                    }
                     frameInput = try self.pipeline.prepareChainInput(
                         source: scene, downscale: frameDownscale,
-                        ntsc: stage, frameCount: frameIndex + 1,
+                        ntsc: ntscStage, digital: digitalFrame, frameCount: frameIndex + 1,
                         // Stills: one fixed image for every frame.
                         sourceVersion: howl == nil ? 0 : nil)
                     frameDownscale = nil
