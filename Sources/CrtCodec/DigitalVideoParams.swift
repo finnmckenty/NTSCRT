@@ -9,6 +9,7 @@ import Foundation
 public struct DigitalParam: Identifiable, Sendable {
     public enum Group: String, CaseIterable, Sendable {
         case capture = "Capture"
+        case picture = "Picture"
         case compression = "Compression"
         case errors = "Errors"
     }
@@ -27,12 +28,26 @@ public struct DigitalParam: Identifiable, Sendable {
 
     public var isChoice: Bool { if case .choice = kind { return true } else { return false } }
 
-    /// Defaults are the Webcam format.
+    /// The camera's picture controls (and its optics and sampling) default
+    /// to leaving the picture alone, so a double-click returns them there;
+    /// the rest default to the Webcam format's values.
     public static let all: [DigitalParam] = [
         DigitalParam(
             id: "frame_rate", label: "Frame rate", group: .capture,
             kind: .slider(min: 1, max: 60, percent: false, unit: "fps"), defaultValue: 15,
             help: "How many pictures a second the camera captures. Below the clip's own rate, frames repeat — the stutter of old webcams and video calls."),
+        DigitalParam(
+            id: "fields", label: "Fields", group: .capture,
+            kind: .choice(["Progressive", "One field (line-doubled)"]), defaultValue: 0,
+            help: "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. Deinterlaced the cheap way — one field, each line doubled, as most DV reached the web — diagonals turn to stairs."),
+        DigitalParam(
+            id: "lens_blur", label: "Lens softness", group: .capture,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "A soft, cheap or wide-angle lens: fine detail blurs before the sensor sees it."),
+        DigitalParam(
+            id: "aliasing", label: "Aliasing", group: .capture,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "The sensor reading detail it can't resolve, with nothing blurring it away first: fine stripes beat into moiré and edges into jaggies. The red and blue chips sit half a pixel either side of green, as in a 3-CCD camera, so fine patterns turn to rainbows."),
         DigitalParam(
             id: "sensor_noise", label: "Sensor noise", group: .capture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.4,
@@ -41,6 +56,30 @@ public struct DigitalParam: Identifiable, Sendable {
             id: "noise_reduction", label: "Noise reduction", group: .capture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.5,
             help: "The camera smoothing its own grain away before compressing. It flattens fine detail into a smeary, plastic look."),
+        DigitalParam(
+            id: "exposure", label: "Exposure", group: .picture,
+            kind: .slider(min: -2, max: 2, percent: false, unit: "stops"), defaultValue: 0,
+            help: "How much light the camera lets in. Exposing for the shadows blows out skies and highlights: each color clips at white on its own, so bright skin and sky shift hue on the way."),
+        DigitalParam(
+            id: "white_balance", label: "White balance", group: .picture,
+            kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "Warm (positive) or cool (negative): the camera's guess at the light, often wrong."),
+        DigitalParam(
+            id: "tint", label: "Tint", group: .picture,
+            kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "Magenta (positive) or green (negative), the other way a camera's color can drift."),
+        DigitalParam(
+            id: "saturation", label: "Saturation", group: .picture,
+            kind: .slider(min: 0, max: 2, percent: true, unit: ""), defaultValue: 1,
+            help: "Color strength. Consumer camcorders pushed it, reds and oranges most visibly."),
+        DigitalParam(
+            id: "black_level", label: "Black level", group: .picture,
+            kind: .slider(min: 0, max: 0.25, percent: true, unit: ""), defaultValue: 0,
+            help: "Lifted, milky blacks. NTSC DV's 7.5 IRE setup was often handled wrong in transfers, so its blacks came out gray."),
+        DigitalParam(
+            id: "sharpening", label: "Sharpening", group: .picture,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "The camera's detail circuit: edges get bright and dark outlines (halos), the crisp, hard-edged video look."),
         DigitalParam(
             id: "chroma", label: "Color", group: .compression,
             kind: .choice(["4:4:4 (full)", "4:2:2 (half)", "4:2:0 (quarter)", "4:1:1 (DV)"]),
@@ -79,10 +118,12 @@ public struct DigitalParam: Identifiable, Sendable {
         Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.defaultValue) })
     }
 
-    /// Controls that set the stream's structure — when frames are captured
-    /// and where keyframes fall. They hold for a whole render (keyframes on
+    /// Controls that set the stream's structure — when frames are captured,
+    /// where keyframes fall, the color layout, and how the sensor samples
+    /// through the lens. They hold for a whole render (keyframes on
     /// the timeline don't animate them).
-    public static let structureIDs: Set<String> = ["frame_rate", "keyframe_interval", "chroma"]
+    public static let structureIDs: Set<String> = ["frame_rate", "keyframe_interval", "chroma",
+                                                    "fields", "lens_blur", "aliasing"]
 }
 
 public enum ChromaSubsampling: Int, CaseIterable, Sendable {
@@ -136,22 +177,29 @@ public struct DigitalFormat: Identifiable, Sendable {
     public static let all: [DigitalFormat] = [
         DigitalFormat(
             id: "webcam", name: "Webcam (2005)", width: 320,
-            values: ["frame_rate": 15, "sensor_noise": 0.4, "noise_reduction": 0.5, "chroma": 2,
+            values: ["frame_rate": 15, "lens_blur": 0.35, "aliasing": 0.15,
+                     "sensor_noise": 0.4, "noise_reduction": 0.5,
+                     "exposure": 0.4, "white_balance": -0.15, "saturation": 0.85,
+                     "black_level": 0.04, "sharpening": 0.25, "chroma": 2,
                      "quality": 0.22, "keyframe_interval": 0, "fixed_bitrate": 0,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "320 × 240, 15 fps, a noisy sensor, each frame compressed on its own."),
         DigitalFormat(
             id: "video_call", name: "Video call", width: 320,
-            values: ["frame_rate": 15, "sensor_noise": 0.25, "noise_reduction": 0.6, "chroma": 2,
+            values: ["frame_rate": 15, "lens_blur": 0.3, "sensor_noise": 0.25, "noise_reduction": 0.6,
+                     "exposure": 0.2, "saturation": 0.9, "chroma": 2,
                      "quality": 0.22, "keyframe_interval": 4, "fixed_bitrate": 0.8,
                      "deblocking": 0.6, "data_loss": 0.15, "datamosh": 0],
             blurb: "A squeezed bitrate and lost packets that smear until the next keyframe."),
         DigitalFormat(
             id: "minidv", name: "MiniDV", width: 720,
-            values: ["frame_rate": 30, "sensor_noise": 0.1, "noise_reduction": 0, "chroma": 3,
-                     "quality": 0.85, "keyframe_interval": 0, "fixed_bitrate": 0.3,
+            values: ["frame_rate": 30, "fields": 1, "lens_blur": 0.25, "aliasing": 0.6,
+                     "sensor_noise": 0.12, "noise_reduction": 0,
+                     "exposure": 0.3, "white_balance": 0.4, "tint": 0.2, "saturation": 1.15,
+                     "black_level": 0.08, "sharpening": 0.6, "chroma": 3,
+                     "quality": 0.7, "keyframe_interval": 0, "fixed_bitrate": 0.3,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
-            blurb: "720 wide, every frame on its own, color at a quarter width (4:1:1)."),
+            blurb: "The VX1000 skate-video look: one field line-doubled, hard sharpening, aliasing and color moiré, blown highlights, warm saturated color, gray blacks, color at a quarter width (4:1:1)."),
         DigitalFormat(
             id: "early_web", name: "Early web video", width: 320,
             values: ["frame_rate": 15, "sensor_noise": 0, "noise_reduction": 0, "chroma": 2,

@@ -278,6 +278,90 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertNil(DigitalFormat.matching(values: v, width: 320))
     }
 
+    // MARK: - the camera
+
+    /// A capture-size picture through the camera alone.
+    func camera(_ px: [UInt8], _ w: Int, _ h: Int, _ values: [String: Double]) -> CodecPicture {
+        let s = DigitalSettings(values: ["sensor_noise": 0, "noise_reduction": 0, "chroma": 0].merging(values) { _, n in n })
+        return DigitalVideoRenderer.capture(px, geometry: CodecGeometry(width: w, height: h, chroma: .full),
+                                            settings: s, index: 0)
+    }
+
+    func testPictureControlsAreNeutralByDefault() {
+        let px = frame(0)
+        var small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: size.width,
+                                               height: size.height, rowBytes: size.width * 4,
+                                               to: capture, optics: DigitalSettings(values: [:]))
+        let viaVImage = small
+        small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: size.width,
+                                           height: size.height, rowBytes: size.width * 4, to: capture,
+                                           optics: DigitalSettings(values: ["aliasing": 0, "lens_blur": 0, "fields": 0]))
+        XCTAssertTrue(small == viaVImage)
+        let a = camera(small, capture.width, capture.height, [:])
+        let b = camera(small, capture.width, capture.height, ["exposure": 0, "white_balance": 0, "tint": 0,
+                                                              "saturation": 1, "black_level": 0, "sharpening": 0])
+        XCTAssertEqual(a.y.data[500], b.y.data[500])
+        XCTAssertEqual(a.cr.data[777], b.cr.data[777])
+    }
+
+    func testOverexposureClipsEachColorOnItsOwn() {
+        // Skin tone, two stops over: red clips first, so it turns yellow-white.
+        let px = [UInt8](repeating: 0, count: 16 * 16 * 4).enumerated().map { i, _ in [UInt8(140), 160, 210, 255][i % 4] }
+        let pic = camera(px, 16, 16, ["exposure": 2])
+        let y = pic.y.data[0], cb = pic.cb.data[0], cr = pic.cr.data[0]
+        let r = y + 1.402 * (cr - 128), g = y - 0.344136 * (cb - 128) - 0.714136 * (cr - 128)
+        let b = y + 1.772 * (cb - 128)
+        XCTAssertEqual(r, 255, accuracy: 0.5)
+        XCTAssertEqual(g, 255, accuracy: 0.5)
+        XCTAssertEqual(b, 255, accuracy: 0.5, "every channel at 2 stops over")
+        let one = camera(px, 16, 16, ["exposure": 0.5])
+        let r1 = one.y.data[0] + 1.402 * (one.cr.data[0] - 128)
+        XCTAssertEqual(r1, 255, accuracy: 0.5, "red (210 × 1.41) clips at half a stop")
+        XCTAssertLessThan(one.y.data[0] - 0.344136 * (one.cb.data[0] - 128) - 0.714136 * (one.cr.data[0] - 128), 254)
+    }
+
+    func testBlackLevelLiftsBlackAndSharpeningOvershoots() {
+        let w = 32, h = 16
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h { for x in 0..<w { for c in 0..<3 { px[(y * w + x) * 4 + c] = x < 16 ? 40 : 200 } } }
+        let lifted = camera(px, w, h, ["black_level": 0.1])
+        XCTAssertEqual(lifted.y.data[0], 25.5 + 40 * 0.9, accuracy: 0.6)
+        let sharp = camera(px, w, h, ["sharpening": 1])
+        let row = (0..<w).map { sharp.y.data[8 * sharp.y.width + $0] }
+        XCTAssertLessThan(row[15], 35, "dark halo before the edge: \(row[13...18])")
+        XCTAssertGreaterThan(row[16], 205, "bright halo after it")
+        XCTAssertEqual(row[2], 40, accuracy: 0.6, "flat areas untouched")
+    }
+
+    func testAliasingTurnsFineStripesIntoFalseColor() {
+        // Gray stripes finer than the capture grid can hold.
+        let (w, h) = (640, 64)
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h { for x in 0..<w { let v: UInt8 = (x * 7 / 3) % 2 == 0 ? 230 : 25
+            for c in 0..<3 { px[(y * w + x) * 4 + c] = v } } }
+        func chroma(_ aliasing: Double) -> Float {
+            let small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: w, height: h,
+                                                   rowBytes: w * 4, to: (160, 16),
+                                                   optics: DigitalSettings(values: ["aliasing": aliasing]))
+            let pic = camera(small, 160, 16, [:])
+            var s: Float = 0
+            for i in 0..<(160 * 16) { s += abs(pic.cb.data[i] - 128) + abs(pic.cr.data[i] - 128) }
+            return s / Float(160 * 16)
+        }
+        XCTAssertLessThan(chroma(0), 2, "filtered properly: gray stays gray")
+        XCTAssertGreaterThan(chroma(1), 20, "aliased: rainbows")
+    }
+
+    func testOneFieldDoublesEveryOtherLine() {
+        let small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: frame(3)), width: size.width,
+                                               height: size.height, rowBytes: size.width * 4, to: capture,
+                                               optics: DigitalSettings(values: ["fields": 1]))
+        let rowBytes = capture.width * 4
+        for y in stride(from: 0, to: capture.height - 1, by: 2) {
+            XCTAssertTrue(small[(y * rowBytes)..<((y + 1) * rowBytes)] == small[((y + 1) * rowBytes)..<((y + 2) * rowBytes)])
+        }
+    }
+
     // MARK: - cost
 
     func testCodecIsFastEnoughForPlayback() {

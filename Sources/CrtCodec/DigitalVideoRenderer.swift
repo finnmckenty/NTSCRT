@@ -153,7 +153,8 @@ public final class DigitalVideoRenderer {
         lastRunLength = 0
 
         // The current picture at the capture size, scaled once.
-        let current = Self.scale(pixels, width: width, height: height, rowBytes: rowBytes, to: captureSize)
+        let current = Self.scale(pixels, width: width, height: height, rowBytes: rowBytes, to: captureSize,
+                                 optics: structure)
 
         if let last = lastCapture, state != nil, last == c, lastSettings == now {
             // Same frame, same settings: what's shown already.
@@ -162,7 +163,8 @@ public final class DigitalVideoRenderer {
             var ok = true
             for k in (last + 1)...c {
                 let src = timing.frame(ofCapture: k) == n ? current
-                    : earlierCapture(k, timing: timing, earlier: earlier, current: current, size: captureSize)
+                    : earlierCapture(k, timing: timing, earlier: earlier, current: current, size: captureSize,
+                                     optics: structure)
                 guard let src else { ok = false; break }
                 advance(capture: k, source: src, geometry: geometry, timing: timing,
                         settings: settingsFor(capture: k), key: key, history: history)
@@ -221,7 +223,7 @@ public final class DigitalVideoRenderer {
             // frame n, which may be a later repeat of it.
             let src = timing.frame(ofCapture: k) == n ? current
                 : (earlierCapture(k, timing: timing, earlier: earlier, current: current,
-                                  size: (geometry.width, geometry.height)) ?? current)
+                                  size: (geometry.width, geometry.height), optics: settingsFor(c)) ?? current)
             advance(capture: k, source: src, geometry: geometry, timing: timing,
                     settings: settingsFor(k), key: key, history: history)
         }
@@ -230,11 +232,13 @@ public final class DigitalVideoRenderer {
     /// The capture-size picture for capture `k`, from an earlier frame —
     /// or the current one when the picture never changes.
     private func earlierCapture(_ k: Int, timing: DigitalTiming, earlier: DigitalFrameVisitor?,
-                                current: [UInt8], size: (width: Int, height: Int)) -> [UInt8]? {
+                                current: [UInt8], size: (width: Int, height: Int),
+                                optics: DigitalSettings) -> [UInt8]? {
         guard let earlier else { return current }
         var out: [UInt8]?
         let ok = earlier(timing.frame(ofCapture: k)) { base, w, h, rb in
-            out = Self.scale(UnsafeMutableRawPointer(mutating: base), width: w, height: h, rowBytes: rb, to: size)
+            out = Self.scale(UnsafeMutableRawPointer(mutating: base), width: w, height: h, rowBytes: rb,
+                             to: size, optics: optics)
         }
         return ok ? out : nil
     }
@@ -280,34 +284,123 @@ public final class DigitalVideoRenderer {
 
     // MARK: - pixels in
 
-    /// BGRA8 at any size → tightly packed BGRA8 at `size` (a camera
-    /// sensor's area sampling, via vImage's high-quality resampler).
+    /// BGRA8 at any size → tightly packed BGRA8 at `size`: what the sensor
+    /// reads through the lens. A proper area sampling (vImage's
+    /// high-quality resampler), blended toward point samples as Aliasing
+    /// rises — with red and blue read half a capture pixel either side of
+    /// green, as a 3-CCD camera's offset chips do, so detail the sensor
+    /// can't resolve beats into moiré and false color. Then the lens's
+    /// softness, then, for One field, every other line repeated.
     static func scale(_ base: UnsafeMutableRawPointer, width: Int, height: Int, rowBytes: Int,
-                      to size: (width: Int, height: Int)) -> [UInt8] {
-        var out = [UInt8](repeating: 0, count: size.width * size.height * 4)
+                      to size: (width: Int, height: Int), optics: DigitalSettings) -> [UInt8] {
+        let cw = size.width, ch = size.height
+        var out = [UInt8](repeating: 0, count: cw * ch * 4)
         out.withUnsafeMutableBytes { dst in
             var srcBuf = vImage_Buffer(data: base, height: vImagePixelCount(height),
                                        width: vImagePixelCount(width), rowBytes: rowBytes)
-            var dstBuf = vImage_Buffer(data: dst.baseAddress!, height: vImagePixelCount(size.height),
-                                       width: vImagePixelCount(size.width), rowBytes: size.width * 4)
-            if width == size.width && height == size.height {
+            var dstBuf = vImage_Buffer(data: dst.baseAddress!, height: vImagePixelCount(ch),
+                                       width: vImagePixelCount(cw), rowBytes: cw * 4)
+            if width == cw && height == ch {
                 for y in 0..<height {
-                    memcpy(dst.baseAddress! + y * size.width * 4, base + y * rowBytes, width * 4)
+                    memcpy(dst.baseAddress! + y * cw * 4, base + y * rowBytes, width * 4)
                 }
             } else {
                 vImageScale_ARGB8888(&srcBuf, &dstBuf, nil, vImage_Flags(kvImageHighQualityResampling))
             }
         }
+        let aliasing = Float(optics["aliasing"])
+        if aliasing > 0 {
+            let src = UnsafeRawPointer(base).assumingMemoryBound(to: UInt8.self)
+            let kx = Double(width) / Double(cw), ky = Double(height) / Double(ch)
+            out.withUnsafeMutableBufferPointer { op in
+                let o = op.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: ch) { y in
+                    let sy = min(height - 1, Int((Double(y) + 0.5) * ky))
+                    let row = src + sy * rowBytes
+                    for x in 0..<cw {
+                        let center = (Double(x) + 0.5) * kx
+                        // Green at the pixel's center, red and blue offset.
+                        let xg = min(width - 1, Int(center))
+                        let xr = min(width - 1, max(0, Int(center - 0.5 * kx)))
+                        let xb = min(width - 1, Int(center + 0.5 * kx))
+                        let i = (y * cw + x) * 4
+                        let pb = Float(row[xb * 4]), pg = Float(row[xg * 4 + 1]), pr = Float(row[xr * 4 + 2])
+                        o[i] = UInt8((Float(o[i]) + (pb - Float(o[i])) * aliasing).rounded())
+                        o[i + 1] = UInt8((Float(o[i + 1]) + (pg - Float(o[i + 1])) * aliasing).rounded())
+                        o[i + 2] = UInt8((Float(o[i + 2]) + (pr - Float(o[i + 2])) * aliasing).rounded())
+                    }
+                }
+            }
+        }
+        let blur = optics["lens_blur"]
+        if blur > 0 { gaussianBlur(&out, width: cw, height: ch, sigma: Float(0.25 + 1.5 * blur)) }
+        if optics["fields"] >= 0.5 {
+            // One field: the even lines, each shown twice.
+            out.withUnsafeMutableBufferPointer { op in
+                let o = op.baseAddress!
+                for y in stride(from: 1, to: ch, by: 2) {
+                    (o + y * cw * 4).update(from: o + (y - 1) * cw * 4, count: cw * 4)
+                }
+            }
+        }
         return out
     }
 
-    /// The camera: sensor noise, its noise reduction, then Y′CbCr with the
-    /// color subsampled. `bgra` is the picture at the capture size.
+    /// Separable Gaussian on BGRA8 (alpha left alone).
+    static func gaussianBlur(_ px: inout [UInt8], width w: Int, height h: Int, sigma: Float) {
+        let r = max(1, Int((sigma * 2.5).rounded(.up)))
+        var k = (-r...r).map { exp(-Float($0 * $0) / (2 * sigma * sigma)) }
+        let sum = k.reduce(0, +)
+        k = k.map { $0 / sum }
+        var tmp = [Float](repeating: 0, count: w * h * 3)
+        px.withUnsafeMutableBufferPointer { pp in
+            tmp.withUnsafeMutableBufferPointer { tp in
+                let p = pp.baseAddress!, t = tp.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: h) { y in
+                    for x in 0..<w {
+                        var a: (Float, Float, Float) = (0, 0, 0)
+                        for d in -r...r {
+                            let i = (y * w + min(w - 1, max(0, x + d))) * 4
+                            let wt = k[d + r]
+                            a.0 += Float(p[i]) * wt; a.1 += Float(p[i + 1]) * wt; a.2 += Float(p[i + 2]) * wt
+                        }
+                        let o = (y * w + x) * 3
+                        t[o] = a.0; t[o + 1] = a.1; t[o + 2] = a.2
+                    }
+                }
+                DispatchQueue.concurrentPerform(iterations: h) { y in
+                    for x in 0..<w {
+                        var a: (Float, Float, Float) = (0, 0, 0)
+                        for d in -r...r {
+                            let i = (min(h - 1, max(0, y + d)) * w + x) * 3
+                            let wt = k[d + r]
+                            a.0 += t[i] * wt; a.1 += t[i + 1] * wt; a.2 += t[i + 2] * wt
+                        }
+                        let o = (y * w + x) * 4
+                        p[o] = UInt8(a.0.rounded().clamped(0, 255))
+                        p[o + 1] = UInt8(a.1.rounded().clamped(0, 255))
+                        p[o + 2] = UInt8(a.2.rounded().clamped(0, 255))
+                    }
+                }
+            }
+        }
+    }
+
+    /// The camera's electronics, on what the sensor read (`bgra`, at the
+    /// capture size): exposure and white balance as gains, sensor noise,
+    /// each channel clipping at white on its own, then — in Y′CbCr — noise
+    /// reduction, the detail circuit's sharpening, the black level and
+    /// saturation, and finally the color subsampled.
     static func capture(_ bgra: [UInt8], geometry g: CodecGeometry, settings: DigitalSettings,
                         index: Int) -> CodecPicture {
         let w = g.width, h = g.height
         let noise = Float(settings["sensor_noise"])
         let nr = Float(settings["noise_reduction"])
+        let exposure = Float(pow(2, settings["exposure"]))
+        let warm = Float(settings["white_balance"]), magenta = Float(settings["tint"])
+        let gainR = exposure * (1 + 0.25 * warm), gainB = exposure * (1 - 0.25 * warm)
+        let gainG = exposure * (1 - 0.15 * magenta)
+        let gains = gainR != 1 || gainG != 1 || gainB != 1
         var yf = [Float](repeating: 0, count: w * h)
         var cbf = [Float](repeating: 0, count: w * h)
         var crf = [Float](repeating: 0, count: w * h)
@@ -323,18 +416,25 @@ public final class DigitalVideoRenderer {
                             }
                             for x in 0..<w {
                                 let i = y * w + x
-                                let b = Float(s[i * 4]), gr = Float(s[i * 4 + 1]), r = Float(s[i * 4 + 2])
-                                var yy = 0.299 * r + 0.587 * gr + 0.114 * b
-                                var cb = 128 - 0.168736 * r - 0.331264 * gr + 0.5 * b
-                                var cr = 128 + 0.5 * r - 0.418688 * gr - 0.081312 * b
+                                var b = Float(s[i * 4]), gr = Float(s[i * 4 + 1]), r = Float(s[i * 4 + 2])
+                                if gains { r *= gainR; gr *= gainG; b *= gainB }
                                 if noise > 0 {
-                                    // Gain noise: worst in the shadows.
-                                    let shade = 1.3 - 0.6 * yy / 255
-                                    yy += gauss() * 7 * noise * shade
-                                    cb += gauss() * 11 * noise * shade
-                                    cr += gauss() * 11 * noise * shade
+                                    // Gain noise: worst in the shadows, and
+                                    // under the clip (a blown sky is clean).
+                                    let shade = 1.3 - 0.6 * min(255, 0.299 * r + 0.587 * gr + 0.114 * b) / 255
+                                    let n = gauss() * 7 * noise * shade
+                                    let nb = gauss() * 11 * noise * shade, nc = gauss() * 11 * noise * shade
+                                    // Luma noise plus color noise along Cb and Cr.
+                                    r += n + 1.402 * nc
+                                    gr += n - 0.344136 * nb - 0.714136 * nc
+                                    b += n + 1.772 * nb
                                 }
-                                Y[i] = yy; CB[i] = cb; CR[i] = cr
+                                if gains || noise > 0 {
+                                    r = r.clamped(0, 255); gr = gr.clamped(0, 255); b = b.clamped(0, 255)
+                                }
+                                Y[i] = 0.299 * r + 0.587 * gr + 0.114 * b
+                                CB[i] = 128 - 0.168736 * r - 0.331264 * gr + 0.5 * b
+                                CR[i] = 128 + 0.5 * r - 0.418688 * gr - 0.081312 * b
                             }
                         }
                     }
@@ -345,6 +445,22 @@ public final class DigitalVideoRenderer {
             yf = sigmaFilter(yf, width: w, height: h, threshold: 4 + 26 * nr, mix: min(1, nr * 1.2))
             cbf = boxBlur(cbf, width: w, height: h, radius: 2, mix: nr)
             crf = boxBlur(crf, width: w, height: h, radius: 2, mix: nr)
+        }
+        let sharpening = Float(settings["sharpening"])
+        if sharpening > 0 {
+            // Detail: add back the difference from a local blur, so edges
+            // overshoot both ways (halos).
+            let soft = boxBlur(yf, width: w, height: h, radius: 1, mix: 1)
+            for i in 0..<yf.count { yf[i] = (yf[i] + 2.2 * sharpening * (yf[i] - soft[i])).clamped(0, 255) }
+        }
+        let black = Float(settings["black_level"]) * 255
+        let saturation = Float(settings["saturation"])
+        if black > 0 || saturation != 1 {
+            for i in 0..<yf.count {
+                yf[i] = black + yf[i] * (1 - black / 255)
+                cbf[i] = 128 + (cbf[i] - 128) * saturation
+                crf[i] = 128 + (crf[i] - 128) * saturation
+            }
         }
         let pic = CodecPicture(geometry: g)
         // Luma, padded by repeating the edge.
