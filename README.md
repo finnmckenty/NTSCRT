@@ -107,3 +107,9 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full developer setup (Swift + Rust 
 - [librashader](https://github.com/SnowflakePowered/librashader) by SnowflakePowered — the RetroArch-compatible shader runtime (MPL-2.0)
 - [analogtv](https://www.jwz.org/xscreensaver/) by Trevor Blackwell (xscreensaver) — the design the Glitch stage's receiver simulation follows: glitches as the response of simulated TV circuits
 - [libretro/slang-shaders](https://github.com/libretro/slang-shaders) and the RetroArch community — the CRT shaders themselves: crt-royale by TroggleMonkey, crt-easymode and crt-aperture by EasyMode, crt-hyllian by Hyllian, crtsim, crtglow (various licenses, largely GPL)
+
+## License
+
+NTSCRT is released under the [MIT License](LICENSE): use it, change it, and share it, including commercially, as long as the copyright notice comes along.
+
+The bundled ntsc-rs, librashader and RetroArch shaders keep their own licenses. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists them, and the full texts ship inside the app.

@@ -179,6 +179,15 @@ For iteration and headless/screenshot verification:
 
 **Verifying hover/tooltip behavior:** `CGWarpMouseCursorPosition` moves the cursor *without* posting events, so it cannot drive SwiftUI's `.onHover`/`.onContinuousHover` (AppKit's tooltip manager polls the cursor, so tooltips *do* appear that way — an easy false positive). Real synthetic movement needs `CGEventPost`, which needs Accessibility. Use `CRT_DUMP_TOOLTIPS`/`CRT_HOVER_LOG` for ground truth instead of screenshots.
 
+## Licenses
+
+NTSCRT's own code is MIT (`LICENSE`). Everything bundled keeps its own license, and binary copies have to carry the notices: `THIRD_PARTY_NOTICES.md` (readable summary) and `licenses/` (full texts) are copied into `Contents/Resources` by both `wrap-app.sh` and `make-release.sh`. Reviewed 2026-11-10:
+
+- ntsc-rs core + `ntscrs-capi`: MIT OR ISC OR Apache-2.0 (only ntsc-rs's GUI crate is GPL-3.0, and it isn't used).
+- librashader runtime: MPL-2.0 OR GPL-3.0-only, distributed under MPL-2.0 (file-level copyleft; doesn't reach NTSCRT's code). MPL requires telling recipients where the source is: the notice points at the pinned commit. **Bumping the pinned librashader commit means updating that commit in THIRD_PARTY_NOTICES.md.** Its C headers in `CrtAppBridge/include` are MIT (chyyran).
+- Rust crates statically inside the two dylibs: 214, all permissive except librashader's own and two MPL-2.0 crates. After changing either library's dependencies, regenerate `licenses/rust-crates.txt`: `scripts/gen-rust-licenses.py <librashader checkout at the pinned commit>` (needs the rustup toolchain; Homebrew's cargo is broken here by a missing libllhttp).
+- slang-shaders: per-file licenses, no collection license; the bundled `crt/` + `include/` tree is ~130 GPL files, ~60 MIT, some BSD and public domain, and many with no notice. Shipped unmodified, as source, as separate works loaded at runtime; GPL-2.0 and GPL-3.0 texts are in `licenses/`.
+
 ## Releasing (signed + notarized DMG)
 
 One-time setup (requires an Apple Developer Program membership):

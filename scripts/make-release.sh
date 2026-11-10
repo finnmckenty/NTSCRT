@@ -100,6 +100,10 @@ echo 'universal check: all binaries arm64 + x86_64'
 mkdir -p "$APP/Contents/Resources/slang-shaders"
 cp -R Vendor/slang-shaders/crt "$APP/Contents/Resources/slang-shaders/"
 cp -R Vendor/slang-shaders/include "$APP/Contents/Resources/slang-shaders/"
+# Licenses: the app's own (MIT) and the notices the bundled libraries and
+# shaders require to travel with binary copies (THIRD_PARTY_NOTICES.md).
+cp LICENSE THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
+cp -R licenses "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

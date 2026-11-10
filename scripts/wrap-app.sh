@@ -42,6 +42,10 @@ fi
 # the dev build still prefers CRT_PRESETS below — the live Vendor tree.
 mkdir -p "$APP/Contents/Resources/slang-shaders"
 cp -R Vendor/slang-shaders/crt Vendor/slang-shaders/include "$APP/Contents/Resources/slang-shaders/"
+# Licenses: the app's own (MIT) and the notices the bundled libraries and
+# shaders require to travel with binary copies (THIRD_PARTY_NOTICES.md).
+cp LICENSE THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
+cp -R licenses "$APP/Contents/Resources/"
 # Optional VHS stage dylib (the app runs without it).
 if [[ -f Vendor/ntscrs-capi/ntscrs_capi.dylib ]]; then
   cp Vendor/ntscrs-capi/ntscrs_capi.dylib "$APP/Contents/Frameworks/ntscrs_capi.dylib"
