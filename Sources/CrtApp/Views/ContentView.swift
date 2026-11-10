@@ -207,15 +207,17 @@ struct ContentView: View {
                 if kv.count == 2, let v = Double(kv[1]) { state.setGlitchValue(String(kv[0]), v) }
             }
         }
-        // CRT_DIGITAL="minidv" or "video_call,data_loss=0.5" — switch the
-        // Digital video stage on with a format (DigitalFormat ids), then
-        // these knobs (DigitalParam ids).
+        // CRT_DIGITAL="minidv" or "video_call,data_loss=0.5,width=480" —
+        // switch the Digital video stage on with a format (DigitalFormat
+        // ids), then these knobs (DigitalParam ids; width = the Downscale).
         if let spec = env["CRT_DIGITAL"] {
             let parts = spec.split(separator: ",")
             if let f = parts.first.flatMap({ DigitalFormat.byID[String($0)] }) { state.applyDigitalFormat(f) }
             for pair in parts {
                 let kv = pair.split(separator: "=", maxSplits: 1)
-                if kv.count == 2, let v = Double(kv[1]) { state.setDigitalValue(String(kv[0]), v) }
+                guard kv.count == 2, let v = Double(kv[1]) else { continue }
+                // "width=480": the Downscale (capture) width, as a format sets it.
+                if kv[0] == "width" { state.downscaleWidth = Int(v) } else { state.setDigitalValue(String(kv[0]), v) }
             }
             state.setDigitalEnabled(true)
         }
