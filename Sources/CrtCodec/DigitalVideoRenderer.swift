@@ -287,10 +287,15 @@ public final class DigitalVideoRenderer {
     /// BGRA8 at any size → tightly packed BGRA8 at `size`: what the sensor
     /// reads through the lens. A proper area sampling (vImage's
     /// high-quality resampler), blended toward point samples as Aliasing
-    /// rises — with red and blue read half a capture pixel either side of
-    /// green, as a 3-CCD camera's offset chips do, so detail the sensor
-    /// can't resolve beats into moiré and false color. Then the lens's
-    /// softness, then, for One field, every other line repeated.
+    /// rises to 50%, so detail the sensor can't resolve beats into moiré.
+    /// Red, green and blue are read a third of a capture pixel apart: where
+    /// a beat drifts slowly the three see it at phases 120° apart, so its
+    /// color turns full circle — rainbows. (Half a pixel, as a 3-CCD
+    /// camera's green offset is, puts them in opposite phase there: only a
+    /// faint magenta-green survives DV's quarter-width color.) Above 50% the
+    /// source's finest detail is boosted at each sample, for strong moiré
+    /// even from sources not much sharper than the camera. Then, for One
+    /// field, every other line repeated.
     static func scale(_ base: UnsafeMutableRawPointer, width: Int, height: Int, rowBytes: Int,
                       to size: (width: Int, height: Int), optics: DigitalSettings) -> [UInt8] {
         let cw = size.width, ch = size.height
@@ -310,30 +315,39 @@ public final class DigitalVideoRenderer {
         }
         let aliasing = Float(optics["aliasing"])
         if aliasing > 0 {
+            let mix = min(1, aliasing * 2)
+            let boost = max(0, aliasing * 2 - 1) * 1.5
             let src = UnsafeRawPointer(base).assumingMemoryBound(to: UInt8.self)
             let kx = Double(width) / Double(cw), ky = Double(height) / Double(ch)
             out.withUnsafeMutableBufferPointer { op in
                 let o = op.baseAddress!
                 DispatchQueue.concurrentPerform(iterations: ch) { y in
                     let sy = min(height - 1, Int((Double(y) + 0.5) * ky))
-                    let row = src + sy * rowBytes
+                    let rows = [max(0, sy - 1), sy, min(height - 1, sy + 1)].map { src + $0 * rowBytes }
+                    /// One channel at source pixel `sx`, its fine detail boosted.
+                    @inline(__always) func read(_ sx: Int, _ c: Int) -> Float {
+                        let v = Float(rows[1][sx * 4 + c])
+                        guard boost > 0 else { return v }
+                        var sum: Float = 0
+                        for r in rows {
+                            for dx in -1...1 { sum += Float(r[min(width - 1, max(0, sx + dx)) * 4 + c]) }
+                        }
+                        return (v + boost * (v - sum / 9)).clamped(0, 255)
+                    }
                     for x in 0..<cw {
                         let center = (Double(x) + 0.5) * kx
-                        // Green at the pixel's center, red and blue offset.
                         let xg = min(width - 1, Int(center))
-                        let xr = min(width - 1, max(0, Int(center - 0.5 * kx)))
-                        let xb = min(width - 1, Int(center + 0.5 * kx))
+                        let xr = min(width - 1, max(0, Int(center - kx / 3)))
+                        let xb = min(width - 1, Int(center + kx / 3))
                         let i = (y * cw + x) * 4
-                        let pb = Float(row[xb * 4]), pg = Float(row[xg * 4 + 1]), pr = Float(row[xr * 4 + 2])
-                        o[i] = UInt8((Float(o[i]) + (pb - Float(o[i])) * aliasing).rounded())
-                        o[i + 1] = UInt8((Float(o[i + 1]) + (pg - Float(o[i + 1])) * aliasing).rounded())
-                        o[i + 2] = UInt8((Float(o[i + 2]) + (pr - Float(o[i + 2])) * aliasing).rounded())
+                        let pb = read(xb, 0), pg = read(xg, 1), pr = read(xr, 2)
+                        o[i] = UInt8((Float(o[i]) + (pb - Float(o[i])) * mix).rounded())
+                        o[i + 1] = UInt8((Float(o[i + 1]) + (pg - Float(o[i + 1])) * mix).rounded())
+                        o[i + 2] = UInt8((Float(o[i + 2]) + (pr - Float(o[i + 2])) * mix).rounded())
                     }
                 }
             }
         }
-        let blur = optics["lens_blur"]
-        if blur > 0 { gaussianBlur(&out, width: cw, height: ch, sigma: Float(0.25 + 1.5 * blur)) }
         if optics["fields"] >= 0.5 {
             // One field: the even lines, each shown twice.
             out.withUnsafeMutableBufferPointer { op in
@@ -346,61 +360,34 @@ public final class DigitalVideoRenderer {
         return out
     }
 
-    /// Separable Gaussian on BGRA8 (alpha left alone).
-    static func gaussianBlur(_ px: inout [UInt8], width w: Int, height h: Int, sigma: Float) {
-        let r = max(1, Int((sigma * 2.5).rounded(.up)))
-        var k = (-r...r).map { exp(-Float($0 * $0) / (2 * sigma * sigma)) }
-        let sum = k.reduce(0, +)
-        k = k.map { $0 / sum }
-        var tmp = [Float](repeating: 0, count: w * h * 3)
-        px.withUnsafeMutableBufferPointer { pp in
-            tmp.withUnsafeMutableBufferPointer { tp in
-                let p = pp.baseAddress!, t = tp.baseAddress!
-                DispatchQueue.concurrentPerform(iterations: h) { y in
-                    for x in 0..<w {
-                        var a: (Float, Float, Float) = (0, 0, 0)
-                        for d in -r...r {
-                            let i = (y * w + min(w - 1, max(0, x + d))) * 4
-                            let wt = k[d + r]
-                            a.0 += Float(p[i]) * wt; a.1 += Float(p[i + 1]) * wt; a.2 += Float(p[i + 2]) * wt
-                        }
-                        let o = (y * w + x) * 3
-                        t[o] = a.0; t[o + 1] = a.1; t[o + 2] = a.2
-                    }
-                }
-                DispatchQueue.concurrentPerform(iterations: h) { y in
-                    for x in 0..<w {
-                        var a: (Float, Float, Float) = (0, 0, 0)
-                        for d in -r...r {
-                            let i = (min(h - 1, max(0, y + d)) * w + x) * 3
-                            let wt = k[d + r]
-                            a.0 += t[i] * wt; a.1 += t[i + 1] * wt; a.2 += t[i + 2] * wt
-                        }
-                        let o = (y * w + x) * 4
-                        p[o] = UInt8(a.0.rounded().clamped(0, 255))
-                        p[o + 1] = UInt8(a.1.rounded().clamped(0, 255))
-                        p[o + 2] = UInt8(a.2.rounded().clamped(0, 255))
-                    }
-                }
-            }
-        }
-    }
-
     /// The camera's electronics, on what the sensor read (`bgra`, at the
-    /// capture size): exposure and white balance as gains, sensor noise,
-    /// each channel clipping at white on its own, then — in Y′CbCr — noise
-    /// reduction, the detail circuit's sharpening, the black level and
-    /// saturation, and finally the color subsampled.
+    /// capture size). In light (linear): white balance as gains, then the
+    /// CCD response's auto exposure and lens flare. Back in video levels:
+    /// sensor noise, then each channel through the knee and clipped at
+    /// white on its own. Then, in Y′CbCr: noise reduction, the detail
+    /// circuit's sharpening, the setup lift and saturation, and finally the
+    /// color subsampled.
     static func capture(_ bgra: [UInt8], geometry g: CodecGeometry, settings: DigitalSettings,
                         index: Int) -> CodecPicture {
         let w = g.width, h = g.height
         let noise = Float(settings["sensor_noise"])
         let nr = Float(settings["noise_reduction"])
-        let exposure = Float(pow(2, settings["exposure"]))
         let warm = Float(settings["white_balance"]), magenta = Float(settings["tint"])
-        let gainR = exposure * (1 + 0.25 * warm), gainB = exposure * (1 - 0.25 * warm)
-        let gainG = exposure * (1 - 0.15 * magenta)
-        let gains = gainR != 1 || gainG != 1 || gainB != 1
+        let ccd = Float(settings["ccd_response"])
+        let curve = CCDResponse(strength: ccd)
+        var gainR = 1 + 0.25 * warm, gainB = 1 - 0.25 * warm
+        var gainG = 1 - 0.15 * magenta
+        var flare: Float = 0
+        if ccd > 0 {
+            let exposure = curve.exposure(meteredMean: Self.meteredMean(bgra, width: w, height: h,
+                                                                         gains: (gainR, gainG, gainB)))
+            gainR *= exposure; gainG *= exposure; gainB *= exposure
+            flare = curve.flare(meteredMean: Self.meteredMean(bgra, width: w, height: h,
+                                                              gains: (gainR, gainG, gainB)))
+        }
+        // Gains act on light, so they need linear values (decoded sRGB).
+        let linear = gainR != 1 || gainG != 1 || gainB != 1 || flare > 0
+        let decode = Self.srgbToLinear
         var yf = [Float](repeating: 0, count: w * h)
         var cbf = [Float](repeating: 0, count: w * h)
         var crf = [Float](repeating: 0, count: w * h)
@@ -417,7 +404,11 @@ public final class DigitalVideoRenderer {
                             for x in 0..<w {
                                 let i = y * w + x
                                 var b = Float(s[i * 4]), gr = Float(s[i * 4 + 1]), r = Float(s[i * 4 + 2])
-                                if gains { r *= gainR; gr *= gainG; b *= gainB }
+                                if linear {
+                                    r = Self.linearToSRGB(decode[Int(r)] * gainR + flare)
+                                    gr = Self.linearToSRGB(decode[Int(gr)] * gainG + flare)
+                                    b = Self.linearToSRGB(decode[Int(b)] * gainB + flare)
+                                }
                                 if noise > 0 {
                                     // Gain noise: worst in the shadows, and
                                     // under the clip (a blown sky is clean).
@@ -429,7 +420,10 @@ public final class DigitalVideoRenderer {
                                     gr += n - 0.344136 * nb - 0.714136 * nc
                                     b += n + 1.772 * nb
                                 }
-                                if gains || noise > 0 {
+                                if ccd > 0 {
+                                    r = curve.knee(r); gr = curve.knee(gr); b = curve.knee(b)
+                                }
+                                if linear || noise > 0 {
                                     r = r.clamped(0, 255); gr = gr.clamped(0, 255); b = b.clamped(0, 255)
                                 }
                                 Y[i] = 0.299 * r + 0.587 * gr + 0.114 * b
@@ -453,7 +447,7 @@ public final class DigitalVideoRenderer {
             let soft = boxBlur(yf, width: w, height: h, radius: 1, mix: 1)
             for i in 0..<yf.count { yf[i] = (yf[i] + 2.2 * sharpening * (yf[i] - soft[i])).clamped(0, 255) }
         }
-        let black = Float(settings["black_level"]) * 255
+        let black = curve.setup * 255
         let saturation = Float(settings["saturation"])
         if black > 0 || saturation != 1 {
             for i in 0..<yf.count {
@@ -490,6 +484,39 @@ public final class DigitalVideoRenderer {
             }
         }
         return pic
+    }
+
+    /// sRGB code value (0–255) → linear light.
+    static let srgbToLinear: [Float] = (0..<256).map { i in
+        let c = Float(i) / 255
+        return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
+    /// Linear light → sRGB code value (0–255), unclipped above white so the
+    /// knee can still see how far over a channel is.
+    @inline(__always) static func linearToSRGB(_ l: Float) -> Float {
+        let c = l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1 / 2.4) - 0.055
+        return c * 255
+    }
+
+    /// Center-weighted mean of linear luminance, as camcorder auto exposure
+    /// meters (the middle counts most, the edges a little).
+    static func meteredMean(_ bgra: [UInt8], width w: Int, height h: Int,
+                            gains: (Float, Float, Float)) -> Float {
+        var sum: Float = 0, weight: Float = 0
+        let lut = srgbToLinear
+        for y in stride(from: 0, to: h, by: 2) {
+            let dy = (Float(y) + 0.5) / Float(h) * 2 - 1
+            for x in stride(from: 0, to: w, by: 2) {
+                let dx = (Float(x) + 0.5) / Float(w) * 2 - 1
+                let wt = max(0.15, 1 - 0.6 * (dx * dx + dy * dy))
+                let i = (y * w + x) * 4
+                let l = 0.2126 * lut[Int(bgra[i + 2])] * gains.0 + 0.7152 * lut[Int(bgra[i + 1])] * gains.1
+                    + 0.0722 * lut[Int(bgra[i])] * gains.2
+                sum += l * wt; weight += wt
+            }
+        }
+        return weight > 0 ? sum / weight : 0.18
     }
 
     /// Edge-preserving smoothing: each pixel moves toward the neighbors
@@ -605,4 +632,37 @@ public final class DigitalVideoRenderer {
             }
         }
     }
+}
+
+/// The tone of a 90s 3-CCD camcorder (the VX1000), fitted to its footage:
+/// across six reference frames the darkest pixels sat at 20–45 (not 0),
+/// medians at 130–210, and 10–32% of each frame piled up in the top bins,
+/// with warm shots' red reaching white well before blue. `strength` blends
+/// every part from nothing (0) to the full response (1).
+struct CCDResponse {
+    let strength: Float
+
+    /// Auto exposure: bring the metered mean to a bright target — these
+    /// cameras exposed for faces and shadows and let skies go.
+    static let target: Float = 0.40
+    func exposure(meteredMean m: Float) -> Float {
+        let full = min(4, max(0.5, Self.target / max(m, 1e-4)))
+        return pow(full, strength)
+    }
+
+    /// Veiling flare from a cheap lens (and the fisheye adapters these were
+    /// shot through): a share of the whole frame's light scattered over
+    /// everything, so bright scenes lift their shadows most.
+    func flare(meteredMean m: Float) -> Float { 0.03 * strength * m }
+
+    /// The knee: above it each channel is compressed, then clips at white.
+    static let kneePoint: Float = 0.72 * 255
+    func knee(_ v: Float) -> Float {
+        guard v > Self.kneePoint else { return v }
+        let slope = 1 - 0.62 * strength
+        return min(255, Self.kneePoint + (v - Self.kneePoint) * slope)
+    }
+
+    /// NTSC DV's 7.5 IRE setup, mishandled in transfer: black shows as gray.
+    var setup: Float { 0.065 * strength }
 }

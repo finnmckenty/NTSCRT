@@ -1976,7 +1976,7 @@ final class AppState {
         // Looks from before the Digital video stage leave it off. The
         // Downscale they carry is the resolution either way.
         if let d = dict["digital"] as? [String: Any] {
-            let values = (d["values"] as? [String: Double]) ?? [:]
+            let values = DigitalSettings.migrated((d["values"] as? [String: Double]) ?? [:])
             digitalValues = DigitalParam.defaultValues.merging(values) { _, new in new }
             digitalFormatApplied = true
             digitalEnabled = (d["enabled"] as? Bool) ?? false
@@ -1999,7 +1999,7 @@ final class AppState {
                     let shader = (k["shader"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
                     let ntsc = k["ntsc"] as? [String: Any] ?? [:]
                     let glitch = k["glitch"] as? [String: Double] ?? [:]
-                    let digital = k["digital"] as? [String: Double] ?? [:]
+                    let digital = DigitalSettings.migrated(k["digital"] as? [String: Double] ?? [:])
                     return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc,
                                     glitchValues: glitch, digitalValues: digital)
                 }.sorted { $0.t < $1.t }

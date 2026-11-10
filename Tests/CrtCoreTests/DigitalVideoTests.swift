@@ -295,37 +295,62 @@ final class DigitalVideoTests: XCTestCase {
         let viaVImage = small
         small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: size.width,
                                            height: size.height, rowBytes: size.width * 4, to: capture,
-                                           optics: DigitalSettings(values: ["aliasing": 0, "lens_blur": 0, "fields": 0]))
+                                           optics: DigitalSettings(values: ["aliasing": 0, "fields": 0]))
         XCTAssertTrue(small == viaVImage)
         let a = camera(small, capture.width, capture.height, [:])
-        let b = camera(small, capture.width, capture.height, ["exposure": 0, "white_balance": 0, "tint": 0,
-                                                              "saturation": 1, "black_level": 0, "sharpening": 0])
+        let b = camera(small, capture.width, capture.height, ["ccd_response": 0, "white_balance": 0, "tint": 0,
+                                                              "saturation": 1, "sharpening": 0])
         XCTAssertEqual(a.y.data[500], b.y.data[500])
         XCTAssertEqual(a.cr.data[777], b.cr.data[777])
+        // And neutral really is the picture as it came in.
+        let i = 500, w = capture.width
+        let b0 = Float(small[i * 4]), g0 = Float(small[i * 4 + 1]), r0 = Float(small[i * 4 + 2])
+        _ = w
+        XCTAssertEqual(a.y.data[(i / capture.width) * a.y.width + i % capture.width],
+                       0.299 * r0 + 0.587 * g0 + 0.114 * b0, accuracy: 0.01)
     }
 
-    func testOverexposureClipsEachColorOnItsOwn() {
-        // Skin tone, two stops over: red clips first, so it turns yellow-white.
-        let px = [UInt8](repeating: 0, count: 16 * 16 * 4).enumerated().map { i, _ in [UInt8(140), 160, 210, 255][i % 4] }
-        let pic = camera(px, 16, 16, ["exposure": 2])
-        let y = pic.y.data[0], cb = pic.cb.data[0], cr = pic.cr.data[0]
-        let r = y + 1.402 * (cr - 128), g = y - 0.344136 * (cb - 128) - 0.714136 * (cr - 128)
-        let b = y + 1.772 * (cb - 128)
-        XCTAssertEqual(r, 255, accuracy: 0.5)
-        XCTAssertEqual(g, 255, accuracy: 0.5)
-        XCTAssertEqual(b, 255, accuracy: 0.5, "every channel at 2 stops over")
-        let one = camera(px, 16, 16, ["exposure": 0.5])
-        let r1 = one.y.data[0] + 1.402 * (one.cr.data[0] - 128)
-        XCTAssertEqual(r1, 255, accuracy: 0.5, "red (210 × 1.41) clips at half a stop")
-        XCTAssertLessThan(one.y.data[0] - 0.344136 * (one.cb.data[0] - 128) - 0.714136 * (one.cr.data[0] - 128), 254)
+    /// RGB back from a picture's first pixel (full color resolution).
+    func rgb(_ p: CodecPicture, _ k: Int = 0) -> (Float, Float, Float) {
+        let y = p.y.data[k], cb = p.cb.data[k] - 128, cr = p.cr.data[k] - 128
+        return (y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb)
     }
 
-    func testBlackLevelLiftsBlackAndSharpeningOvershoots() {
+    func patch(_ c: (UInt8, UInt8, UInt8), _ n: Int = 32) -> [UInt8] {
+        (0..<(n * n)).flatMap { _ in [c.2, c.1, c.0, 255] }
+    }
+
+    func testCCDResponseClipsWarmHighlightsRedFirst() {
+        // A warm wall in sun, in the corner of a darker frame the camera
+        // exposes for: red hits white while blue is still well under it.
+        var px = patch((70, 70, 70))
+        for y in 0..<6 { for x in 0..<6 { let i = (y * 32 + x) * 4; px[i] = 120; px[i + 1] = 170; px[i + 2] = 215 } }
+        let out = rgb(camera(px, 32, 32, ["ccd_response": 1]))
+        XCTAssertEqual(out.0, 255, accuracy: 1.5, "red clipped")
+        XCTAssertLessThan(out.2, 225, "blue under the clip: \(out)")
+        XCTAssertGreaterThan(out.1, 200)
+    }
+
+    func testCCDResponseLiftsBlacksAndExposesDarkScenesUp() {
+        // Black stays gray-lifted (setup + flare), a dark scene is pushed
+        // up by auto exposure, and the result never goes past white.
+        var px = patch((0, 0, 0), 32)
+        for i in stride(from: 0, to: px.count / 2, by: 4) { px[i] = 60; px[i + 1] = 60; px[i + 2] = 60 }
+        let dark = camera(px, 32, 32, ["ccd_response": 1])
+        let blackY = dark.y.data[31 * dark.y.width + 5]
+        XCTAssertGreaterThan(blackY, 15, "black lifted")
+        XCTAssertLessThan(blackY, 45, "but not washed out")
+        XCTAssertGreaterThan(dark.y.data[2 * dark.y.width + 5], 90, "60 gray exposed up: \(dark.y.data[2 * dark.y.width + 5])")
+        let half = camera(px, 32, 32, ["ccd_response": 0.5])
+        XCTAssertLessThan(half.y.data[31 * half.y.width + 5], blackY, "strength scales it")
+        let white = rgb(camera(patch((250, 250, 250)), 32, 32, ["ccd_response": 1]))
+        XCTAssertLessThanOrEqual(max(white.0, white.1, white.2), 255.6)
+    }
+
+    func testSharpeningOvershoots() {
         let w = 32, h = 16
         var px = [UInt8](repeating: 255, count: w * h * 4)
         for y in 0..<h { for x in 0..<w { for c in 0..<3 { px[(y * w + x) * 4 + c] = x < 16 ? 40 : 200 } } }
-        let lifted = camera(px, w, h, ["black_level": 0.1])
-        XCTAssertEqual(lifted.y.data[0], 25.5 + 40 * 0.9, accuracy: 0.6)
         let sharp = camera(px, w, h, ["sharpening": 1])
         let row = (0..<w).map { sharp.y.data[8 * sharp.y.width + $0] }
         XCTAssertLessThan(row[15], 35, "dark halo before the edge: \(row[13...18])")
@@ -333,23 +358,51 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertEqual(row[2], 40, accuracy: 0.6, "flat areas untouched")
     }
 
-    func testAliasingTurnsFineStripesIntoFalseColor() {
-        // Gray stripes finer than the capture grid can hold.
-        let (w, h) = (640, 64)
+    /// Fine gray stripes, finer than a 160-wide camera can hold.
+    func stripes(_ w: Int = 640, _ h: Int = 64, period: Double = 7.0 / 3) -> [UInt8] {
         var px = [UInt8](repeating: 255, count: w * h * 4)
-        for y in 0..<h { for x in 0..<w { let v: UInt8 = (x * 7 / 3) % 2 == 0 ? 230 : 25
+        for y in 0..<h { for x in 0..<w {
+            let v = UInt8(128 + 100 * cos(2 * .pi * Double(x) / period))
             for c in 0..<3 { px[(y * w + x) * 4 + c] = v } } }
+        return px
+    }
+
+    func sampled(_ px: [UInt8], _ aliasing: Double, w: Int = 640, h: Int = 64) -> [UInt8] {
+        DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: w, height: h,
+                                   rowBytes: w * 4, to: (160, 16),
+                                   optics: DigitalSettings(values: ["aliasing": aliasing]))
+    }
+
+    func testAliasingTurnsFineStripesIntoFalseColor() {
         func chroma(_ aliasing: Double) -> Float {
-            let small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: w, height: h,
-                                                   rowBytes: w * 4, to: (160, 16),
-                                                   optics: DigitalSettings(values: ["aliasing": aliasing]))
-            let pic = camera(small, 160, 16, [:])
+            let pic = camera(sampled(stripes(), aliasing), 160, 16, [:])
             var s: Float = 0
             for i in 0..<(160 * 16) { s += abs(pic.cb.data[i] - 128) + abs(pic.cr.data[i] - 128) }
             return s / Float(160 * 16)
         }
         XCTAssertLessThan(chroma(0), 2, "filtered properly: gray stays gray")
-        XCTAssertGreaterThan(chroma(1), 20, "aliased: rainbows")
+        XCTAssertGreaterThan(chroma(0.5), 20, "aliased: false color")
+        XCTAssertGreaterThan(chroma(1), chroma(0.5) * 1.2, "above 50% the boost makes it stronger")
+    }
+
+    func testAliasingRainbowsSurviveQuarterWidthColor() {
+        // Stripes just off the sensor's own pitch (4 source px per capture
+        // px here) beat slowly: the false color there has to turn through
+        // every hue, and survive DV's 4:1:1 averaging.
+        let px = stripes(period: 4.0 * 1.04)
+        let small = sampled(px, 1)
+        let pic = DigitalVideoRenderer.capture(small, geometry: CodecGeometry(width: 160, height: 16, chroma: .quarterWide),
+                                               settings: DigitalSettings(values: ["sensor_noise": 0, "noise_reduction": 0]),
+                                               index: 0)
+        var quadrants = Set<Int>()
+        var strength: Float = 0
+        for x in 0..<pic.cb.width - 2 {
+            let cb = pic.cb.data[4 * pic.cb.width + x] - 128, cr = pic.cr.data[4 * pic.cr.width + x] - 128
+            strength += abs(cb) + abs(cr)
+            if abs(cb) + abs(cr) > 8 { quadrants.insert((cb >= 0 ? 1 : 0) + (cr >= 0 ? 2 : 0)) }
+        }
+        XCTAssertEqual(quadrants.count, 4, "hue goes all the way round: \(quadrants)")
+        XCTAssertGreaterThan(strength / Float(pic.cb.width - 2), 15)
     }
 
     func testOneFieldDoublesEveryOtherLine() {

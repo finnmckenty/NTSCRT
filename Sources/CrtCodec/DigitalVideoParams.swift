@@ -41,13 +41,9 @@ public struct DigitalParam: Identifiable, Sendable {
             kind: .choice(["Progressive", "One field (line-doubled)"]), defaultValue: 0,
             help: "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. Deinterlaced the cheap way — one field, each line doubled, as most DV reached the web — diagonals turn to stairs."),
         DigitalParam(
-            id: "lens_blur", label: "Lens softness", group: .capture,
-            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "A soft, cheap or wide-angle lens: fine detail blurs before the sensor sees it."),
-        DigitalParam(
             id: "aliasing", label: "Aliasing", group: .capture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "The sensor reading detail it can't resolve, with nothing blurring it away first: fine stripes beat into moiré and edges into jaggies. The red and blue chips sit half a pixel either side of green, as in a 3-CCD camera, so fine patterns turn to rainbows."),
+            help: "The sensor reading detail it can't resolve, with nothing blurring it away first: fine stripes beat into moiré and edges into jaggies. Red, green and blue are sampled a third of a pixel apart, so where a beat drifts slowly its colors cycle through the rainbow. Above 50% the finest detail is boosted as it's read, for stronger moiré from sources not much sharper than the camera."),
         DigitalParam(
             id: "sensor_noise", label: "Sensor noise", group: .capture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.4,
@@ -57,9 +53,9 @@ public struct DigitalParam: Identifiable, Sendable {
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.5,
             help: "The camera smoothing its own grain away before compressing. It flattens fine detail into a smeary, plastic look."),
         DigitalParam(
-            id: "exposure", label: "Exposure", group: .picture,
-            kind: .slider(min: -2, max: 2, percent: false, unit: "stops"), defaultValue: 0,
-            help: "How much light the camera lets in. Exposing for the shadows blows out skies and highlights: each color clips at white on its own, so bright skin and sky shift hue on the way."),
+            id: "ccd_response", label: "CCD response", group: .picture,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "The tone of a 90s 3-CCD camcorder like the VX1000, fitted to its footage. Auto exposure meters the middle of the frame and exposes bright; each color is compressed by the knee and then clips at white on its own, so warm skin and skies go yellow, then white; lens flare and the mishandled 7.5 IRE setup lift the blacks to a milky gray, more in bright scenes. 0% leaves the picture alone."),
         DigitalParam(
             id: "white_balance", label: "White balance", group: .picture,
             kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
@@ -72,10 +68,6 @@ public struct DigitalParam: Identifiable, Sendable {
             id: "saturation", label: "Saturation", group: .picture,
             kind: .slider(min: 0, max: 2, percent: true, unit: ""), defaultValue: 1,
             help: "Color strength. Consumer camcorders pushed it, reds and oranges most visibly."),
-        DigitalParam(
-            id: "black_level", label: "Black level", group: .picture,
-            kind: .slider(min: 0, max: 0.25, percent: true, unit: ""), defaultValue: 0,
-            help: "Lifted, milky blacks. NTSC DV's 7.5 IRE setup was often handled wrong in transfers, so its blacks came out gray."),
         DigitalParam(
             id: "sharpening", label: "Sharpening", group: .picture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
@@ -123,7 +115,7 @@ public struct DigitalParam: Identifiable, Sendable {
     /// through the lens. They hold for a whole render (keyframes on
     /// the timeline don't animate them).
     public static let structureIDs: Set<String> = ["frame_rate", "keyframe_interval", "chroma",
-                                                    "fields", "lens_blur", "aliasing"]
+                                                    "fields", "aliasing"]
 }
 
 public enum ChromaSubsampling: Int, CaseIterable, Sendable {
@@ -157,6 +149,20 @@ public struct DigitalSettings: Equatable, Hashable, Sendable {
         ChromaSubsampling(rawValue: Int(self["chroma"].rounded())) ?? .halfBoth
     }
 
+    /// Values saved before 0.19, mapped onto today's controls: Exposure and
+    /// Black level became CCD response (the stronger of the two decides),
+    /// and Lens softness is gone.
+    public static func migrated(_ values: [String: Double]) -> [String: Double] {
+        var v = values
+        let exposure = v.removeValue(forKey: "exposure")
+        let black = v.removeValue(forKey: "black_level")
+        v.removeValue(forKey: "lens_blur")
+        if v["ccd_response"] == nil, exposure != nil || black != nil {
+            v["ccd_response"] = min(1, max(0, (exposure ?? 0) / 0.6, (black ?? 0) / 0.08))
+        }
+        return v
+    }
+
     /// The same settings with the structure controls taken from `base`.
     public func holdingStructure(of base: DigitalSettings) -> DigitalSettings {
         var v = values
@@ -177,26 +183,26 @@ public struct DigitalFormat: Identifiable, Sendable {
     public static let all: [DigitalFormat] = [
         DigitalFormat(
             id: "webcam", name: "Webcam (2005)", width: 320,
-            values: ["frame_rate": 15, "lens_blur": 0.35, "aliasing": 0.15,
+            values: ["frame_rate": 15, "aliasing": 0.15,
                      "sensor_noise": 0.4, "noise_reduction": 0.5,
-                     "exposure": 0.4, "white_balance": -0.15, "saturation": 0.85,
-                     "black_level": 0.04, "sharpening": 0.25, "chroma": 2,
+                     "ccd_response": 0.5, "white_balance": -0.15, "saturation": 0.85,
+                     "sharpening": 0.25, "chroma": 2,
                      "quality": 0.22, "keyframe_interval": 0, "fixed_bitrate": 0,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "320 × 240, 15 fps, a noisy sensor, each frame compressed on its own."),
         DigitalFormat(
             id: "video_call", name: "Video call", width: 320,
-            values: ["frame_rate": 15, "lens_blur": 0.3, "sensor_noise": 0.25, "noise_reduction": 0.6,
-                     "exposure": 0.2, "saturation": 0.9, "chroma": 2,
+            values: ["frame_rate": 15, "sensor_noise": 0.25, "noise_reduction": 0.6,
+                     "ccd_response": 0.3, "saturation": 0.9, "chroma": 2,
                      "quality": 0.22, "keyframe_interval": 4, "fixed_bitrate": 0.8,
                      "deblocking": 0.6, "data_loss": 0.15, "datamosh": 0],
             blurb: "A squeezed bitrate and lost packets that smear until the next keyframe."),
         DigitalFormat(
             id: "minidv", name: "MiniDV", width: 720,
-            values: ["frame_rate": 30, "fields": 1, "lens_blur": 0.25, "aliasing": 0.6,
+            values: ["frame_rate": 30, "fields": 1, "aliasing": 0.6,
                      "sensor_noise": 0.12, "noise_reduction": 0,
-                     "exposure": 0.3, "white_balance": 0.4, "tint": 0.2, "saturation": 1.15,
-                     "black_level": 0.08, "sharpening": 0.6, "chroma": 3,
+                     "ccd_response": 1, "white_balance": 0.4, "tint": 0.2, "saturation": 1.15,
+                     "sharpening": 0.6, "chroma": 3,
                      "quality": 0.7, "keyframe_interval": 0, "fixed_bitrate": 0.3,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "The VX1000 skate-video look: one field line-doubled, hard sharpening, aliasing and color moiré, blown highlights, warm saturated color, gray blacks, color at a quarter width (4:1:1)."),
