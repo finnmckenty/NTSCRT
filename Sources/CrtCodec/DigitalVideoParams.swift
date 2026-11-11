@@ -79,7 +79,7 @@ public struct DigitalParam: Identifiable, Sendable {
             help: "How much color detail is kept against brightness detail. Codecs store color at lower resolution because eyes notice it less: 4:2:2 halves it across, 4:2:0 across and down, and 4:1:1, NTSC DV's choice, quarters it across, smearing color sideways."),
         DigitalParam(
             id: "quality", label: "Quality", group: .compression,
-            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.22,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.749,
             help: "How finely each 8×8 block's detail is kept (the quantizer). Lower turns blocks into flat tiles and rings edges with mosquito noise."),
         DigitalParam(
             id: "keyframe_interval", label: "Keyframe interval", group: .compression,
@@ -149,11 +149,13 @@ public struct DigitalSettings: Equatable, Hashable, Sendable {
         ChromaSubsampling(rawValue: Int(self["chroma"].rounded())) ?? .halfBoth
     }
 
-    /// Values saved before 0.19, mapped onto today's controls: Exposure and
-    /// Black level became CCD response (the stronger of the two decides),
-    /// and Lens softness is gone.
-    public static func migrated(_ values: [String: Double]) -> [String: Double] {
+    /// Values saved before 0.19 (look version 1), mapped onto today's
+    /// controls: Exposure and Black level became CCD response (the stronger
+    /// of the two decides), Lens softness is gone, and Quality moved to an
+    /// even curve — converted to the value giving the same quantizer.
+    public static func migrated(_ values: [String: Double], lookVersion: Int) -> [String: Double] {
         var v = values
+        if lookVersion < 2, let q = v["quality"] { v["quality"] = DigitalCodec.qualityFromJPEGScale(q) }
         let exposure = v.removeValue(forKey: "exposure")
         let black = v.removeValue(forKey: "black_level")
         v.removeValue(forKey: "lens_blur")
@@ -187,14 +189,14 @@ public struct DigitalFormat: Identifiable, Sendable {
                      "sensor_noise": 0.4, "noise_reduction": 0.5,
                      "ccd_response": 0.5, "white_balance": -0.15, "saturation": 0.85,
                      "sharpening": 0.25, "chroma": 2,
-                     "quality": 0.22, "keyframe_interval": 0, "fixed_bitrate": 0,
+                     "quality": 0.749, "keyframe_interval": 0, "fixed_bitrate": 0,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "320 × 240, 15 fps, a noisy sensor, each frame compressed on its own."),
         DigitalFormat(
             id: "video_call", name: "Video call", width: 320,
             values: ["frame_rate": 15, "sensor_noise": 0.25, "noise_reduction": 0.6,
                      "ccd_response": 0.3, "saturation": 0.9, "chroma": 2,
-                     "quality": 0.22, "keyframe_interval": 4, "fixed_bitrate": 0.8,
+                     "quality": 0.749, "keyframe_interval": 4, "fixed_bitrate": 0.8,
                      "deblocking": 0.6, "data_loss": 0.15, "datamosh": 0],
             blurb: "A squeezed bitrate and lost packets that smear until the next keyframe."),
         DigitalFormat(
@@ -203,19 +205,19 @@ public struct DigitalFormat: Identifiable, Sendable {
                      "sensor_noise": 0.12, "noise_reduction": 0,
                      "ccd_response": 1, "white_balance": 0.4, "tint": 0.2, "saturation": 1.15,
                      "sharpening": 0.6, "chroma": 3,
-                     "quality": 0.7, "keyframe_interval": 0, "fixed_bitrate": 0.3,
+                     "quality": 0.894, "keyframe_interval": 0, "fixed_bitrate": 0.3,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "The VX1000 skate-video look: one field line-doubled, hard sharpening, aliasing and color moiré, blown highlights, warm saturated color, gray blacks, color at a quarter width (4:1:1)."),
         DigitalFormat(
             id: "early_web", name: "Early web video", width: 320,
             values: ["frame_rate": 15, "sensor_noise": 0, "noise_reduction": 0, "chroma": 2,
-                     "quality": 0.12, "keyframe_interval": 5, "fixed_bitrate": 0.7,
+                     "quality": 0.651, "keyframe_interval": 5, "fixed_bitrate": 0.7,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "240p streaming: few bits, coarse blocks, and keyframes that pump."),
         DigitalFormat(
             id: "datamosh", name: "Datamosh", width: 480,
             values: ["frame_rate": 30, "sensor_noise": 0, "noise_reduction": 0, "chroma": 2,
-                     "quality": 0.4, "keyframe_interval": 1, "fixed_bitrate": 0.3,
+                     "quality": 0.826, "keyframe_interval": 1, "fixed_bitrate": 0.3,
                      "deblocking": 0, "data_loss": 0, "datamosh": 1],
             blurb: "Keyframes removed: motion drags the old picture around."),
     ]

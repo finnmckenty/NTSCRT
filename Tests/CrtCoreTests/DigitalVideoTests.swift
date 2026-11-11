@@ -109,6 +109,36 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertGreaterThan(errors[3], 3 * errors[0], "\(errors)")
     }
 
+    func testQualityDamageIsEvenlySpacedAlongTheSlider() {
+        // No cliff at the bottom, no dead zone at the top. (On a real photo
+        // the steps are within 2× of each other — 16.2, 14.1 … 2.6, 1.0 per
+        // tenth; this synthetic frame's hard edges and checkers drop extra
+        // in the near-lossless last stretch, so the bound here is looser.)
+        let clean = DigitalSettings(values: ["frame_rate": 30, "sensor_noise": 0, "noise_reduction": 0,
+                                             "chroma": 0, "keyframe_interval": 0])
+        let errors: [Double] = [0, 0.1, 0.25, 0.5, 0.75, 1].map { q in
+            var s = clean; s.values["quality"] = q
+            return meanDifference(render(DigitalVideoRenderer(), 0, s), frame(0))
+        }
+        let range = errors.first! - errors.last!
+        XCTAssertTrue(zip(errors, errors.dropFirst()).allSatisfy { $0 > $1 }, "damage falls as quality rises: \(errors)")
+        XCTAssertLessThan(errors[0] - errors[1], 0.2 * range, "the bottom tenth isn't a cliff: \(errors)")
+        XCTAssertGreaterThan(errors[3] - errors[5], 0.25 * range, "the top half still does something: \(errors)")
+    }
+
+    func testOldQualityValuesKeepTheirQuantizer() {
+        for old in stride(from: 0.0, through: 1.0, by: 0.05) {
+            let q = 2 + 93 * old
+            let oldScale = Float(q < 50 ? 5000 / q : 200 - 2 * q) / 100
+            let new = DigitalCodec.qualityFromJPEGScale(old)
+            XCTAssertEqual(DigitalCodec.tableScale(quality: new), oldScale, accuracy: oldScale * 1e-4, "\(old)")
+        }
+        let v1 = DigitalSettings.migrated(["quality": 0.22], lookVersion: 1)["quality"]!
+        XCTAssertEqual(v1, 0.749, accuracy: 0.001)
+        XCTAssertEqual(DigitalSettings.migrated(["quality": 0.22], lookVersion: 2)["quality"], 0.22,
+                       "today's looks are left alone")
+    }
+
     // MARK: - timing
 
     func testCaptureTimingHoldsFramesAndPlacesKeyframes() {

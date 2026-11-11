@@ -1850,7 +1850,8 @@ final class AppState {
 
     func lookDictionary() -> [String: Any] {
         var look: [String: Any] = [
-            "version": 1,
+            // 2: Digital video's Quality on its even curve (0.19).
+            "version": 2,
             "downscale": [
                 "enabled": downscaleEnabled,
                 "width": downscaleWidth,
@@ -1921,6 +1922,7 @@ final class AppState {
         guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw LookError.badFile
         }
+        let lookVersion = dict["version"] as? Int ?? 1
         if dict["kind"] as? String == FeedbackPresets.kind { throw LookError.feedbackPreset }
         if let c = dict["crop"] as? [String: Any],
            let label = c["ratio"] as? String, let ratio = SourceCrop.Ratio(label: label) {
@@ -1976,7 +1978,8 @@ final class AppState {
         // Looks from before the Digital video stage leave it off. The
         // Downscale they carry is the resolution either way.
         if let d = dict["digital"] as? [String: Any] {
-            let values = DigitalSettings.migrated((d["values"] as? [String: Double]) ?? [:])
+            let values = DigitalSettings.migrated((d["values"] as? [String: Double]) ?? [:],
+                                                  lookVersion: lookVersion)
             digitalValues = DigitalParam.defaultValues.merging(values) { _, new in new }
             digitalFormatApplied = true
             digitalEnabled = (d["enabled"] as? Bool) ?? false
@@ -1999,7 +2002,8 @@ final class AppState {
                     let shader = (k["shader"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
                     let ntsc = k["ntsc"] as? [String: Any] ?? [:]
                     let glitch = k["glitch"] as? [String: Double] ?? [:]
-                    let digital = DigitalSettings.migrated(k["digital"] as? [String: Double] ?? [:])
+                    let digital = DigitalSettings.migrated(k["digital"] as? [String: Double] ?? [:],
+                                                           lookVersion: lookVersion)
                     return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc,
                                     glitchValues: glitch, digitalValues: digital)
                 }.sorted { $0.t < $1.t }

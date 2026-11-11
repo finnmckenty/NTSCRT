@@ -163,11 +163,26 @@ enum DigitalCodec {
         99, 99, 99, 99, 99, 99, 99, 99,
     ]
 
-    /// The JPEG quality scale (percent of the reference tables) for the
-    /// Quality control: 0 → JPEG quality 2, 1 → 95.
+    /// The quantizer scale (a multiple of the reference tables) for the
+    /// Quality control: 25× at 0 (JPEG quality 2) to 0.1× at 1 (JPEG 95).
+    /// Measured damage grows with the square root of the step (mean error
+    /// ∝ scale^0.51 across the whole range), so the square root is what
+    /// runs linearly: every step of the slider changes the damage by the
+    /// same amount. JPEG's own quality number (used before 0.19) spent
+    /// two thirds of the damage in its bottom tenth.
+    static let scaleRoots: (worst: Double, best: Double) = (5, 0.1.squareRoot())
     static func tableScale(quality: Double) -> Float {
-        let q = 2 + 93 * min(1, max(0, quality))
-        return Float(q < 50 ? 5000 / q : 200 - 2 * q) / 100
+        let q = min(1, max(0, quality))
+        let r = scaleRoots.worst + (scaleRoots.best - scaleRoots.worst) * q
+        return Float(r * r)
+    }
+
+    /// A Quality value from before 0.19 (JPEG quality 2 + 93u), as today's
+    /// slider value giving the same quantizer.
+    static func qualityFromJPEGScale(_ old: Double) -> Double {
+        let q = 2 + 93 * min(1, max(0, old))
+        let scale = (q < 50 ? 5000 / q : 200 - 2 * q) / 100
+        return min(1, max(0, (scaleRoots.worst - scale.squareRoot()) / (scaleRoots.worst - scaleRoots.best)))
     }
 
     /// Step sizes for one frame. Keyframes use the perceptual tables;
