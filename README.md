@@ -29,10 +29,21 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 - **Source**: the loaded image (PNG, JPEG, HEIC) or video (MP4, MOV).
 - **Crop**: cuts the picture to an aspect ratio (square, or portrait and landscape shapes from 3:4 to 1:2) before anything else sees it. Drag the picture in the preview to move the crop, or a corner to zoom in (to cut black borders, say); double-click to center.
 - **Downscale**: the retro resolution the CRT sees (SNES 256 px, VGA 320 px, or any width). **Chunky** keeps hard pixel edges; **Smooth** is softer and steadier on video.
-- **Digital video** (off by default): footage recorded digitally before it goes out as an analog signal, like webcam video dubbed to VHS. Pick a format (Webcam, Video call, MiniDV in the VX1000 skate-video style, Early web video, Datamosh), which also sets the Downscale resolution, then adjust the camera (fields — One field gives the CRT half-height lines with a scanline each, the 240p look — aliasing with rainbow moiré, the VX1000-style CCD response, color, sharpening) and the compression (quality, keyframes, lost data, datamoshing). It runs a real codec, so blocks, smears and datamoshing come out of the compression rather than being drawn.
+- **Digital video** (off by default): a digital camera and codec ahead of the analog signal, like webcam footage dubbed to VHS. See [Digital video](#digital-video) below.
 - **NTSC (TV)**: the analog signal, with composite noise, chroma bleed, head switching, tape speed, and about sixty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases).
 - **Glitch**: a simulated TV and VCR, for dramatic failures like rolling, tearing, bending, snow and tracking noise. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.
 - **CRT**: seven RetroArch CRT shaders (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every parameter exposed. A grayed-out control shows which switch turns it on.
+
+### Digital video
+
+Footage recorded digitally before it goes out as an analog signal. It runs a real codec, so blocks, smears and datamoshing come out of the compression rather than being drawn.
+
+- **Formats** set every control and the Downscale resolution: Webcam (2005), Video call, MiniDV (the VX1000 skate-video look), Early web video, and Datamosh.
+- **Capture**: frame rate, sensor noise, noise reduction, and **Aliasing**, which turns fine stripes into rainbow moiré. The broad rainbow bands need a source at least twice the Downscale width.
+- **Fields → One field** sends the CRT one field: half the lines, each twice as tall, with a scanline per line (the 240p look). With the CRT off, each line shows twice.
+- **Picture**: **CCD response** gives a 90s camcorder's tone (bright exposure, highlights that clip color by color, milky gray blacks), plus white balance, tint, saturation and sharpening.
+- **Compression**: color resolution (down to DV's 4:1:1), quality, keyframe interval, fixed bitrate and deblocking.
+- **Errors**: data loss (DV dropouts, or packet-loss smears that last until the next keyframe) and datamosh, which needs a keyframe interval above 0.
 
 ### Preview
 
@@ -81,19 +92,23 @@ Video feedback, the analog way: a camcorder filming a TV that shows the camcorde
 - **Preset** in the toolbar saves or loads your whole setup as a JSON file: every section, plus the timeline and its keyframes.
 - The bundled presets are listed in the same menu. Loading one with keyframes opens the timeline.
 - A preset saved with a crop brings it back. One without a crop leaves yours alone.
+- Presets from older versions open looking the way they did, even where a control has since changed.
 
 ### Tips
 
 - Every number next to a slider is a text field: click it and type.
-- Double-click a slider's knob to send it to its weakest setting.
+- Double-click a slider's knob to reset it.
 - Analog artifacts show best on contrast: dark backgrounds, bright sprites, hard edges.
 - For high-resolution sources, turn on **Intensity → Scale with video size** in the NTSC panel, so artifacts keep their size.
+- Scanlines need room: each line needs three or more screen pixels to show. If they vanish, especially on tall or portrait clips, lower the Downscale width, use One field, or zoom in.
 
 ## Limitations
 
 - The Intel half of the universal build is community-tested, not author-tested (see the note up top).
 - The NTSC stage runs on the CPU at your source's full resolution, so 4K sources slow the preview down. Exports always render every frame.
 - Video playback runs in real time and drops the occasional frame under heavy settings. The render-ahead cache holds up to a quarter of memory (at most 1 GB).
+- Screen Loop doesn't apply the Digital video stage yet.
+- Some CRT shaders, like crt-hyllian, switch their scanlines off for pictures taller than about 400 lines, treating them as interlaced.
 - A few crt-royale parameters are switched off inside the shader itself (marked "static in this shader build"). They do nothing in RetroArch either.
 - No undo. Save a preset before big experiments.
 
