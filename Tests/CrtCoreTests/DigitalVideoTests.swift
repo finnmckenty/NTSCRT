@@ -96,7 +96,7 @@ final class DigitalVideoTests: XCTestCase {
 
     func testLowerQualityLosesMoreOfThePicture() {
         let clean = DigitalSettings(values: ["frame_rate": 30, "sensor_noise": 0, "noise_reduction": 0,
-                                             "chroma": 0, "keyframe_interval": 0])
+                                             "chroma": 0, "keyframe_interval": 0, "fields": 0])
         var errors: [Double] = []
         for q in [0.95, 0.6, 0.3, 0.05] {
             var s = clean; s.values["quality"] = q
@@ -319,9 +319,11 @@ final class DigitalVideoTests: XCTestCase {
 
     func testPictureControlsAreNeutralByDefault() {
         let px = frame(0)
+        // (Fields default to One field — the stage's look, not neutral —
+        // so they're set to Progressive here.)
         var small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: size.width,
                                                height: size.height, rowBytes: size.width * 4,
-                                               to: capture, optics: DigitalSettings(values: [:]))
+                                               to: capture, optics: DigitalSettings(values: ["fields": 0]))
         let viaVImage = small
         small = DigitalVideoRenderer.scale(UnsafeMutableRawPointer(mutating: px), width: size.width,
                                            height: size.height, rowBytes: size.width * 4, to: capture,

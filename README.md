@@ -38,11 +38,11 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 
 Footage recorded digitally before it goes out as an analog signal. It runs real codecs, so blocks, smears and datamoshing come out of the compression rather than being drawn.
 
-- **Formats** set every control and the Downscale resolution: Webcam (2005), Video call, MiniDV (the VX1000 skate-video look), Early web video, CD-ROM (Video 1), and Datamosh.
-- **Capture**: frame rate, sensor noise, noise reduction, and **Aliasing**, which turns fine stripes into rainbow moiré. The broad rainbow bands need a source at least twice the Downscale width.
-- **Fields → One field** sends the CRT one field: half the lines, each twice as tall, with a scanline per line (the 240p look). With the CRT off, each line shows twice.
-- **Picture**: **CCD response** gives a 90s camcorder's tone (bright exposure, highlights that clip color by color, milky gray blacks), plus white balance, tint, saturation and sharpening.
+- **Formats** are in the toolbar's **Preset** menu, under Digital video: Webcam (2005), Video call, MiniDV (the VX1000 skate-video look), Early web video, CD-ROM (Video 1), and Datamosh. Each switches the stage on and sets its controls and the Downscale width.
 - **Compression**: the **Codec** (DCT like MPEG and DV, or **Block colors**: Microsoft Video 1's flat two-tone 4×4 blocks and banded 15-bit color, the early CD-ROM look), quality, keyframe interval, fixed bitrate, plus color resolution and deblocking for DCT.
+- **Capture**: frame rate, sensor noise, noise reduction, and **Aliasing**, which turns fine stripes into rainbow moiré. The broad rainbow bands need a source at least twice the Downscale width.
+- **Fields**: **One field** (the default) sends the CRT one field: half the lines, each twice as tall, with a scanline per line (the 240p look). With the CRT off, each line shows twice.
+- **Picture**: **CCD response** gives a 90s camcorder's tone (bright exposure, highlights that clip color by color, milky gray blacks), plus white balance, tint, saturation and sharpening.
 - **Errors**: data loss (DV dropouts, or packet-loss smears that last until the next keyframe) and, for DCT, datamosh, which needs a keyframe interval above 0.
 
 ### Preview
@@ -91,6 +91,7 @@ Video feedback, the analog way: a camcorder filming a TV that shows the camcorde
 
 - **Preset** in the toolbar saves or loads your whole setup as a JSON file: every section, plus the timeline and its keyframes.
 - The bundled presets are listed in the same menu. Loading one with keyframes opens the timeline.
+- The **Digital video** formats at the bottom of the menu set only that section (and the Downscale width), leaving the rest of your look alone.
 - A preset saved with a crop brings it back. One without a crop leaves yours alone.
 - Presets from older versions open looking the way they did, even where a control has since changed.
 

@@ -2466,6 +2466,19 @@ struct ContentView: View {
                         Button(preset.name) { load(preset.url) }
                     }
                 }
+                Divider()
+                // Starting points for the Digital video stage alone: they
+                // switch it on and set its controls and the Downscale width,
+                // leaving the rest of the look as it is.
+                Section("Digital video") {
+                    ForEach(DigitalFormat.all) { f in
+                        Button(f.name) {
+                            state.applyDigitalFormat(f)
+                            state.setDigitalEnabled(true)
+                        }
+                        .help(f.blurb)
+                    }
+                }
             } label: {
                 Label("Preset", systemImage: "doc.badge.gearshape")
                     .labelStyle(.titleAndIcon)

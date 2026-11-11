@@ -22,11 +22,10 @@ struct DigitalVideoPanel: View {
                                          }))
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .help("Record the picture with a digital camera and codec before it goes out as an analog signal: webcam, video call, MiniDV and more. Choosing a format also sets the Downscale resolution.")
+                    .help("Record the picture with a digital camera and codec before it goes out as an analog signal. Ready-made formats — webcam, video call, MiniDV and more — are in the toolbar's Preset menu, and also set the Downscale resolution.")
             }
             if panelExpanded {
                 Group {
-                    FormatRow()
                     ForEach(DigitalParam.Group.allCases, id: \.self) { group in
                         DigitalGroup(group: group)
                     }
@@ -37,42 +36,8 @@ struct DigitalVideoPanel: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { panelExpanded = state.digitalEnabled }
-    }
-}
-
-private struct FormatRow: View {
-    @Environment(AppState.self) private var state
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Format").font(.subheadline).foregroundStyle(.secondary)
-                Spacer()
-                Menu {
-                    ForEach(DigitalFormat.all) { f in
-                        Button(f.name) { state.applyDigitalFormat(f) }
-                    }
-                } label: {
-                    Text(state.digitalFormat?.name ?? "Custom")
-                }
-                .fixedSize()
-                .help("Set every control below, and the Downscale resolution, to a format's.")
-            }
-            Text(caption)
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// The format's description, or what the custom settings amount to.
-    private var caption: String {
-        if let f = state.digitalFormat { return f.blurb }
-        let s = state.digitalSettings
-        var size = state.downscaleEnabled ? "\(state.downscaleWidth) × \(state.downscaleHeight)" : "full size"
-        if let lines = state.downscaleFieldLines { size += ", one field of \(lines) lines" }
-        let keys = s["keyframe_interval"] <= 0 ? "every frame on its own"
-            : String(format: "a keyframe every %g s", s["keyframe_interval"])
-        return "\(size) (the Downscale), \(Int(s["frame_rate"].rounded())) fps, \(keys)."
+        // Switched on from the Preset menu (or a look): show it.
+        .onChange(of: state.digitalEnabled) { _, on in if on { panelExpanded = true } }
     }
 }
 
