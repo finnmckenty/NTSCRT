@@ -116,6 +116,34 @@ public struct DigitalParam: Identifiable, Sendable {
             help: "Keyframes thrown away. The changes that follow are applied to the old picture instead of the new one: motion drags the previous scene's pixels around until a keyframe gets through. Needs a keyframe interval above 0."),
     ]
 
+    /// The settings the stage starts with in a new window (it starts
+    /// switched off): Finn's "Cheap camcorder" look — a 2000s consumer
+    /// MiniDV camera, grain that grows in the dark. Kept apart from each
+    /// control's `defaultValue`, which formats, double-click resets and
+    /// looks saved before a control existed rely on.
+    public static let startingValues: [String: Double] = defaultValues.merging([
+        "frame_rate": 29.095686,
+        "fields": 1,
+        "aliasing": 0.380103,
+        "sensor_noise": 0.4,
+        "low_light_noise": 0.640871,
+        "noise_reduction": 0,
+        "ccd_response": 0.679635,
+        "white_balance": 0,
+        "tint": 0,
+        "saturation": 1,
+        "sharpening": 0,
+        "sharpening_width": 4,
+        "codec": 0,
+        "chroma": 2,
+        "quality": 0.749,
+        "keyframe_interval": 0,
+        "fixed_bitrate": 0,
+        "deblocking": 0,
+        "data_loss": 0,
+        "datamosh": 0,
+    ]) { _, new in new }
+
     public static let byID: [String: DigitalParam] =
         Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
 

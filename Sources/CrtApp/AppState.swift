@@ -697,7 +697,7 @@ final class AppState {
     /// it runs. The first time it's switched on, its format is applied —
     /// resolution (the Downscale) included.
     var digitalEnabled: Bool = false { didSet { markChainDirty(); noteChainInputEdited() } }
-    private(set) var digitalValues: [String: Double] = DigitalParam.defaultValues
+    private(set) var digitalValues: [String: Double] = DigitalParam.startingValues
     var digitalSettings: DigitalSettings { DigitalSettings(values: digitalValues) }
     /// Whether a format (or a look's settings) has been applied, so
     /// switching the stage on doesn't reset what's been chosen.
