@@ -40,9 +40,9 @@ Footage recorded digitally before it goes out as an analog signal. It runs real 
 
 - **Formats** are in the toolbar's **Preset** menu, under Digital video: Webcam (2005), Video call, MiniDV (the VX1000 skate-video look), Early web video, CD-ROM (Video 1), and Datamosh. Each switches the stage on and sets its controls and the Downscale width.
 - **Compression**: the **Codec** (DCT like MPEG and DV, or **Block colors**: Microsoft Video 1's flat two-tone 4×4 blocks and banded 15-bit color, the early CD-ROM look), quality, keyframe interval, fixed bitrate, plus color resolution and deblocking for DCT.
-- **Capture**: frame rate, sensor noise, noise reduction, and **Aliasing**, which turns fine stripes into rainbow moiré. The broad rainbow bands need a source at least twice the Downscale width.
+- **Capture**: frame rate, sensor noise, **Low-light noise** (grain that grows in dark scenes as the camera turns up its gain), noise reduction, and **Aliasing**, which turns fine stripes into rainbow moiré. The broad rainbow bands need a source at least twice the Downscale width.
 - **Fields**: **One field** (the default) sends the CRT one field: half the lines, each twice as tall, with a scanline per line (the 240p look). With the CRT off, each line shows twice.
-- **Picture**: **CCD response** gives a 90s camcorder's tone (bright exposure, highlights that clip color by color, milky gray blacks), plus white balance, tint, saturation and sharpening.
+- **Picture**: **CCD response** gives a 90s camcorder's tone (bright exposure, highlights that clip color by color, milky gray blacks), plus white balance, tint, saturation and sharpening. **Halo width** sets how far the sharpening's outlines reach: tight for a pro camera's crunch, wide for a cheap camcorder's soft rims.
 - **Errors**: data loss (DV dropouts, or packet-loss smears that last until the next keyframe) and, for DCT, datamosh, which needs a keyframe interval above 0.
 
 ### Preview

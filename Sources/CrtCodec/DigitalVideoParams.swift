@@ -50,6 +50,10 @@ public struct DigitalParam: Identifiable, Sendable {
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.4,
             help: "Grain from a small, cheap image sensor, strongest in the color. It changes every frame, so the codec spends its bits on it and blocks crawl in flat areas."),
         DigitalParam(
+            id: "low_light_noise", label: "Low-light noise", group: .capture,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "How much the grain grows in dark scenes. As the light drops, the camera turns up its gain, and the sensor noise with it: up to eight times as strong at night, while daylight stays as set. Works on Sensor noise, so it needs some."),
+        DigitalParam(
             id: "noise_reduction", label: "Noise reduction", group: .capture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0.5,
             help: "The camera smoothing its own grain away before compressing. It flattens fine detail into a smeary, plastic look."),
@@ -73,6 +77,10 @@ public struct DigitalParam: Identifiable, Sendable {
             id: "sharpening", label: "Sharpening", group: .picture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "The camera's detail circuit: edges get bright and dark outlines (halos), the crisp, hard-edged video look."),
+        DigitalParam(
+            id: "sharpening_width", label: "Halo width", group: .picture,
+            kind: .slider(min: 1, max: 4, percent: false, unit: "px"), defaultValue: 1,
+            help: "How far the sharpening halos reach, in camera pixels. 1 px is a 3-CCD camera's tight, crunchy edge; wider is the soft white rim around everything that cheap consumer camcorders drew. Works on Sharpening, so it needs some."),
         DigitalParam(
             id: "codec", label: "Codec", group: .compression,
             kind: .choice(["DCT (MPEG, DV)", "Block colors (Video 1)"]), defaultValue: 0,

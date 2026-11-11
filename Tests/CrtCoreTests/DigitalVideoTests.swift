@@ -390,6 +390,63 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertEqual(row[2], 40, accuracy: 0.6, "flat areas untouched")
     }
 
+    func testHaloWidth() {
+        let w = 32, h = 16
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h { for x in 0..<w { for c in 0..<3 { px[(y * w + x) * 4 + c] = x < 16 ? 40 : 200 } } }
+        let row = { (p: CodecPicture) in (0..<w).map { p.y.data[8 * p.y.width + $0] } }
+        let tight = camera(px, w, h, ["sharpening": 1])
+        XCTAssertEqual(row(camera(px, w, h, ["sharpening": 1, "sharpening_width": 1])), row(tight),
+                       "1 px is the sharpening as it always was")
+        XCTAssertEqual(row(tight)[13], 40, accuracy: 0.6, "a 1 px halo doesn't reach 3 px out")
+        let wide = row(camera(px, w, h, ["sharpening": 1, "sharpening_width": 3]))
+        XCTAssertLessThan(wide[13], 30, "a 3 px halo does: \(wide[10...21])")
+        XCTAssertGreaterThan(wide[18], 210)
+        XCTAssertEqual(wide[2], 40, accuracy: 0.6, "flat areas untouched")
+        let between = row(camera(px, w, h, ["sharpening": 1, "sharpening_width": 2.5]))
+        XCTAssertLessThan(between[13], 40 - 0.6)
+        XCTAssertGreaterThan(between[13], wide[13], "fractional widths fall between")
+    }
+
+    func testLowLightNoiseGrowsInTheDark() {
+        let w = 64, h = 32
+        func flat(_ v: UInt8) -> [UInt8] {
+            var px = [UInt8](repeating: 255, count: w * h * 4)
+            for i in 0..<(w * h) { for c in 0..<3 { px[i * 4 + c] = v } }
+            return px
+        }
+        func spread(_ p: CodecPicture) -> Float {
+            let ys = (0..<h).flatMap { y in (0..<w).map { p.y.data[y * p.y.width + $0] } }
+            let mean = ys.reduce(0, +) / Float(ys.count)
+            return (ys.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(ys.count)).squareRoot()
+        }
+        let night = flat(25), day = flat(180)
+        let plain = spread(camera(night, w, h, ["sensor_noise": 0.1]))
+        let gained = spread(camera(night, w, h, ["sensor_noise": 0.1, "low_light_noise": 1]))
+        XCTAssertGreaterThan(gained, plain * 3, "a dark scene gets the gain's noise: \(plain) → \(gained)")
+        // Grain, not streaks: nearby rows' noise is unrelated at any shift.
+        let p = camera(night, w, h, ["sensor_noise": 0.1, "low_light_noise": 1])
+        let ys = (0..<h).map { y in (0..<w).map { p.y.data[y * p.y.width + $0] } }
+        let mean = ys.joined().reduce(0, +) / Float(w * h)
+        var worst: Float = 0
+        for k in 1...8 { for d in -3...3 {
+            var sab: Float = 0, saa: Float = 0, sbb: Float = 0
+            for y in 0..<(h - k) { for x in 3..<(w - 3) {
+                let a = ys[y][x] - mean, b = ys[y + k][x + d] - mean
+                sab += a * b; saa += a * a; sbb += b * b
+            } }
+            worst = max(worst, abs(sab / (saa * sbb).squareRoot()))
+        } }
+        XCTAssertLessThan(worst, 0.2, "rows repeat nearby rows, shifted")
+        let half = spread(camera(night, w, h, ["sensor_noise": 0.1, "low_light_noise": 0.5]))
+        XCTAssertTrue(half > plain && half < gained)
+        XCTAssertTrue(camera(day, w, h, ["sensor_noise": 0.1]).y.data
+                      == camera(day, w, h, ["sensor_noise": 0.1, "low_light_noise": 1]).y.data,
+                      "daylight needs no gain")
+        XCTAssertTrue(camera(night, w, h, ["low_light_noise": 1]).y.data == camera(night, w, h, [:]).y.data,
+                      "nothing without sensor noise")
+    }
+
     /// Fine gray stripes, finer than a 160-wide camera can hold.
     func stripes(_ w: Int = 640, _ h: Int = 64, period: Double = 7.0 / 3) -> [UInt8] {
         var px = [UInt8](repeating: 255, count: w * h * 4)

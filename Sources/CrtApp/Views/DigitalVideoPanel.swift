@@ -80,8 +80,8 @@ private struct DigitalControl: View {
     }
 
     var body: some View {
-        // Datamosh throws keyframes away, so it needs some to throw.
-        let idle = param.id == "datamosh" && state.digitalSettings["keyframe_interval"] <= 0
+        let reason = idleReason
+        let idle = reason != nil
         Group {
             switch param.kind {
             case .choice(let names):
@@ -119,6 +119,21 @@ private struct DigitalControl: View {
         .disabled(idle)
         .opacity(idle ? 0.45 : 1)
         .padding(.leading, 12)
-        .help(idle ? "Set a keyframe interval above 0 first — datamoshing throws keyframes away." : param.help)
+        .help(reason ?? param.help)
+    }
+
+    /// Why the control does nothing right now: it works on another that's at 0.
+    private var idleReason: String? {
+        let s = state.digitalSettings
+        switch param.id {
+        case "datamosh" where s["keyframe_interval"] <= 0:
+            return "Set a keyframe interval above 0 first — datamoshing throws keyframes away."
+        case "low_light_noise" where s["sensor_noise"] <= 0:
+            return "Turn up Sensor noise first — this sets how much it grows in the dark."
+        case "sharpening_width" where s["sharpening"] <= 0:
+            return "Turn up Sharpening first — this sets how wide its halos reach."
+        default:
+            return nil
+        }
     }
 }

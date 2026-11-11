@@ -376,7 +376,8 @@ public final class DigitalVideoRenderer {
     static func capture(_ bgra: [UInt8], geometry g: CodecGeometry, settings: DigitalSettings,
                         index: Int) -> CodecPicture {
         let w = g.width, h = g.height
-        let noise = Float(settings["sensor_noise"])
+        var noise = Float(settings["sensor_noise"])
+        let lowLight = Float(settings["low_light_noise"])
         let nr = Float(settings["noise_reduction"])
         let warm = Float(settings["white_balance"]), magenta = Float(settings["tint"])
         let ccd = Float(settings["ccd_response"])
@@ -384,9 +385,13 @@ public final class DigitalVideoRenderer {
         var gainR = 1 + 0.25 * warm, gainB = 1 - 0.25 * warm
         var gainG = 1 - 0.15 * magenta
         var flare: Float = 0
+        let needsMeter = ccd > 0 || (lowLight > 0 && noise > 0)
+        let metered = needsMeter ? Self.meteredMean(bgra, width: w, height: h, gains: (gainR, gainG, gainB)) : 0
+        if lowLight > 0 && noise > 0 {
+            noise *= 1 + lowLight * (Self.sensorGain(meteredMean: metered) - 1)
+        }
         if ccd > 0 {
-            let exposure = curve.exposure(meteredMean: Self.meteredMean(bgra, width: w, height: h,
-                                                                         gains: (gainR, gainG, gainB)))
+            let exposure = curve.exposure(meteredMean: metered)
             gainR *= exposure; gainG *= exposure; gainB *= exposure
             flare = curve.flare(meteredMean: Self.meteredMean(bgra, width: w, height: h,
                                                               gains: (gainR, gainG, gainB)))
@@ -403,7 +408,13 @@ public final class DigitalVideoRenderer {
                     crf.withUnsafeMutableBufferPointer { crp in
                         let s = src.baseAddress!, Y = yp.baseAddress!, CB = cbp.baseAddress!, CR = crp.baseAddress!
                         DispatchQueue.concurrentPerform(iterations: h) { y in
-                            var rng = SplitMix(seed: (UInt64(index) &* 0x2545_F491_4F6C_DD1D) ^ (UInt64(y) &* 0x9E37_79B9_7F4A_7C15))
+                            // The row's seed hashed first: SplitMix steps its
+                            // state by the same constant the row number is
+                            // multiplied by, so unhashed, each row would
+                            // replay the row above a few pixels along
+                            // (streaks instead of grain).
+                            var seeder = SplitMix(seed: (UInt64(index) &* 0x2545_F491_4F6C_DD1D) ^ (UInt64(y) &* 0x9E37_79B9_7F4A_7C15))
+                            var rng = SplitMix(seed: seeder.next())
                             @inline(__always) func gauss() -> Float {
                                 Float(rng.unit() + rng.unit() - 1) * 2.449
                             }
@@ -449,8 +460,15 @@ public final class DigitalVideoRenderer {
         let sharpening = Float(settings["sharpening"])
         if sharpening > 0 {
             // Detail: add back the difference from a local blur, so edges
-            // overshoot both ways (halos).
-            let soft = boxBlur(yf, width: w, height: h, radius: 1, mix: 1)
+            // overshoot both ways (halos), as wide as the blur. A fractional
+            // width blends the two nearest whole radii.
+            let width = min(4, max(1, Float(settings["sharpening_width"])))
+            let r = Int(width), f = width - Float(r)
+            var soft = boxBlur(yf, width: w, height: h, radius: r, mix: 1)
+            if f > 0 {
+                let wider = boxBlur(yf, width: w, height: h, radius: r + 1, mix: 1)
+                for i in 0..<soft.count { soft[i] += (wider[i] - soft[i]) * f }
+            }
             for i in 0..<yf.count { yf[i] = (yf[i] + 2.2 * sharpening * (yf[i] - soft[i])).clamped(0, 255) }
         }
         let black = curve.setup * 255
@@ -507,6 +525,15 @@ public final class DigitalVideoRenderer {
 
     /// Center-weighted mean of linear luminance, as camcorder auto exposure
     /// meters (the middle counts most, the edges a little).
+    /// The sensor gain a camera adds for the light it meters (linear,
+    /// center-weighted): none down to `gainKnee` — the iris and shutter
+    /// cope until then — then rising as the light falls, up to 8× (+18 dB,
+    /// a consumer camcorder's top gain).
+    static let gainKnee: Float = 0.1
+    static func sensorGain(meteredMean m: Float) -> Float {
+        min(8, max(1, gainKnee / max(m, 1e-4)))
+    }
+
     static func meteredMean(_ bgra: [UInt8], width w: Int, height h: Int,
                             gains: (Float, Float, Float)) -> Float {
         var sum: Float = 0, weight: Float = 0
