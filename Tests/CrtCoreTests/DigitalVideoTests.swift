@@ -438,6 +438,13 @@ final class DigitalVideoTests: XCTestCase {
             worst = max(worst, abs(sab / (saa * sbb).squareRoot()))
         } }
         XCTAssertLessThan(worst, 0.2, "rows repeat nearby rows, shifted")
+        // A flash-lit night shot: a bright subject filling the middle of a
+        // black frame still reads as night (the exposure meter wouldn't).
+        var lit = flat(20)
+        for y in 0..<h { for x in 0..<w where abs(x - w / 2) < 14 { for c in 0..<3 { lit[(y * w + x) * 4 + c] = 235 } } }
+        XCTAssertGreaterThan(DigitalVideoRenderer.meteredMean(lit, width: w, height: h, gains: (1, 1, 1)),
+                             DigitalVideoRenderer.gainKnee, "the scenario: meters as bright")
+        XCTAssertGreaterThan(DigitalVideoRenderer.sensorGain(medianLuma: DigitalVideoRenderer.medianLuma(lit, width: w, height: h)), 4)
         let half = spread(camera(night, w, h, ["sensor_noise": 0.1, "low_light_noise": 0.5]))
         XCTAssertTrue(half > plain && half < gained)
         XCTAssertTrue(camera(day, w, h, ["sensor_noise": 0.1]).y.data

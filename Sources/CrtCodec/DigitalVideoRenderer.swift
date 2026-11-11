@@ -385,13 +385,12 @@ public final class DigitalVideoRenderer {
         var gainR = 1 + 0.25 * warm, gainB = 1 - 0.25 * warm
         var gainG = 1 - 0.15 * magenta
         var flare: Float = 0
-        let needsMeter = ccd > 0 || (lowLight > 0 && noise > 0)
-        let metered = needsMeter ? Self.meteredMean(bgra, width: w, height: h, gains: (gainR, gainG, gainB)) : 0
         if lowLight > 0 && noise > 0 {
-            noise *= 1 + lowLight * (Self.sensorGain(meteredMean: metered) - 1)
+            noise *= 1 + lowLight * (Self.sensorGain(medianLuma: Self.medianLuma(bgra, width: w, height: h)) - 1)
         }
         if ccd > 0 {
-            let exposure = curve.exposure(meteredMean: metered)
+            let exposure = curve.exposure(meteredMean: Self.meteredMean(bgra, width: w, height: h,
+                                                                         gains: (gainR, gainG, gainB)))
             gainR *= exposure; gainG *= exposure; gainB *= exposure
             flare = curve.flare(meteredMean: Self.meteredMean(bgra, width: w, height: h,
                                                               gains: (gainR, gainG, gainB)))
@@ -525,13 +524,38 @@ public final class DigitalVideoRenderer {
 
     /// Center-weighted mean of linear luminance, as camcorder auto exposure
     /// meters (the middle counts most, the edges a little).
-    /// The sensor gain a camera adds for the light it meters (linear,
-    /// center-weighted): none down to `gainKnee` — the iris and shutter
-    /// cope until then — then rising as the light falls, up to 8× (+18 dB,
-    /// a consumer camcorder's top gain).
-    static let gainKnee: Float = 0.1
-    static func sensorGain(meteredMean m: Float) -> Float {
+    /// The sensor gain a camera would have needed for a scene this dark,
+    /// judged by its median brightness (`medianLuma`, linear): none down to
+    /// `gainKnee` (sRGB 100 — daylight footage sits above it), then rising
+    /// as the median falls, up to 8× (+18 dB, a consumer camcorder's top).
+    /// The median, not the exposure meter's center-weighted mean: sources
+    /// are footage some camera already exposed, and a night shot's lit
+    /// subject in the middle meters as bright as daylight, while half its
+    /// frame stays black.
+    static let gainKnee: Float = srgbToLinear[100]
+    static func sensorGain(medianLuma m: Float) -> Float {
         min(8, max(1, gainKnee / max(m, 1e-4)))
+    }
+
+    /// The median of the picture's brightness (Y′, every other pixel each
+    /// way), as linear light.
+    static func medianLuma(_ bgra: [UInt8], width w: Int, height h: Int) -> Float {
+        var counts = [Int](repeating: 0, count: 256)
+        var n = 0
+        for y in stride(from: 0, to: h, by: 2) {
+            for x in stride(from: 0, to: w, by: 2) {
+                let i = (y * w + x) * 4
+                let l = (306 * Int(bgra[i + 2]) + 601 * Int(bgra[i + 1]) + 117 * Int(bgra[i])) >> 10
+                counts[min(255, l)] += 1
+                n += 1
+            }
+        }
+        var seen = 0
+        for v in 0..<256 {
+            seen += counts[v]
+            if seen * 2 >= n { return srgbToLinear[v] }
+        }
+        return 1
     }
 
     static func meteredMean(_ bgra: [UInt8], width w: Int, height h: Int,
