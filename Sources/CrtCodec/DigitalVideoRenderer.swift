@@ -198,7 +198,7 @@ public final class DigitalVideoRenderer {
         } else {
             var b = (c / g) * g
             while b > 0 {
-                let kind = timing.kind(ofCapture: b, datamosh: settingsFor(b)["datamosh"])
+                let kind = timing.kind(ofCapture: b, datamosh: settingsFor(b).effective("datamosh"))
                 if kind == .key { break }
                 let ck = CheckpointKey(stream: key, settings: checkpointSettings, capture: b)
                 if let saved = checkpoints[ck] { restored = saved.copy(); break }
@@ -248,12 +248,18 @@ public final class DigitalVideoRenderer {
                          settings: DigitalSettings, key: StreamKey, history: DigitalHistory?) {
         if state == nil { state = CodecState(geometry: geometry) }
         let picture = Self.capture(source, geometry: geometry, settings: settings, index: k)
-        var kind = timing.kind(ofCapture: k, datamosh: settings["datamosh"])
+        var kind = timing.kind(ofCapture: k, datamosh: settings.effective("datamosh"))
         if kind != .intraOnly && state?.encoder == nil { kind = .key }
-        let result = DigitalCodec.step(state!, source: picture, kind: kind, index: k,
-                                       settings: .init(quality: settings["quality"],
-                                                       fixedBitrate: settings["fixed_bitrate"],
-                                                       dataLoss: settings["data_loss"]))
+        let frame = DigitalCodec.FrameSettings(quality: settings["quality"],
+                                               fixedBitrate: settings["fixed_bitrate"],
+                                               dataLoss: settings["data_loss"])
+        let result: (picture: CodecPicture, step: Float)
+        switch settings.codec {
+        case .dct:
+            result = DigitalCodec.step(state!, source: picture, kind: kind, index: k, settings: frame)
+        case .blockColors:
+            result = (Video1Codec.step(state!, source: picture, kind: kind, index: k, settings: frame), 0)
+        }
         lastRunLength += 1
         lastCapture = k
         shown = Self.render(result.picture, geometry: geometry, settings: settings, step: result.step)
@@ -573,7 +579,7 @@ public final class DigitalVideoRenderer {
     static func render(_ decoded: CodecPicture, geometry g: CodecGeometry,
                        settings: DigitalSettings, step: Float) -> [UInt8] {
         var picture = decoded
-        let deblocking = settings["deblocking"]
+        let deblocking = settings.effective("deblocking")
         if deblocking > 0 {
             picture = decoded.copy()
             DigitalCodec.deblock(picture, strength: deblocking, step: step)

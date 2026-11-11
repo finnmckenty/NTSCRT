@@ -36,14 +36,14 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 
 ### Digital video
 
-Footage recorded digitally before it goes out as an analog signal. It runs a real codec, so blocks, smears and datamoshing come out of the compression rather than being drawn.
+Footage recorded digitally before it goes out as an analog signal. It runs real codecs, so blocks, smears and datamoshing come out of the compression rather than being drawn.
 
-- **Formats** set every control and the Downscale resolution: Webcam (2005), Video call, MiniDV (the VX1000 skate-video look), Early web video, and Datamosh.
+- **Formats** set every control and the Downscale resolution: Webcam (2005), Video call, MiniDV (the VX1000 skate-video look), Early web video, CD-ROM (Video 1), and Datamosh.
 - **Capture**: frame rate, sensor noise, noise reduction, and **Aliasing**, which turns fine stripes into rainbow moiré. The broad rainbow bands need a source at least twice the Downscale width.
 - **Fields → One field** sends the CRT one field: half the lines, each twice as tall, with a scanline per line (the 240p look). With the CRT off, each line shows twice.
 - **Picture**: **CCD response** gives a 90s camcorder's tone (bright exposure, highlights that clip color by color, milky gray blacks), plus white balance, tint, saturation and sharpening.
-- **Compression**: color resolution (down to DV's 4:1:1), quality, keyframe interval, fixed bitrate and deblocking.
-- **Errors**: data loss (DV dropouts, or packet-loss smears that last until the next keyframe) and datamosh, which needs a keyframe interval above 0.
+- **Compression**: the **Codec** (DCT like MPEG and DV, or **Block colors**: Microsoft Video 1's flat two-tone 4×4 blocks and banded 15-bit color, the early CD-ROM look), quality, keyframe interval, fixed bitrate, plus color resolution and deblocking for DCT.
+- **Errors**: data loss (DV dropouts, or packet-loss smears that last until the next keyframe) and, for DCT, datamosh, which needs a keyframe interval above 0.
 
 ### Preview
 

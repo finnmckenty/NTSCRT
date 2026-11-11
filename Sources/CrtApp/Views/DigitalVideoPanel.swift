@@ -95,7 +95,8 @@ private struct DigitalGroup: View {
                 withTransaction(t) { expanded.toggle() }
             }
             if expanded {
-                ForEach(DigitalParam.all.filter { $0.group == group }) { param in
+                // Only the controls the chosen codec has.
+                ForEach(DigitalParam.all.filter { $0.group == group && $0.applies(to: state.digitalSettings.codec) }) { param in
                     DigitalControl(param: param)
                 }
             }

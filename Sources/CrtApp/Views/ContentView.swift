@@ -143,6 +143,7 @@ struct ContentView: View {
                 || env["CRT_DOWNSCALE_W"] != nil || env["CRT_CACHE_CHECK"] != nil
                 || env["CRT_EXPORT_TOGGLE_CHECK"] != nil || env["CRT_GLITCH"] != nil
                 || env["CRT_DIGITAL"] != nil || env["CRT_DIGITAL_GALLERY"] != nil
+                || env["CRT_EXPORT_MP4"] != nil
                 || env["CRT_GLITCH_EXPORT_CHECK"] != nil
                 || env["CRT_GLITCH_PANEL_SNAPSHOT"] != nil
                 || env["CRT_SLIDER_SELFTEST"] != nil || env["CRT_SLIDER_E2E"] != nil
@@ -220,6 +221,32 @@ struct ContentView: View {
                 if kv[0] == "width" { state.downscaleWidth = Int(v) } else { state.setDigitalValue(String(kv[0]), v) }
             }
             state.setDigitalEnabled(true)
+        }
+        // CRT_EXPORT_MP4=<path> [CRT_EXPORT_SIZE=WxH] [CRT_SHADER_OFF=1]:
+        // export the loaded clip (or a still's timeline) with the current
+        // settings as H.264, then quit — for side-by-side samples.
+        if let out = env["CRT_EXPORT_MP4"] {
+            if env["CRT_SHADER_OFF"] == "1" { state.shaderEnabled = false }
+            let dims = env["CRT_EXPORT_SIZE"]?.split(separator: "x").compactMap { Int($0) }
+            let size = dims?.count == 2 ? (dims![0], dims![1]) : state.exportVideoSize
+            let url = URL(fileURLWithPath: out)
+            let settings = state.mp4ExportSettings(route: state.videoSource == nil ? .still : .video,
+                                                   outputURL: url, size: size,
+                                                   bitrate: size.0 * size.1 * 30, codec: .h264)
+            let ntsc = (state.ntscEnabled && state.ntscAvailable) ? state.ntscStage?.settingsJSON() : nil
+            do {
+                if let vs = state.videoSource {
+                    try await Mp4Exporter(context: state.context).export(
+                        source: vs, paramValues: state.paramValues, settings: settings,
+                        ntscSettingsJSON: ntsc) { _ in }
+                } else if let still = state.sourceTexture {
+                    try await Mp4Exporter(context: state.context).exportStill(
+                        source: still, totalFrames: state.timelineTotalFrames, fps: state.timelineFPS,
+                        paramValues: state.paramValues, settings: settings, ntscSettingsJSON: ntsc) { _ in }
+                }
+                print("EXPORTED \(out) \(size.0)x\(size.1)")
+            } catch { print("EXPORT FAIL \(error)") }
+            exit(0)
         }
         // CRT_DIGITAL_GALLERY=<dir> (with a still): every format's chain
         // input — the Digital stage alone, at its capture size, frame 9 —
@@ -849,6 +876,29 @@ struct ContentView: View {
             await fillCache("one field: ")
             checkJumps("one field: ", [75, 5, 61, 62])
             state.setDigitalValue("fields", 0)
+
+            // 2c. Video 1: the same guarantees with block colors and loss —
+            // skipped and lost blocks stay stale, coded blocks heal.
+            state.applyDigitalFormat(DigitalFormat.byID["cd_rom"]!)
+            state.setDigitalValue("data_loss", 0.4)
+            check("Video 1 hides what it doesn't have",
+                  !DigitalParam.byID["datamosh"]!.applies(to: state.digitalSettings.codec)
+                  && state.digitalSettings.chroma == .full)
+            await fillCache("Video 1: ")
+            checkJumps("Video 1: ", [75, 5, 119, 61, 62, 30])
+            let v1Host = NSHostingView(rootView: DigitalVideoPanel().environment(state).frame(width: 300)
+                .padding(16).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .dark))
+            v1Host.appearance = NSAppearance(named: .darkAqua)
+            v1Host.frame = CGRect(origin: .zero, size: v1Host.fittingSize)
+            let v1Window = NSWindow(contentRect: v1Host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            v1Window.contentView = v1Host
+            try? await Task.sleep(for: .milliseconds(400))
+            v1Host.frame = CGRect(origin: .zero, size: v1Host.fittingSize)
+            if let rep = v1Host.bitmapImageRepForCachingDisplay(in: v1Host.bounds) {
+                v1Host.cacheDisplay(in: v1Host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent("panel-video1.png"))
+            }
+            state.applyDigitalFormat(DigitalFormat.byID["video_call"]!)
 
             // 3. Exports run with the stage.
             let mp4 = folder.appendingPathComponent("digital.mp4")

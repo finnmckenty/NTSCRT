@@ -73,6 +73,10 @@ public struct DigitalParam: Identifiable, Sendable {
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "The camera's detail circuit: edges get bright and dark outlines (halos), the crisp, hard-edged video look."),
         DigitalParam(
+            id: "codec", label: "Codec", group: .compression,
+            kind: .choice(["DCT (MPEG, DV)", "Block colors (Video 1)"]), defaultValue: 0,
+            help: "How the picture is compressed. DCT, the MPEG, H.263 and DV family, blurs detail inside 8×8 blocks and rings around edges. Block colors is Microsoft Video 1 (1992, Video for Windows): each 4×4 block becomes one, two or eight flat 15-bit colors and unchanged blocks are skipped — chunky two-tone edges and banded gradients, the early CD-ROM look."),
+        DigitalParam(
             id: "chroma", label: "Color", group: .compression,
             kind: .choice(["4:4:4 (full)", "4:2:2 (half)", "4:2:0 (quarter)", "4:1:1 (DV)"]),
             defaultValue: 2,
@@ -115,7 +119,25 @@ public struct DigitalParam: Identifiable, Sendable {
     /// through the lens. They hold for a whole render (keyframes on
     /// the timeline don't animate them).
     public static let structureIDs: Set<String> = ["frame_rate", "keyframe_interval", "chroma",
-                                                    "fields", "aliasing"]
+                                                    "fields", "aliasing", "codec"]
+
+    /// Controls that do nothing with a codec, so the panel hides them:
+    /// Video 1 keeps full-resolution color, has no deblocking, and no motion
+    /// for a datamosh to drag.
+    public static let unusedBy: [DigitalCodecKind: Set<String>] = [
+        .blockColors: ["chroma", "deblocking", "datamosh"],
+    ]
+
+    public func applies(to codec: DigitalCodecKind) -> Bool {
+        !(Self.unusedBy[codec]?.contains(id) ?? false)
+    }
+}
+
+public enum DigitalCodecKind: Int, CaseIterable, Sendable {
+    /// The MPEG / H.263 / DV family (`DigitalCodec`).
+    case dct = 0
+    /// Microsoft Video 1 (`Video1Codec`).
+    case blockColors
 }
 
 public enum ChromaSubsampling: Int, CaseIterable, Sendable {
@@ -145,8 +167,20 @@ public struct DigitalSettings: Equatable, Hashable, Sendable {
         values[id] ?? DigitalParam.byID[id]?.defaultValue ?? 0
     }
 
+    public var codec: DigitalCodecKind {
+        DigitalCodecKind(rawValue: Int(self["codec"].rounded())) ?? .dct
+    }
+
+    /// The color layout the codec codes: Video 1 always keeps full color.
     public var chroma: ChromaSubsampling {
-        ChromaSubsampling(rawValue: Int(self["chroma"].rounded())) ?? .halfBoth
+        if codec == .blockColors { return .full }
+        return ChromaSubsampling(rawValue: Int(self["chroma"].rounded())) ?? .halfBoth
+    }
+
+    /// A control's value as the codec uses it: 0 for controls it doesn't
+    /// have (deblocking and datamosh under Video 1).
+    public func effective(_ id: String) -> Double {
+        DigitalParam.unusedBy[codec]?.contains(id) == true && id != "chroma" ? 0 : self[id]
     }
 
     /// Values saved before 0.19 (look version 1), mapped onto today's
@@ -214,6 +248,12 @@ public struct DigitalFormat: Identifiable, Sendable {
                      "quality": 0.651, "keyframe_interval": 5, "fixed_bitrate": 0.7,
                      "deblocking": 0, "data_loss": 0, "datamosh": 0],
             blurb: "240p streaming: few bits, coarse blocks, and keyframes that pump."),
+        DigitalFormat(
+            id: "cd_rom", name: "CD-ROM (Video 1)", width: 240,
+            values: ["codec": 1, "frame_rate": 12, "sensor_noise": 0, "noise_reduction": 0,
+                     "quality": 0.57, "keyframe_interval": 1.25, "fixed_bitrate": 0,
+                     "data_loss": 0],
+            blurb: "Video for Windows off a 90s CD-ROM: 240 wide, 12 fps, Microsoft Video 1's flat two-tone blocks and banded 15-bit color, a keyframe every 15 frames."),
         DigitalFormat(
             id: "datamosh", name: "Datamosh", width: 480,
             values: ["frame_rate": 30, "sensor_noise": 0, "noise_reduction": 0, "chroma": 2,
