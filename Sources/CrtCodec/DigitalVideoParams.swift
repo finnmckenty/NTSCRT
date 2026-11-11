@@ -26,6 +26,8 @@ public struct DigitalParam: Identifiable, Sendable {
     public let kind: Kind
     public let defaultValue: Double
     public let help: String
+    /// Whole steps only (frame rate), else nil: continuous.
+    public var step: Double? = nil
 
     public var isChoice: Bool { if case .choice = kind { return true } else { return false } }
 
@@ -36,7 +38,8 @@ public struct DigitalParam: Identifiable, Sendable {
         DigitalParam(
             id: "frame_rate", label: "Frame rate", group: .capture,
             kind: .slider(min: 1, max: 60, percent: false, unit: "fps"), defaultValue: 15,
-            help: "How many pictures a second the camera captures. Below the clip's own rate, frames repeat — the stutter of old webcams and video calls."),
+            help: "How many pictures a second the camera captures. Below the clip's own rate, frames repeat — the stutter of old webcams and video calls.",
+            step: 1),
         DigitalParam(
             id: "fields", label: "Fields", group: .capture,
             kind: .choice(["Progressive", "One field"]), defaultValue: 1,
@@ -122,7 +125,7 @@ public struct DigitalParam: Identifiable, Sendable {
     /// control's `defaultValue`, which formats, double-click resets and
     /// looks saved before a control existed rely on.
     public static let startingValues: [String: Double] = defaultValues.merging([
-        "frame_rate": 29.095686,
+        "frame_rate": 30,
         "fields": 1,
         "aliasing": 0.380103,
         "sensor_noise": 0.4,

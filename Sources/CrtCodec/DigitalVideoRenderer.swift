@@ -12,7 +12,9 @@ public struct DigitalTiming: Equatable, Hashable, Sendable {
 
     public init(sourceFPS: Double, settings: DigitalSettings) {
         self.sourceFPS = max(1, sourceFPS)
-        captureFPS = min(self.sourceFPS, max(1, settings["frame_rate"]))
+        // Whole frames a second (looks saved before the slider snapped
+        // may hold fractions).
+        captureFPS = min(self.sourceFPS, max(1, settings["frame_rate"].rounded()))
         let seconds = settings["keyframe_interval"]
         keyframeEvery = seconds <= 0 ? 1 : max(2, Int((seconds * captureFPS).rounded()))
     }

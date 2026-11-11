@@ -11,7 +11,7 @@
       "deblocking" : 0,
       "fields" : 1,
       "fixed_bitrate" : 0,
-      "frame_rate" : 29.095685529279276,
+      "frame_rate" : 30,
       "keyframe_interval" : 0,
       "low_light_noise" : 0.64087134009009006,
       "noise_reduction" : 0,

@@ -390,6 +390,14 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertEqual(row[2], 40, accuracy: 0.6, "flat areas untouched")
     }
 
+    func testFrameRateIsWholeFrames() {
+        let t = DigitalTiming(sourceFPS: 30, settings: DigitalSettings(values: ["frame_rate": 29.1]))
+        XCTAssertEqual(t.captureFPS, 29)
+        XCTAssertEqual(DigitalTiming(sourceFPS: 30, settings: DigitalSettings(values: ["frame_rate": 29.6])).captureFPS, 30)
+        XCTAssertEqual(DigitalParam.byID["frame_rate"]?.step, 1)
+        XCTAssertEqual(DigitalParam.startingValues["frame_rate"], 30)
+    }
+
     func testHaloWidth() {
         let w = 32, h = 16
         var px = [UInt8](repeating: 255, count: w * h * 4)

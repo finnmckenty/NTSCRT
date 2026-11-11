@@ -76,7 +76,10 @@ private struct DigitalControl: View {
 
     private var value: Binding<Double> {
         Binding(get: { state.digitalSettings[param.id] },
-                set: { state.setDigitalValue(param.id, $0) })
+                set: { v in
+                    let step = param.step
+                    state.setDigitalValue(param.id, step.map { (v / $0).rounded() * $0 } ?? v)
+                })
     }
 
     var body: some View {
@@ -112,7 +115,7 @@ private struct DigitalControl: View {
                         }
                     }
                     // Double-click returns to the Webcam format's value.
-                    PropertySlider(value: value, range: min...max, neutral: param.defaultValue)
+                    PropertySlider(value: value, range: min...max, step: param.step, neutral: param.defaultValue)
                 }
             }
         }
