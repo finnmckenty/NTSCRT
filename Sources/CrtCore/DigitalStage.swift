@@ -29,7 +29,9 @@ public struct DigitalFrameInput {
     /// the picture's own (capped — the codec's cost grows with area).
     public static func captureSize(width: Int, height: Int,
                                    downscale: DownscaleSpec?) -> (width: Int, height: Int) {
-        if let d = downscale { return (d.width, d.height) }
+        // The camera captures the whole frame, even when only one field
+        // goes on down the chain.
+        if let d = downscale { return (d.width, d.pictureHeight) }
         return DigitalVideoRenderer.captureSize(width: width, height: height,
                                                 captureWidth: min(width, maxUndownscaledWidth))
     }

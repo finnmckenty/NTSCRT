@@ -779,52 +779,76 @@ struct ContentView: View {
             check("switching on keeps the edited values", state.digitalSettings["datamosh"] == 0.6)
 
             // 1. The producer fills the cache, in order.
-            let started = ContinuousClock.now
-            var waited = 0
-            while state.chainInputCache.count(matching: state.currentCacheStamp) < vs.totalFrames && waited < 600 {
-                try? await Task.sleep(for: .milliseconds(100)); waited += 1
+            func fillCache(_ label: String) async {
+                let started = ContinuousClock.now
+                var waited = 0
+                while state.chainInputCache.count(matching: state.currentCacheStamp) < vs.totalFrames && waited < 600 {
+                    try? await Task.sleep(for: .milliseconds(100)); waited += 1
+                }
+                let secs = Double(started.duration(to: .now).components.seconds)
+                    + Double(started.duration(to: .now).components.attoseconds) / 1e18
+                let cachedCount = state.chainInputCache.count(matching: state.currentCacheStamp)
+                check("\(label)pre-render cached every frame", cachedCount == vs.totalFrames,
+                      "\(cachedCount)/\(vs.totalFrames) in \(String(format: "%.1f", secs)) s (\(String(format: "%.0f", Double(cachedCount) / max(secs, 0.01))) fps incl. debounce)")
             }
-            let secs = Double(started.duration(to: .now).components.seconds)
-                + Double(started.duration(to: .now).components.attoseconds) / 1e18
-            let cachedCount = state.chainInputCache.count(matching: state.currentCacheStamp)
-            check("pre-render cached every frame", cachedCount == vs.totalFrames,
-                  "\(cachedCount)/\(vs.totalFrames) in \(String(format: "%.1f", secs)) s (\(String(format: "%.0f", Double(cachedCount) / max(secs, 0.01))) fps incl. debounce)")
+            await fillCache("")
 
             // 2. Jumping around on the main thread gives the same frames.
-            let stage = DigitalStage()
             let clip = DigitalClipFrames(source: vs, crop: state.activeCrop)
             let pipe = Pipeline(context: state.context)
-            for n in [75, 5, 119, 37, 61, 62, 30, 89] where n < vs.totalFrames {
-                guard let reader = try? vs.makeSequentialReader(startingAtFrame: n, crop: state.activeCrop),
-                      let frame = reader.nextFrame(),
-                      let cached = state.chainInputCache.lookup(frame: n, stamp: state.currentCacheStamp)
-                else { check("frame \(n) available", false); continue }
-                let input = DigitalFrameInput(
-                    frameIndex: n,
-                    captureSize: DigitalFrameInput.captureSize(width: frame.texture.width, height: frame.texture.height,
-                                                               downscale: state.downscaleSpec),
-                    sourceFPS: state.digitalSourceFPS, settings: state.digitalSettings,
-                    history: state.digitalHistory, earlier: clip.visitor)
-                do {
-                    let out = try pipe.prepareChainInput(source: frame.texture, downscale: state.downscaleSpec,
-                                                         ntsc: nil, digital: (stage, input), frameCount: n + 1)
-                    let a = readback(out), b = readback(cached)
-                    var diff = 0
-                    for i in 0..<min(a.count, b.count) where a[i] != b[i] { diff += 1 }
-                    check("frame \(n) jumped to = played (re-ran \(stage.renderer.lastRunLength))",
-                          a.count == b.count && diff == 0, "\(diff) bytes differ")
-                    if n == 62 {
-                        try? writePNG(makeCGImage(from: {
-                            let t = makeStagingTexture(device: state.context.device, width: out.width, height: out.height)!
-                            t.replace(region: MTLRegionMake2D(0, 0, out.width, out.height), mipmapLevel: 0,
-                                      withBytes: a, bytesPerRow: out.width * 4)
-                            return t
-                        }()), to: folder.appendingPathComponent("frame-62.png"))
+            func checkJumps(_ label: String, _ frames: [Int]) {
+                let stage = DigitalStage()
+                for n in frames where n < vs.totalFrames {
+                    guard let reader = try? vs.makeSequentialReader(startingAtFrame: n, crop: state.activeCrop),
+                          let frame = reader.nextFrame(),
+                          let cached = state.chainInputCache.lookup(frame: n, stamp: state.currentCacheStamp)
+                    else { check("\(label)frame \(n) available", false); continue }
+                    let input = DigitalFrameInput(
+                        frameIndex: n,
+                        captureSize: DigitalFrameInput.captureSize(width: frame.texture.width, height: frame.texture.height,
+                                                                   downscale: state.downscaleSpec),
+                        sourceFPS: state.digitalSourceFPS, settings: state.digitalSettings,
+                        history: state.digitalHistory, earlier: clip.visitor)
+                    do {
+                        let out = try pipe.prepareChainInput(source: frame.texture, downscale: state.downscaleSpec,
+                                                             ntsc: nil, digital: (stage, input), frameCount: n + 1)
+                        let a = readback(out), b = readback(cached)
+                        var diff = 0
+                        for i in 0..<min(a.count, b.count) where a[i] != b[i] { diff += 1 }
+                        check("\(label)frame \(n) jumped to = played (re-ran \(stage.renderer.lastRunLength))",
+                              a.count == b.count && diff == 0, "\(diff) bytes differ")
+                        if let spec = state.downscaleSpec {
+                            check("\(label)frame \(n) chain input is \(spec.width) × \(spec.height)",
+                                  cached.width == spec.width && cached.height == spec.height,
+                                  "\(cached.width) × \(cached.height)")
+                        }
+                        if n == 62 {
+                            try? writePNG(makeCGImage(from: {
+                                let t = makeStagingTexture(device: state.context.device, width: out.width, height: out.height)!
+                                t.replace(region: MTLRegionMake2D(0, 0, out.width, out.height), mipmapLevel: 0,
+                                          withBytes: a, bytesPerRow: out.width * 4)
+                                return t
+                            }()), to: folder.appendingPathComponent("\(label.isEmpty ? "" : "field-")frame-62.png"))
+                        }
+                    } catch {
+                        check("\(label)frame \(n) renders", false, "\(error)")
                     }
-                } catch {
-                    check("frame \(n) renders", false, "\(error)")
                 }
             }
+            checkJumps("", [75, 5, 119, 37, 61, 62, 30, 89])
+
+            // 2b. One field: the chain gets the field — half the lines, each
+            // two rows tall — while the camera still captures every row.
+            state.setDigitalValue("fields", 1)
+            if let spec = state.downscaleSpec {
+                check("one field halves the chain's lines", spec.height == state.downscaleHeight / 2
+                      && spec.lineHeight == 2 && spec.pictureHeight == state.downscaleHeight,
+                      "\(spec.width) × \(spec.height) × \(spec.lineHeight)")
+                check("the shader's line count is the field's", state.chainInputHeight == spec.height)
+            }
+            await fillCache("one field: ")
+            checkJumps("one field: ", [75, 5, 61, 62])
+            state.setDigitalValue("fields", 0)
 
             // 3. Exports run with the stage.
             let mp4 = folder.appendingPathComponent("digital.mp4")

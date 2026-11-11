@@ -57,8 +57,10 @@ public enum ScanlineGrid {
     /// input height, so every source line gets the same number of rows.
     /// Multiples of 2 and up are rounded to even (see above); 1× is kept as
     /// is, since at native size there's no scanline stretching to alias.
+    /// `lineHeight` > 1 when each line stands for several picture rows (one
+    /// field): the width follows the picture's shape, not the lines'.
     public static func snappedSize(inputWidth: Int, inputHeight: Int,
-                                   targetHeight: Int) -> (width: Int, height: Int) {
+                                   targetHeight: Int, lineHeight: Int = 1) -> (width: Int, height: Int) {
         guard inputWidth > 0, inputHeight > 0, targetHeight > 0 else {
             return (inputWidth, inputHeight)
         }
@@ -69,7 +71,7 @@ public enum ScanlineGrid {
             k = (exact - Double(k - 1)) < (Double(k + 1) - exact) ? k - 1 : k + 1
         }
         k = max(1, k)
-        return (inputWidth * k, inputHeight * k)
+        return (inputWidth * k / max(1, lineHeight), inputHeight * k)
     }
 }
 
@@ -91,8 +93,10 @@ public final class SupersampledPass {
         let k = ScanlineGrid.supersampleFactor(inputHeight: chainInput.height,
                                                targetHeight: target.height)
         guard k > 1 else { return nil }
-        let w = chainInput.width * k
+        // Whole multiples of the lines; the width follows the target's shape
+        // (the picture's), which for one field isn't the lines' shape.
         let h = chainInput.height * k
+        let w = Int((Double(target.width) * Double(h) / Double(target.height)).rounded())
         guard w > target.width, h > target.height,
               let tex = makeRenderTarget(device: device, width: w, height: h),
               let down = try? Downscaler(device: device) else { return nil }

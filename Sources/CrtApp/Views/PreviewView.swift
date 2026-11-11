@@ -194,7 +194,9 @@ struct PreviewView: NSViewRepresentable {
             // (Re)allocate render targets if size changed. Fresh textures hold
             // garbage, so the chain must re-render into them.
             let inputW = state.downscaleSpec?.width ?? source.width
-            let inputH = state.downscaleSpec?.height ?? source.height
+            // Sized as the picture, so one field (lines twice as tall as
+            // wide) shows at its true shape.
+            let inputH = state.downscaleSpec?.pictureHeight ?? source.height
             let (tw, th) = renderTargetSize(inputW: inputW, inputH: inputH)
             if tw != lastTargetWidth || th != lastTargetHeight {
                 primaryTarget = makeTarget(width: tw, height: th)

@@ -1654,17 +1654,38 @@ final class AppState {
 
     // MARK: - derived
 
+    /// The Downscale as the chain gets it. With Digital video's One field,
+    /// that's the field: half the lines, each standing for two rows, so the
+    /// CRT draws a scanline per field line (240p-style) — and without the
+    /// CRT, each line simply shows twice.
     var downscaleSpec: DownscaleSpec? {
+        guard downscaleEnabled else { return nil }
+        if digitalEnabled && digitalSettings["fields"] >= 0.5 {
+            return DownscaleSpec(width: downscaleWidth, height: max(8, downscaleHeight / 2),
+                                 method: downscaleMethod, lineHeight: 2)
+        }
+        return squareDownscaleSpec
+    }
+
+    /// The Downscale with every row its own line — for Screen Loop, which
+    /// doesn't run the Digital video stage.
+    var squareDownscaleSpec: DownscaleSpec? {
         downscaleEnabled
             ? DownscaleSpec(width: downscaleWidth, height: downscaleHeight, method: downscaleMethod)
             : nil
+    }
+
+    /// Lines the chain receives with One field on, for the panels' readouts.
+    var downscaleFieldLines: Int? {
+        guard let d = downscaleSpec, d.lineHeight > 1 else { return nil }
+        return d.height
     }
 
     /// Height (in lines) of what the shader chain actually receives — the
     /// downscale target if enabled, else the raw source. Some params
     /// (interlacing) only activate above a threshold height.
     var chainInputHeight: Int? {
-        if downscaleEnabled { return downscaleHeight }
+        if let d = downscaleSpec { return d.height }
         return sourceTexture?.height
     }
 

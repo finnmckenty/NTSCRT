@@ -38,8 +38,8 @@ public struct DigitalParam: Identifiable, Sendable {
             help: "How many pictures a second the camera captures. Below the clip's own rate, frames repeat — the stutter of old webcams and video calls."),
         DigitalParam(
             id: "fields", label: "Fields", group: .capture,
-            kind: .choice(["Progressive", "One field (line-doubled)"]), defaultValue: 0,
-            help: "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. Deinterlaced the cheap way — one field, each line doubled, as most DV reached the web — diagonals turn to stairs."),
+            kind: .choice(["Progressive", "One field"]), defaultValue: 0,
+            help: "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. One field keeps just one, as most DV reached the web: the CRT gets half as many lines, each twice as tall, and draws a scanline per line — the 240p look — while anywhere without the CRT each line shows twice, turning diagonals to stairs."),
         DigitalParam(
             id: "aliasing", label: "Aliasing", group: .capture,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,

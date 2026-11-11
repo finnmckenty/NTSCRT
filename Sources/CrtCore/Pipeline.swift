@@ -5,13 +5,22 @@ import CrtAppBridge
 /// Optional pre-shader downscale step.
 public struct DownscaleSpec: Equatable, Sendable {
     public var width: Int
+    /// Lines the chain receives.
     public var height: Int
     public var method: DownscaleMethod
-    public init(width: Int, height: Int, method: DownscaleMethod) {
+    /// Rows of the picture each line stands for: 2 when the chain gets one
+    /// interlaced field (Digital video's One field), whose lines are twice
+    /// as tall as they are wide. Anything that sizes the picture uses
+    /// `pictureHeight`; anything about lines (the shader, scanlines) uses
+    /// `height`.
+    public var lineHeight: Int
+    public init(width: Int, height: Int, method: DownscaleMethod, lineHeight: Int = 1) {
         self.width = width
         self.height = height
         self.method = method
+        self.lineHeight = max(1, lineHeight)
     }
+    public var pictureHeight: Int { height * lineHeight }
 }
 
 /// Encodes one frame of: optional downscale → librashader chain → output texture.

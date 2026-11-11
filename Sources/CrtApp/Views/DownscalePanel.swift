@@ -60,10 +60,13 @@ struct DownscalePanel: View {
                         }
                     }
                     Spacer()
-                    Text("→ \(state.downscaleWidth) × \(state.downscaleHeight)")
+                    Text(state.downscaleFieldLines.map { "→ \(state.downscaleWidth) × \(state.downscaleHeight), \($0) lines" }
+                         ?? "→ \(state.downscaleWidth) × \(state.downscaleHeight)")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .help("Height follows the source's aspect ratio.")
+                        .help(state.downscaleFieldLines == nil
+                              ? "Height follows the source's aspect ratio."
+                              : "Height follows the source's aspect ratio. Digital video's One field sends the CRT one field: half the lines, each twice as tall.")
                 }
 
                 HStack {

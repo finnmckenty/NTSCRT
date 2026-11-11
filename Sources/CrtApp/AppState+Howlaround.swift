@@ -33,7 +33,8 @@ extension AppState {
         let input = chainInputSize
         guard input.width > 0, input.height > 0 else { return (width, height) }
         let s = ScanlineGrid.snappedSize(inputWidth: input.width, inputHeight: input.height,
-                                         targetHeight: height)
+                                         targetHeight: height,
+                                         lineHeight: downscaleSpec?.lineHeight ?? 1)
         return (s.width & ~1, s.height & ~1)
     }
 
@@ -103,7 +104,7 @@ extension AppState {
     /// How many copies the current framing shows (nil = they grow instead).
     var howlaroundCopies: Int? {
         howlaroundSettings.visibleCopies(aspect: Double(sourceAspect),
-                                         chainHeight: max(16, chainInputSize.height))
+                                         chainHeight: max(16, squareDownscaleSpec?.height ?? chainInputSize.height))
     }
 
     // Builders: the panel's Render and Draft and the headless check all build
@@ -119,6 +120,8 @@ extension AppState {
         // rendered frames (see renderHowlaround).
         s.loopCount = videoSource == nil ? 1 : loops
         s.howlaround = render
+        // Screen Loop doesn't run Digital video, so no field either.
+        s.downscale = squareDownscaleSpec
         return s
     }
 
@@ -126,6 +129,7 @@ extension AppState {
                                render: HowlaroundRender) -> GifExporter.Settings {
         var s = gifExportSettings(outputURL: outputURL, size: size)
         s.howlaround = render
+        s.downscale = squareDownscaleSpec
         return s
     }
 

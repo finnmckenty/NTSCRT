@@ -68,7 +68,8 @@ private struct FormatRow: View {
     private var caption: String {
         if let f = state.digitalFormat { return f.blurb }
         let s = state.digitalSettings
-        let size = state.downscaleEnabled ? "\(state.downscaleWidth) × \(state.downscaleHeight)" : "full size"
+        var size = state.downscaleEnabled ? "\(state.downscaleWidth) × \(state.downscaleHeight)" : "full size"
+        if let lines = state.downscaleFieldLines { size += ", one field of \(lines) lines" }
         let keys = s["keyframe_interval"] <= 0 ? "every frame on its own"
             : String(format: "a keyframe every %g s", s["keyframe_interval"])
         return "\(size) (the Downscale), \(Int(s["frame_rate"].rounded())) fps, \(keys)."
