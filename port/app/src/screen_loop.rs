@@ -358,7 +358,7 @@ impl App {
         self.schedule_draft(Duration::ZERO);
     }
 
-    fn close_screen_loop(&mut self) {
+    pub(crate) fn close_screen_loop(&mut self) {
         self.screen_loop.open = false;
         if let Some(d) = self.screen_loop.draft.take() {
             d.progress.cancel.store(true, Ordering::Relaxed);

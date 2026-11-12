@@ -130,6 +130,57 @@ impl VideoWriter {
     }
 }
 
+/// A picture through Windows Imaging Component, for what the `image` crate
+/// can't read (HEIC/HEIF with Microsoft's HEIF Image Extensions, and any
+/// other codec Windows has): (width, height, RGBA8, straight alpha). As on
+/// the Mac, the pixels come as stored (no EXIF rotation).
+pub fn read_image(path: &std::path::Path) -> Result<(u32, u32, Vec<u8>)> {
+    #[cfg(windows)]
+    {
+        wic::read(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        anyhow::bail!("this picture format needs the Windows build")
+    }
+}
+
+#[cfg(windows)]
+mod wic {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use anyhow::{Context, Result};
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::GENERIC_READ;
+    use windows::Win32::Graphics::Imaging::{
+        CLSID_WICImagingFactory, GUID_WICPixelFormat32bppRGBA, IWICImagingFactory, WICBitmapDitherTypeNone,
+        WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+
+    pub fn read(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
+        unsafe {
+            // Already initialized on this thread (the window's is STA): fine either way.
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).context("Windows Imaging Component didn't start")?;
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            let decoder = factory
+                .CreateDecoderFromFilename(PCWSTR(wide.as_ptr()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
+                .context("Windows can't decode this picture (HEIC needs Microsoft's free HEIF Image Extensions)")?;
+            let frame = decoder.GetFrame(0)?;
+            let converter = factory.CreateFormatConverter()?;
+            converter.Initialize(&frame, &GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
+            let (mut w, mut h) = (0u32, 0u32);
+            converter.GetSize(&mut w, &mut h)?;
+            let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+            converter.CopyPixels(std::ptr::null(), w * 4, &mut rgba)?;
+            Ok((w, h, rgba))
+        }
+    }
+}
+
 pub struct VideoReader {
     #[cfg(windows)]
     inner: mf::Reader,

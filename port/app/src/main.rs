@@ -311,20 +311,43 @@ impl App {
             let _ = self.requests.send(Request::Video(path.to_path_buf()));
             return;
         }
-        match image::open(path) {
-            Ok(img) => {
-                let img = img.to_rgba8();
-                let (w, h) = img.dimensions();
+        // The image crate first; Windows' own codecs (HEIC, and whatever
+        // else is installed) for the rest.
+        let decoded = image::open(path).map(|img| {
+            let img = img.to_rgba8();
+            let (w, h) = img.dimensions();
+            (w, h, img.into_raw())
+        });
+        let decoded = decoded.or_else(|e| ntscrt_media::read_image(path).map_err(|wic| if matches!(ext.as_str(), "heic" | "heif") { format!("{wic:#}") } else { e.to_string() }));
+        match decoded {
+            Ok((w, h, rgba)) => {
                 self.source = Some((name, w, h));
                 self.original_size = Some((w, h));
                 self.video = None;
                 self.playing = None;
-                let image = Image::new(w, h, img.into_raw());
+                let image = Image::new(w, h, rgba);
                 self.still = Some(image.clone());
                 let _ = self.requests.send(Request::Still(image));
             }
             Err(e) => self.error = Some(format!("Couldn't open {}: {e}", path.display())),
         }
+    }
+
+    /// Back to nothing open.
+    fn clear_source(&mut self) {
+        self.source = None;
+        self.source_path = None;
+        self.original_size = None;
+        self.still = None;
+        self.video = None;
+        self.playing = None;
+        self.texture = None;
+        self.source_texture = None;
+        self.source_pixels = None;
+        self.sent = None;
+        self.error = None;
+        self.cached_frames = 0;
+        self.close_screen_loop();
     }
 
     /// The picture the chain sees: the opened size, cropped.
@@ -747,9 +770,17 @@ impl App {
         ui.heading("Source");
         ui.horizontal(|ui| {
             if ui.button("Open…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg"]).pick_file() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Pictures and videos", &["png", "jpg", "jpeg", "heic", "heif", "mp4", "mov", "m4v"])
+                    .add_filter("Pictures", &["png", "jpg", "jpeg", "heic", "heif", "bmp", "tif", "tiff", "webp"])
+                    .add_filter("Videos", &["mp4", "mov", "m4v"])
+                    .pick_file()
+                {
                     self.open(&p);
                 }
+            }
+            if self.source.is_some() && ui.button("Clear").clicked() {
+                self.clear_source();
             }
         });
         match &self.source {
@@ -765,7 +796,7 @@ impl App {
                 }
             }
             None => {
-                ui.weak("Open an image, or drop one on the window.");
+                ui.weak("Open a picture (PNG, JPEG, HEIC) or a video (MP4, MOV), or drop one on the window.");
             }
         }
         ui.separator();
