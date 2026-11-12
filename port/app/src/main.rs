@@ -285,6 +285,10 @@ impl App {
             if let Some(n) = std::env::var("NTSCRT_EXPORT_LOOPS").ok().and_then(|v| v.parse().ok()) {
                 app.export_loops = n;
             }
+            // 0–3: Standard … Maximum.
+            if let Some(q) = std::env::var("NTSCRT_EXPORT_QUALITY").ok().and_then(|v| v.parse::<usize>().ok()) {
+                app.export_quality = q.min(3);
+            }
         }
         if std::env::var("NTSCRT_COMPARE").as_deref() == Ok("1") {
             app.compare = true;
