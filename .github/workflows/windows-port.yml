@@ -1,4 +1,4 @@
-# Windows port: build the spike on Windows and check every CRT shader, with
+# Windows port: build everything in port/ on Windows, and check every CRT shader, with
 # and without the NTSC stage, against the Mac app's reference renders.
 # GitHub's Windows runners have no GPU; wgpu uses D3D12 on WARP (software).
 name: Windows port
@@ -27,10 +27,10 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            port/spike/target
-          key: windows-spike-${{ hashFiles('port/spike/Cargo.lock', 'port/librashader-wgpu-push-constants.patch') }}
-      - name: Build
-        working-directory: port/spike
+            port/target
+          key: windows-port-${{ hashFiles('port/Cargo.lock', 'port/librashader-wgpu-push-constants.patch') }}
+      - name: Build (engine, spike, app)
+        working-directory: port
         run: cargo build --release
       - name: Compare with the Mac references
         shell: bash
@@ -40,7 +40,7 @@ jobs:
           # WARP renders slightly differently from a GPU (worst seen: 0.92).
           COMPARE_MAX_MEAN: "1.0"
         run: |
-          bin=port/spike/target/release
+          bin=port/target/release
           mkdir -p out
           fail=0
           for sh in crt-aperture crt-easymode crtglow_gauss crtglow_lanczos crt-hyllian crt-royale crtsim; do

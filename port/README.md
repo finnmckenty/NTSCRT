@@ -4,7 +4,9 @@ The Windows version, in Rust on wgpu. Nothing here is used by the Mac app, which
 
 ## What's here
 
-- `spike/` — `ntscrt-spike`: PNG → ntsc-rs → area downscale → librashader on wgpu → PNG, mirroring the Mac's `crt-smoke`. Plus `compare`, which measures how far two PNGs differ.
+- `engine/` — the pipeline: ntsc-rs → downscale (Chunky/Smooth, WGSL ports of the Mac's kernels) → librashader on wgpu.
+- `app/` — `ntscrt`, the Windows app (egui). So far: open a picture, Downscale, NTSC on/off, the seven CRT shaders, live preview.
+- `spike/` — `ntscrt-spike`: a still through the engine from the command line, mirroring the Mac's `crt-smoke`. Plus `compare`, which measures how far two PNGs differ.
 - `spike/ref-mac/` — `crt-smoke` renders of all seven CRT shaders, with and without NTSC, as references.
 - `fetch-librashader.sh` + `librashader-wgpu-push-constants.patch` — librashader at the Mac app's pinned commit, with a fix its wgpu runtime needs at that commit.
 
@@ -12,17 +14,20 @@ The Windows version, in Rust on wgpu. Nothing here is used by the Mac app, which
 
 ```sh
 port/fetch-librashader.sh          # once; Git Bash on Windows
-cd port/spike && cargo build --release
+cd port && cargo build --release   # target/release/ntscrt(.exe), ntscrt-spike, compare
 ```
 
 ## Check against the Mac
 
+From `port/`:
+
 ```sh
-target/release/ntscrt-spike ../../TestAssets/testpattern.png ../../Vendor/slang-shaders/crt/crt-royale.slangp out.png 1280 960 320 240 area --ntsc default
-COMPARE_BORDER=8 target/release/compare ref-mac/crt-royale-ntsc.png out.png
+target/release/ntscrt-spike ../TestAssets/testpattern.png ../Vendor/slang-shaders/crt/crt-royale.slangp out.png 1280 960 320 240 area --ntsc default
+COMPARE_BORDER=8 target/release/compare spike/ref-mac/crt-royale-ntsc.png out.png
 ```
 
-- `SPIKE_BACKEND=gl|dx12|vulkan|metal` picks the graphics backend.
+- `NTSCRT_BACKEND=gl|dx12|vulkan|metal` picks the graphics backend (the spike also reads `SPIKE_BACKEND`).
+- The app: `NTSCRT_SOURCE=<image>` opens a picture at launch; `NTSCRT_UI_SNAPSHOT=<png>` saves a screenshot of the window once the first frame is on screen, then quits.
 - `COMPARE_BORDER=n` leaves out n edge pixels. `COMPARE_MAX_MEAN=x` fails above a mean difference of x.
 - GitHub Actions runs every case on Windows for each push that touches `port/` (`.github/workflows/windows-port.yml`).
 

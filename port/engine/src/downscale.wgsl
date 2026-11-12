@@ -1,5 +1,6 @@
-// Port of Downscaler.swift's downscale_area Metal kernel (box average of
-// every source pixel each destination pixel covers), same float math.
+// Ports of Downscaler.swift's Metal kernels, with the same float math:
+// nearest (Chunky) and area (Smooth, a box average of every source pixel
+// each destination pixel covers).
 struct Dims { sw: u32, sh: u32, dw: u32, dh: u32 };
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
@@ -28,4 +29,15 @@ fn downscale_area(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     textureStore(dst, vec2<i32>(gid.xy), acc / max(wsum, 1e-6));
+}
+
+// Metal's nearest sampler at the destination pixel's center: the source
+// texel containing uv, clamped to the edge.
+@compute @workgroup_size(8, 8)
+fn downscale_nearest(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= d.dw || gid.y >= d.dh) { return; }
+    let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(f32(d.dw), f32(d.dh));
+    let texel = clamp(vec2<i32>(floor(uv * vec2<f32>(f32(d.sw), f32(d.sh)))),
+                      vec2<i32>(0), vec2<i32>(i32(d.sw) - 1, i32(d.sh) - 1));
+    textureStore(dst, vec2<i32>(gid.xy), textureLoad(src, texel, 0));
 }

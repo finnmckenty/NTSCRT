@@ -1,0 +1,18 @@
+[package]
+name = "ntscrt"
+version = "0.1.0"
+edition = "2021"
+description = "NTSCRT for Windows"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "ntscrt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+ntscrt-engine = { path = "../engine" }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+rfd = "0.18"

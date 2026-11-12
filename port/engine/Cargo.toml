@@ -1,0 +1,17 @@
+[package]
+name = "ntscrt-engine"
+version = "0.1.0"
+edition = "2021"
+description = "NTSCRT's pipeline for Windows: ntsc-rs, downscale and librashader on wgpu"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+ntsc-rs.workspace = true
+librashader.workspace = true
+pollster = "0.4"
+# librashader's wgpu runtime at the pin is on wgpu 28. The app's window uses
+# a newer wgpu (egui), so the engine keeps its own device and hands frames
+# over as pixels.
+wgpu = "28"

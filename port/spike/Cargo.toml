@@ -2,26 +2,11 @@
 name = "ntscrt-spike"
 version = "0.1.0"
 edition = "2021"
-description = "Windows-port spike: PNG -> ntsc-rs -> downscale -> librashader (wgpu) -> PNG, mirroring crt-smoke"
+description = "Windows-port spike: a still through ntscrt-engine, mirroring the Mac's crt-smoke"
 license = "MIT"
 publish = false
 
 [dependencies]
-anyhow = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
-pollster = "0.4"
-ntsc-rs = { path = "../../Vendor/ntsc-rs/crates/ntscrs" }
-# PINNED to the same commit as the Mac app's librashader.dylib (see DEVELOPMENT.md).
-librashader = { git = "https://github.com/SnowflakePowered/librashader", rev = "76462c030b75c4f2d56e5386c3d4d7d1128318b8", default-features = false, features = ["runtime-wgpu", "presets", "preprocess", "stable"] }
-wgpu = "28"
-
-[profile.release]
-debug = false
-
-# Standalone crate.
-[workspace]
-
-# librashader at the pinned commit plus port/librashader-wgpu-push-constants.patch
-# (port/vendor/librashader is a checkout of 76462c03 with the patch applied).
-[patch."https://github.com/SnowflakePowered/librashader"]
-librashader = { path = "../vendor/librashader/librashader" }  # created by port/fetch-librashader.sh
+anyhow.workspace = true
+image.workspace = true
+ntscrt-engine = { path = "../engine" }
