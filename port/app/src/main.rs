@@ -12,6 +12,7 @@
 mod clip_frames;
 mod digital_panel;
 mod export;
+mod frame_cache;
 mod glitch_panel;
 mod ntsc_panel;
 mod prefetch;
@@ -150,10 +151,15 @@ struct App {
     /// NTSCRT_SNAPSHOT_AFTER=seconds: wait this long first.
     snapshot_after: Option<(Instant, f64)>,
     /// NTSCRT_PLAY=1: play the clip as soon as it's open.
-    autoplay: bool,
+    /// NTSCRT_PLAY=1 (or a number of seconds to wait first): play the clip
+    /// once it's open.
+    autoplay: Option<f64>,
     /// NTSCRT_EXPORT=<file>: export there once the preview is up, then quit.
     auto_export: Option<PathBuf>,
     screen_loop: screen_loop::ScreenLoop,
+    /// Frames of the clip baked under the current settings (the frame cache).
+    cached_frames: usize,
+    autoplay_at: Option<Instant>,
     /// NTSCRT_SCREEN_LOOP=1 (or a render hook): open it once a picture is up.
     auto_screen_loop: bool,
 }
@@ -238,9 +244,11 @@ impl App {
             snapshot: std::env::var_os("NTSCRT_UI_SNAPSHOT").map(PathBuf::from),
             snapshot_requested: false,
             snapshot_after: std::env::var("NTSCRT_SNAPSHOT_AFTER").ok().and_then(|v| v.parse().ok()).map(|s| (Instant::now(), s)),
-            autoplay: std::env::var("NTSCRT_PLAY").as_deref() == Ok("1"),
+            autoplay: std::env::var("NTSCRT_PLAY").ok().and_then(|v| if v == "1" { Some(0.0) } else { v.parse().ok() }),
             auto_export: std::env::var_os("NTSCRT_EXPORT").map(PathBuf::from),
             screen_loop: screen_loop::ScreenLoop::new(std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").map(PathBuf::from)),
+            cached_frames: 0,
+            autoplay_at: None,
             auto_screen_loop: std::env::var("NTSCRT_SCREEN_LOOP").as_deref() == Ok("1") || std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").is_some(),
         };
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
@@ -902,6 +910,10 @@ impl App {
                     self.sync_playhead_to_frame();
                 }
                 ui.monospace(format!("{}/{} · {:.2}s", self.video_frame + 1, v.total_frames, self.video_frame as f64 / v.timescale()));
+                if self.cached_frames > 0 {
+                    ui.weak(format!("{} cached", if self.cached_frames >= v.total_frames { "all".to_string() } else { format!("{}", self.cached_frames) }))
+                        .on_hover_text("Frames with Digital video and NTSC already done under these settings: they play back without decoding.");
+                }
             }));
             ui.add_space(4.0);
         }
@@ -1293,6 +1305,10 @@ impl eframe::App for App {
                     self.adapter = a;
                     continue;
                 }
+                Event::Cached(n) => {
+                    self.cached_frames = n;
+                    continue;
+                }
                 Event::Opened(Ok(info)) => {
                     self.video = Some(info);
                     self.original_size = Some((info.width, info.height));
@@ -1300,8 +1316,8 @@ impl eframe::App for App {
                         (src.1, src.2) = (info.width, info.height);
                     }
                     self.video_frame = 0;
-                    if self.autoplay {
-                        self.playing = Some((Instant::now(), 0));
+                    if let Some(wait) = self.autoplay {
+                        self.autoplay_at = Some(Instant::now() + Duration::from_secs_f64(wait));
                     }
                     continue;
                 }
@@ -1347,6 +1363,14 @@ impl eframe::App for App {
             }
         }
         self.advance_timeline(&ctx);
+        if let Some(at) = self.autoplay_at {
+            if Instant::now() >= at {
+                self.autoplay_at = None;
+                self.playing = Some((Instant::now(), self.video_frame));
+            } else {
+                ctx.request_repaint_after(at - Instant::now());
+            }
+        }
         // The receiver's wall clock while Live noise runs on a still (steps
         // capped, so a stall doesn't read as a jump and re-simulate).
         let running = self.animate && self.video.is_none() && !self.timeline_open && !self.snapshot_due();

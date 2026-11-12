@@ -429,6 +429,43 @@ impl Engine {
             Some(spec) => self.downscale(&mut enc, &input, spec),
             None => input,
         };
+        self.preview_from(enc, chain_input, settings, plan, full_render)
+    }
+
+    /// The picture as the chain receives it before the Glitch stage (Digital
+    /// video and NTSC baked in, downscaled): what a clip's frame cache keeps
+    /// (the Mac's ChainInputCache).
+    pub fn bake(&mut self, settings: &Settings, earlier: Option<&mut FrameVisitor<'_>>) -> Result<Image> {
+        let t = std::time::Instant::now();
+        let input = self.prepare(settings, earlier)?;
+        self.last_prepare_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let chain_input = match settings.downscale {
+            Some(spec) => self.downscale(&mut enc, &input, spec),
+            None => input,
+        };
+        self.read_back(enc, &chain_input)
+    }
+
+    /// The preview from a baked chain input (see `bake`).
+    pub fn render_preview_baked(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool, baked: &Image) -> Result<Image> {
+        let tex = texture(
+            &self.device,
+            (baked.width, baked.height),
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            "baked",
+        );
+        self.queue.write_texture(
+            tex.as_image_copy(),
+            &baked.rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(baked.width * 4), rows_per_image: Some(baked.height) },
+            tex.size(),
+        );
+        let enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        self.preview_from(enc, tex, settings, plan, full_render)
+    }
+
+    fn preview_from(&mut self, mut enc: wgpu::CommandEncoder, chain_input: wgpu::Texture, settings: &Settings, plan: preview::PreviewPlan, full_render: bool) -> Result<Image> {
         let chain_input = self.apply_glitch(&mut enc, chain_input, settings);
         let size = (plan.render_width.max(1), plan.render_height.max(1));
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
