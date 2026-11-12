@@ -1,7 +1,7 @@
 //! ntscrt-spike: a still through ntscrt-engine, mirroring the Mac's
 //! `crt-smoke` so the two outputs can be compared pixel by pixel.
 //!
-//!   ntscrt-spike <input.png> <preset.slangp> <output.png> [outW outH] [downW downH area|nearest]
+//!   ntscrt-spike <input.png> <preset.slangp> <output.png> [outW outH] [downW downH method]
 //!                [--ntsc default|<settings.json>] [--frame N] [--set NAME=VALUE ...]
 //!                [--no-selftest]
 //!
@@ -30,16 +30,12 @@ fn main() -> Result<()> {
         }
     }
     if pos.len() < 3 {
-        bail!("usage: ntscrt-spike <input.png> <preset.slangp> <output.png> [outW outH] [downW downH area|nearest] [--ntsc default|file] [--frame N] [--set NAME=VALUE]");
+        bail!("usage: ntscrt-spike <input.png> <preset.slangp> <output.png> [outW outH] [downW downH method] [--ntsc default|file] [--frame N] [--set NAME=VALUE]");
     }
     let num = |i: usize, d: u32| -> Result<u32> { Ok(pos.get(i).map(|s| s.parse()).transpose()?.unwrap_or(d)) };
     let out = (num(3, 1920)?, num(4, 1080)?);
     let downscale = if pos.len() > 7 {
-        let method = match pos[7].as_str() {
-            "area" => DownscaleMethod::Area,
-            "nearest" => DownscaleMethod::Nearest,
-            m => bail!("downscale method {m}: only area and nearest are ported"),
-        };
+        let Some(method) = DownscaleMethod::from_raw(&pos[7]) else { bail!("unknown downscale method {}", pos[7]) };
         Some(DownscaleSpec { width: num(5, 0)?, height: num(6, 0)?, method })
     } else {
         None

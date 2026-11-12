@@ -11,6 +11,7 @@ anyhow.workspace = true
 ntsc-rs.workspace = true
 librashader.workspace = true
 pollster = "0.4"
+serde_json = "1"
 # librashader's wgpu runtime at the pin is on wgpu 28. The app's window uses
 # a newer wgpu (egui), so the engine keeps its own device and hands frames
 # over as pixels.

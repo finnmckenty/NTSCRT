@@ -6,6 +6,10 @@
 //! pinned commit is on wgpu 28, newer than nothing egui ships with, so the
 //! app's window can't share a device with it. Frames come back as RGBA8.
 
+mod ntsc_ui;
+pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
+pub use serde_json;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -45,8 +49,57 @@ pub enum NtscSettings {
 pub enum DownscaleMethod {
     /// "Chunky": one source pixel per block.
     Nearest,
+    /// "Stabilized nearest": a narrow Gaussian (sigma 0.35 output pixels).
+    NearestAA,
+    Bilinear,
+    /// Mitchell-Netravali.
+    Bicubic,
+    /// Lanczos-3.
+    Lanczos,
     /// "Smooth": the average of the whole block.
     Area,
+}
+
+impl DownscaleMethod {
+    pub const ALL: [DownscaleMethod; 6] = [Self::Nearest, Self::NearestAA, Self::Bilinear, Self::Bicubic, Self::Lanczos, Self::Area];
+
+    /// The name looks store (the Mac's `DownscaleMethod.rawValue`).
+    pub fn raw(self) -> &'static str {
+        match self {
+            Self::Nearest => "nearest",
+            Self::NearestAA => "nearest+",
+            Self::Bilinear => "bilinear",
+            Self::Bicubic => "bicubic",
+            Self::Lanczos => "lanczos",
+            Self::Area => "area",
+        }
+    }
+
+    pub fn from_raw(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.raw() == raw)
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Nearest => "Nearest",
+            Self::NearestAA => "Nearest+",
+            Self::Bilinear => "Bilinear",
+            Self::Bicubic => "Bicubic",
+            Self::Lanczos => "Lanczos",
+            Self::Area => "Area",
+        }
+    }
+
+    /// The separable filter's index in downscale.wgsl, if it is one.
+    fn separable(self) -> Option<u32> {
+        match self {
+            Self::NearestAA => Some(0),
+            Self::Bilinear => Some(1),
+            Self::Bicubic => Some(2),
+            Self::Lanczos => Some(3),
+            Self::Nearest | Self::Area => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +202,7 @@ pub struct Engine {
     info: wgpu::AdapterInfo,
     nearest: wgpu::ComputePipeline,
     area: wgpu::ComputePipeline,
+    separable: wgpu::ComputePipeline,
     source: Option<(u64, Image)>,
     next_source: u64,
     prepared: Option<Prepared>,
@@ -209,13 +263,15 @@ impl Engine {
                 cache: None,
             })
         };
-        let (nearest, area) = (pipeline("downscale_nearest"), pipeline("downscale_area"));
+        let (nearest, area, separable) =
+            (pipeline("downscale_nearest"), pipeline("downscale_area"), pipeline("downscale_separable"));
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             info,
             nearest,
             area,
+            separable,
             source: None,
             next_source: 1,
             prepared: None,
@@ -303,39 +359,53 @@ impl Engine {
     }
 
     fn downscale(&self, enc: &mut wgpu::CommandEncoder, src: &wgpu::Texture, spec: DownscaleSpec) -> wgpu::Texture {
-        let dst = texture(
-            &self.device,
-            (spec.width, spec.height),
-            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            "downscaled",
-        );
-        let pipeline = match spec.method {
-            DownscaleMethod::Nearest => &self.nearest,
-            DownscaleMethod::Area => &self.area,
+        let storage = |size: (u32, u32), label: &str| {
+            texture(
+                &self.device,
+                size,
+                wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                label,
+            )
         };
-        let dims: Vec<u8> = [src.width(), src.height(), spec.width, spec.height].iter().flat_map(|v| v.to_le_bytes()).collect();
-        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let dst = storage((spec.width, spec.height), "downscaled");
+        let (sw, sh) = (src.width(), src.height());
+        match spec.method.separable() {
+            None => {
+                let pipeline = if spec.method == DownscaleMethod::Nearest { &self.nearest } else { &self.area };
+                self.dispatch(enc, pipeline, src, &dst, &[sw, sh, spec.width, spec.height], (spec.width, spec.height));
+            }
+            Some(kind) => {
+                // Horizontal into (dw × sh), then vertical into (dw × dh).
+                let mid = storage((spec.width, sh), "downscale scratch");
+                self.dispatch(enc, &self.separable, src, &mid, &[sw, sh, spec.width, spec.height, kind, 0, 0, 0], (spec.width, sh));
+                self.dispatch(enc, &self.separable, &mid, &dst, &[sw, sh, spec.width, spec.height, kind, 1, 0, 0], (spec.width, spec.height));
+            }
+        }
+        dst
+    }
+
+    fn dispatch(&self, enc: &mut wgpu::CommandEncoder, pipeline: &wgpu::ComputePipeline, src: &wgpu::Texture, dst: &wgpu::Texture, uniform: &[u32], grid: (u32, u32)) {
+        let bytes: Vec<u8> = uniform.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 16,
+            size: bytes.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&uniform, 0, &dims);
+        self.queue.write_buffer(&buffer, 0, &bytes);
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&src.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dst.create_view(&Default::default())) },
-                wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buffer.as_entire_binding() },
             ],
         });
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(spec.width.div_ceil(8), spec.height.div_ceil(8), 1);
-        drop(pass);
-        dst
+        pass.dispatch_workgroups(grid.0.div_ceil(8), grid.1.div_ceil(8), 1);
     }
 
     fn load_chain(&mut self, shader: &ShaderSpec) -> Result<()> {

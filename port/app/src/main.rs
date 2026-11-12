@@ -9,15 +9,22 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ntsc_panel;
+mod shader_panel;
+
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
 
 use eframe::egui;
+use ntscrt_engine::serde_json::{Map, Value};
 use ntscrt_engine::{
-    app_shader_defaults, find_shaders, DownscaleMethod, DownscaleSpec, Engine, Image, NtscSettings, Settings, ShaderSpec,
-    CRT_SHADERS,
+    app_shader_defaults, find_shaders, ntsc_default_values, ntsc_settings, ntsc_values_json, preset_parameters, DownscaleMethod,
+    DownscaleSpec, Engine, Image, NtscSetting, NtscSettings, Settings, ShaderParam, ShaderSpec, CRT_SHADERS,
 };
+
+const SIDEBAR_WIDTH: f32 = 330.0;
 
 enum Request {
     Source(Image),
@@ -71,8 +78,14 @@ struct App {
     downscale_width: u32,
     method: DownscaleMethod,
     ntsc: bool,
+    ntsc_settings: Vec<NtscSetting>,
+    ntsc_values: Map<String, Value>,
     crt: bool,
     shader: usize,
+    /// Each shader's parameters (as its preset declares them), loaded on first use.
+    shader_params: HashMap<usize, Result<Vec<ShaderParam>, String>>,
+    /// Each shader's current values; kept when switching between shaders.
+    shader_values: HashMap<usize, HashMap<String, f32>>,
 
     seq: u64,
     sent: Option<(Settings, (u32, u32))>,
@@ -103,7 +116,11 @@ impl App {
             downscale_width: 320,
             method: DownscaleMethod::Nearest,
             ntsc: true,
+            ntsc_settings: ntsc_settings(),
+            ntsc_values: ntsc_default_values(),
             crt: true,
+            shader_params: HashMap::new(),
+            shader_values: HashMap::new(),
             shader: CRT_SHADERS.iter().position(|s| s.0 == "glow_gauss").unwrap_or(0),
             seq: 0,
             sent: None,
@@ -136,16 +153,48 @@ impl App {
         }
     }
 
+    /// The shader's parameters and values, loading them on first use: the
+    /// preset's own values with the Mac's tweaks on top.
+    fn ensure_shader(&mut self) {
+        let Some(root) = &self.shaders else { return };
+        let i = self.shader;
+        if self.shader_params.contains_key(&i) {
+            return;
+        }
+        let (id, _, rel) = CRT_SHADERS[i];
+        let params = preset_parameters(&root.join(rel)).map_err(|e| format!("{e:#}"));
+        if let Ok(ps) = &params {
+            let mut values: HashMap<String, f32> = ps.iter().map(|p| (p.name.clone(), p.initial)).collect();
+            values.extend(app_shader_defaults(id));
+            self.shader_values.insert(i, values);
+        }
+        self.shader_params.insert(i, params);
+    }
+
+    fn reset_shader(&mut self) {
+        self.shader_params.remove(&self.shader);
+        self.shader_values.remove(&self.shader);
+        self.ensure_shader();
+    }
+
+    fn input_height(&self) -> Option<u32> {
+        let (_, w, h) = self.source.as_ref()?;
+        Some(if self.downscale { DownscaleSpec::for_width(self.downscale_width, (*w, *h), self.method).height } else { *h })
+    }
+
     fn settings(&self, source: (u32, u32)) -> Settings {
         let shader = match (&self.shaders, self.crt) {
             (Some(root), true) => {
-                let (id, _, rel) = CRT_SHADERS[self.shader];
-                Some(ShaderSpec { preset: root.join(rel), params: app_shader_defaults(id) })
+                let (_, _, rel) = CRT_SHADERS[self.shader];
+                let mut params: Vec<(String, f32)> =
+                    self.shader_values.get(&self.shader).map(|v| v.iter().map(|(k, v)| (k.clone(), *v)).collect()).unwrap_or_default();
+                params.sort_by(|a, b| a.0.cmp(&b.0));
+                Some(ShaderSpec { preset: root.join(rel), params })
             }
             _ => None,
         };
         Settings {
-            ntsc: self.ntsc.then_some(NtscSettings::Default),
+            ntsc: self.ntsc.then(|| NtscSettings::Json(ntsc_values_json(&self.ntsc_values))),
             downscale: self.downscale.then(|| DownscaleSpec::for_width(self.downscale_width, source, self.method)),
             shader,
             frame: 1,
@@ -153,6 +202,25 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.add_space(4.0);
+            ui.weak(&self.status);
+            ui.weak(format!("GPU: {}", self.adapter));
+            ui.separator();
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    ui.set_max_width(SIDEBAR_WIDTH - 16.0);
+                    self.sidebar_contents(ui);
+                });
+            });
+        });
+    }
+
+    fn sidebar_contents(&mut self, ui: &mut egui::Ui) {
+        // A fixed slider width: sizing sliders from the space available makes
+        // the panel grow to fit them, which leaves more space, every frame
+        // (the sidebar swallowed the window on Windows).
+        ui.spacing_mut().slider_width = SIDEBAR_WIDTH - 120.0;
         ui.add_space(6.0);
         ui.heading("Source");
         ui.horizontal(|ui| {
@@ -193,11 +261,35 @@ impl App {
         });
         ui.separator();
 
-        ui.checkbox(&mut self.ntsc, egui::RichText::new("NTSC (TV)").heading());
-        ui.weak("ntsc-rs's default settings for now.");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.ntsc, egui::RichText::new("NTSC (TV)").heading());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("Back to the house look").clicked() {
+                    self.ntsc_values = ntsc_default_values();
+                }
+            });
+        });
+        ui.add_enabled_ui(self.ntsc, |ui| {
+            egui::CollapsingHeader::new("Settings").id_salt("ntsc-settings").default_open(true).show(ui, |ui| {
+                ntsc_panel::controls(ui, &self.ntsc_settings, &mut self.ntsc_values);
+            });
+        });
         ui.separator();
 
-        ui.checkbox(&mut self.crt, egui::RichText::new("CRT").heading());
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.crt, egui::RichText::new("CRT").heading());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("This shader's parameters back to their starting values").clicked() {
+                    self.reset_shader();
+                }
+            });
+        });
+        if self.shaders.is_none() {
+            ui.colored_label(egui::Color32::LIGHT_RED, "Shaders not found (set NTSCRT_SHADERS).");
+            return;
+        }
+        self.ensure_shader();
+        let input_height = self.input_height();
         ui.add_enabled_ui(self.crt, |ui| {
             egui::ComboBox::from_id_salt("shader")
                 .selected_text(CRT_SHADERS[self.shader].1)
@@ -206,15 +298,32 @@ impl App {
                         ui.selectable_value(&mut self.shader, i, s.1);
                     }
                 });
-        });
-        if self.shaders.is_none() {
-            ui.colored_label(egui::Color32::LIGHT_RED, "Shaders not found (set NTSCRT_SHADERS).");
-        }
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.add_space(4.0);
-            ui.weak(&self.status);
-            ui.weak(format!("GPU: {}", self.adapter));
+            self.ensure_shader();
+            let id = CRT_SHADERS[self.shader].0;
+            match self.shader_params.get(&self.shader) {
+                Some(Ok(params)) => {
+                    let values = self.shader_values.entry(self.shader).or_default();
+                    let (pre, sections) = shader_panel::sections(params);
+                    ui.weak(format!("Parameters ({})", params.len()));
+                    for p in pre {
+                        shader_panel::control(ui, id, p, values, input_height);
+                    }
+                    for section in sections {
+                        egui::CollapsingHeader::new(egui::RichText::new(&section.title).strong())
+                            .id_salt(("shader-section", id, &section.title))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for p in section.params {
+                                    shader_panel::control(ui, id, p, values, input_height);
+                                }
+                            });
+                    }
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, e);
+                }
+                None => {}
+            }
         });
     }
 
@@ -274,7 +383,7 @@ impl eframe::App for App {
             self.open(&p);
         }
 
-        egui::Panel::left("sidebar").resizable(false).exact_size(250.0).show(ui, |ui| self.sidebar(ui));
+        egui::Panel::left("sidebar").resizable(false).exact_size(SIDEBAR_WIDTH).show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(13, 13, 15)))
             .show(ui, |ui| self.preview(ui));

@@ -32,6 +32,9 @@ jobs:
       - name: Build (engine, spike, app)
         working-directory: port
         run: cargo build --release
+      - name: Tests (Mac parity of defaults, panel rules)
+        working-directory: port
+        run: cargo test --release
       - name: Compare with the Mac references
         shell: bash
         env:
