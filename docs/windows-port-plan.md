@@ -80,6 +80,30 @@ Started 2026-11-11.
 
 **Continuous testing:** `.github/workflows/windows-port.yml` builds the spike on GitHub's `windows-latest` and checks all 14 cases (D3D12 on WARP, 8 px border, fails above a mean difference of 1.0) on every push that touches `port/`.
 
+## Progress (2026-11-12)
+
+Done and checked against the Mac (each step committed; CI re-checks on every push):
+
+| Feature | How it was checked |
+|---|---|
+| NTSC panel (house layout and defaults) | starting values equal the Mac's launch look (test); house look renders within 0.003/255 |
+| CRT panel (7 shaders, presentation rules, gray-outs) | starting values equal the Mac's (test); panel rules (test); drawing panels changes no value (test) |
+| Downscale, all six methods | within 2/255 of crt-smoke at uneven ratios and 4K |
+| Looks and presets (Mac JSON, round trip) | 9 bundled presets match crt-smoke renders (CI); keyframes round-trip exactly |
+| Preview: sizing, integer scale, Live noise, zoom, Compare | the Mac's PreviewScaler ported with its tests |
+| Crop | the Mac's SourceCrop ported with its tests |
+| Video in (Media Foundation) | every frame matches ffmpeg's frame n within 1/255 |
+| Export: PNG, MP4 (H.264/HEVC + sound, loops), GIF | PNG within 0.001/255 of the Mac's render; MP4/GIF frame counts, timing, sound |
+| Timeline (keyframes, easings, auto-key) | the Mac's TimelineEvaluator ported with tests |
+| Glitch (receiver simulation + GPU) | simulation bit-identical to the Mac's (plans, CI test); GPU output byte-identical on 12/13 cases (CI) |
+| Package (NTSCRT-windows-x64 artifact) | every CRT preset loads from the packaged shaders (CI) |
+
+Still to do: Digital video (in progress), Screen Loop, render-ahead caching for smoother playback, real-hardware testing, signing and an installer.
+
+Found along the way:
+- The Mac release bundles `crt/` and `include/` but not `blurs/shaders/royale`, so CRT Royale can't load in the released Mac app (the Desktop dev build reads the repo's folder, which hides it). The Windows package includes the folder.
+- The Mac's `CRT_EXPORT_MP4` hook doesn't apply keyframes, so it can't be a reference for animated looks.
+
 ## Phase 2 — The engine, a piece at a time, checked against the Mac
 
 The order follows the signal chain. Each piece gets a golden-image test: the Swift app renders references into `TestAssets/golden/`, and the Rust core must match within a set tolerance.
