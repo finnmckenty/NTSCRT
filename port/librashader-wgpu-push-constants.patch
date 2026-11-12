@@ -1,0 +1,35 @@
+diff --git a/librashader-runtime-wgpu/src/graphics_pipeline.rs b/librashader-runtime-wgpu/src/graphics_pipeline.rs
+index f8bd6192..1fe709fd 100644
+--- a/librashader-runtime-wgpu/src/graphics_pipeline.rs
++++ b/librashader-runtime-wgpu/src/graphics_pipeline.rs
+@@ -52,6 +52,30 @@ impl PipelineLayoutObjects {
+         let mut main_bindings = Vec::new();
+         let mut sampler_bindings = Vec::new();
+ 
++        // NTSCRT patch: restored from before 5281c781 ("Bump wgpu 27 -> 28"),
++        // which removed this entry while FilterPass::draw still binds the
++        // push-constant block as a uniform buffer at `push_meta.binding` —
++        // every shader with push constants failed pipeline validation
++        // ("Binding is missing from the pipeline layout").
++        if let Some(push_meta) = reflection
++            .push_constant
++            .as_ref()
++            .filter(|push_meta| !push_meta.stage_mask.is_empty())
++        {
++            if let Some(binding) = push_meta.binding {
++                main_bindings.push(BindGroupLayoutEntry {
++                    binding,
++                    visibility: util::binding_stage_to_wgpu_stage(push_meta.stage_mask),
++                    ty: BindingType::Buffer {
++                        ty: BufferBindingType::Uniform,
++                        has_dynamic_offset: false,
++                        min_binding_size: BufferSize::new(push_meta.size as u64),
++                    },
++                    count: None,
++                });
++            }
++        }
++
+         if let Some(ubo_meta) = reflection
+             .ubo
+             .as_ref()

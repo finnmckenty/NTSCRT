@@ -68,6 +68,10 @@ swift build -c release --product crt-smoke
 swift build -c release --product crt-app
 ```
 
+## Windows port (in progress)
+
+A separate Rust/wgpu version in `port/`; the Mac app doesn't use it and its build ignores the folder. See [port/README.md](port/README.md) and [docs/windows-port-plan.md](docs/windows-port-plan.md).
+
 ## Optional: the VHS stage (ntsc-rs)
 
 The app can run [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) as a CPU signal-degradation stage: NTSC/VHS artifacts are applied at the source's full resolution, then the degraded signal is downscaled into the CRT shader (NTSC full res → downscale → CRT). Composite artifacts, tape noise, head switching, chroma bleed — enable scale_settings → "scale with video size" for artifact sizes that track the input resolution. Build it once:

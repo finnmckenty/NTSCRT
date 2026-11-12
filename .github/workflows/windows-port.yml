@@ -1,0 +1,62 @@
+# Windows port: build the spike on Windows and check every CRT shader, with
+# and without the NTSC stage, against the Mac app's reference renders.
+# GitHub's Windows runners have no GPU; wgpu uses D3D12 on WARP (software).
+name: Windows port
+
+on:
+  push:
+    paths: ["port/**", "Vendor/**", ".github/workflows/windows-port.yml"]
+  pull_request:
+    paths: ["port/**", "Vendor/**", ".github/workflows/windows-port.yml"]
+  workflow_dispatch:
+
+jobs:
+  spike:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: librashader (pinned and patched)
+        shell: bash
+        run: port/fetch-librashader.sh
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            port/spike/target
+          key: windows-spike-${{ hashFiles('port/spike/Cargo.lock', 'port/librashader-wgpu-push-constants.patch') }}
+      - name: Build
+        working-directory: port/spike
+        run: cargo build --release
+      - name: Compare with the Mac references
+        shell: bash
+        env:
+          SPIKE_BACKEND: dx12
+          COMPARE_BORDER: "8"
+          # WARP renders slightly differently from a GPU (worst seen: 0.92).
+          COMPARE_MAX_MEAN: "1.0"
+        run: |
+          bin=port/spike/target/release
+          mkdir -p out
+          fail=0
+          for sh in crt-aperture crt-easymode crtglow_gauss crtglow_lanczos crt-hyllian crt-royale crtsim; do
+            for mode in plain ntsc; do
+              extra=(); [ $mode = ntsc ] && extra=(--ntsc default)
+              $bin/ntscrt-spike TestAssets/testpattern.png Vendor/slang-shaders/crt/$sh.slangp out/$sh-$mode.png 1280 960 320 240 area "${extra[@]}" > out/$sh-$mode.log 2>&1 \
+                || { echo "::error::$sh-$mode failed to render"; tail -5 out/$sh-$mode.log; fail=1; continue; }
+              printf '%-22s ' "$sh-$mode"
+              $bin/compare port/spike/ref-mac/$sh-$mode.png out/$sh-$mode.png out/$sh-$mode-diff.png \
+                || { echo "::error::$sh-$mode differs from the Mac reference"; fail=1; }
+            done
+          done
+          grep -h adapter out/crt-aperture-plain.log
+          exit $fail
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-spike-output
+          path: out/

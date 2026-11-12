@@ -18,3 +18,7 @@ Vendor/ntscrs-capi/target/
 dist/
 .build-x86/
 .build-tests/
+
+# Windows port: librashader checkout (port/fetch-librashader.sh) and Rust builds
+port/vendor/
+port/**/target/

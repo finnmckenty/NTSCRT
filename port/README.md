@@ -1,0 +1,31 @@
+# NTSCRT for Windows (in progress)
+
+The Windows version, in Rust on wgpu. Nothing here is used by the Mac app, which stays Swift. Plan and status: [docs/windows-port-plan.md](../docs/windows-port-plan.md).
+
+## What's here
+
+- `spike/` — `ntscrt-spike`: PNG → ntsc-rs → area downscale → librashader on wgpu → PNG, mirroring the Mac's `crt-smoke`. Plus `compare`, which measures how far two PNGs differ.
+- `spike/ref-mac/` — `crt-smoke` renders of all seven CRT shaders, with and without NTSC, as references.
+- `fetch-librashader.sh` + `librashader-wgpu-push-constants.patch` — librashader at the Mac app's pinned commit, with a fix its wgpu runtime needs at that commit.
+
+## Build
+
+```sh
+port/fetch-librashader.sh          # once; Git Bash on Windows
+cd port/spike && cargo build --release
+```
+
+## Check against the Mac
+
+```sh
+target/release/ntscrt-spike ../../TestAssets/testpattern.png ../../Vendor/slang-shaders/crt/crt-royale.slangp out.png 1280 960 320 240 area --ntsc default
+COMPARE_BORDER=8 target/release/compare ref-mac/crt-royale-ntsc.png out.png
+```
+
+- `SPIKE_BACKEND=gl|dx12|vulkan|metal` picks the graphics backend.
+- `COMPARE_BORDER=n` leaves out n edge pixels. `COMPARE_MAX_MEAN=x` fails above a mean difference of x.
+- GitHub Actions runs every case on Windows for each push that touches `port/` (`.github/workflows/windows-port.yml`).
+
+## The Windows VM
+
+`scripts/win-vm.sh [--user] < script.ps1` runs PowerShell in the Parallels VM "Windows 11" through `prlctl`. Repo checkout: `C:\src\NTSCRT`.
