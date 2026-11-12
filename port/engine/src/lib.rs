@@ -7,6 +7,7 @@
 //! app's window can't share a device with it. Frames come back as RGBA8.
 
 pub mod crop;
+pub mod export;
 mod look;
 mod ntsc_ui;
 pub mod preview;
@@ -382,6 +383,66 @@ impl Engine {
             "preview display",
         );
         self.dispatch(&mut enc, &self.area, &rendered, &shown, &[size.0, size.1, shown.width(), shown.height()], (shown.width(), shown.height()));
+        self.read_back(enc, &shown)
+    }
+
+    /// An exported frame at exactly `out`: the chain into `out`, or — when
+    /// lines would land on a fractional number of rows — at a whole multiple
+    /// of the chain input, box-filtered down (the Mac's SupersampledPass).
+    /// Without the CRT, the chain input enlarged with hard edges to the next
+    /// whole multiple and filtered down (the Mac's ShaderBypass).
+    pub fn render_export(&mut self, settings: &Settings, out: (u32, u32)) -> Result<Image> {
+        let input = self.prepare(settings)?;
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let chain_input = match settings.downscale {
+            Some(spec) => self.downscale(&mut enc, &input, spec),
+            None => input,
+        };
+        let (iw, ih) = (chain_input.width(), chain_input.height());
+        let render_size = match &settings.shader {
+            Some(_) => {
+                let k = export::supersample_factor(ih, out.1);
+                if k > 1 {
+                    let h = ih * k;
+                    let w = (out.0 as f64 * h as f64 / out.1 as f64).round() as u32;
+                    if w > out.0 && h > out.1 { (w, h) } else { out }
+                } else {
+                    out
+                }
+            }
+            None => {
+                let k = out.1.div_ceil(ih).max(out.0.div_ceil(iw)).max(1);
+                if out.1 % ih == 0 && out.0 % iw == 0 { out } else { (iw * k, ih * k) }
+            }
+        };
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING;
+        let rendered = texture(&self.device, render_size, usage, "export render");
+        match &settings.shader {
+            Some(shader) => {
+                self.load_chain(shader)?;
+                let chain = &mut self.chain.as_mut().expect("loaded").chain;
+                let view = rendered.create_view(&Default::default());
+                let sz = Size::new(render_size.0, render_size.1);
+                chain
+                    .frame(
+                        &chain_input,
+                        &Viewport { x: 0.0, y: 0.0, mvp: None, output: WgpuOutputView::new_from_raw(&view, sz, rendered.format()), size: sz },
+                        &mut enc,
+                        settings.frame,
+                        None,
+                    )
+                    .map_err(|e| anyhow!("shader: {e}"))?;
+            }
+            None => self.dispatch(&mut enc, &self.nearest, &chain_input, &rendered, &[iw, ih, render_size.0, render_size.1], render_size),
+        }
+        if render_size == out {
+            return self.read_back(enc, &rendered);
+        }
+        let shown = texture(&self.device, out, wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING, "export");
+        self.dispatch(&mut enc, &self.area, &rendered, &shown, &[render_size.0, render_size.1, out.0, out.1], out);
         self.read_back(enc, &shown)
     }
 

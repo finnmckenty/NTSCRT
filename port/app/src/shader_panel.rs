@@ -216,6 +216,7 @@ pub fn control(ui: &mut egui::Ui, preset: &str, p: &ShaderParam, values: &mut Ha
     let open = gate.as_ref().is_none_or(|g| g.is_open(values, input_height));
     let mut v = values.get(&p.name).copied().unwrap_or(p.initial);
     let before = v;
+    let mut touched = false;
     ui.add_enabled_ui(open, |ui| {
         let r = match &pres.kind {
             Kind::Toggle => {
@@ -233,6 +234,7 @@ pub fn control(ui: &mut egui::Ui, preset: &str, p: &ShaderParam, values: &mut Ha
                         for (i, c) in choices.iter().enumerate() {
                             if ui.selectable_label(current == Some(i), label(i)).clicked() {
                                 v = *c;
+                                touched = true;
                             }
                         }
                     })
@@ -244,6 +246,7 @@ pub fn control(ui: &mut egui::Ui, preset: &str, p: &ShaderParam, values: &mut Ha
                             for (i, c) in choices.iter().enumerate() {
                                 if ui.selectable_label(current == Some(i), label(i)).clicked() {
                                     v = *c;
+                                    touched = true;
                                 }
                             }
                         })
@@ -254,10 +257,11 @@ pub fn control(ui: &mut egui::Ui, preset: &str, p: &ShaderParam, values: &mut Ha
                 ui.horizontal(|ui| {
                     ui.label(&pres.title);
                     let mut i = v.round() as i32;
-                    ui.add(egui::DragValue::new(&mut i).range(p.minimum as i32..=p.maximum as i32).speed(*step.max(&1)));
+                    let r = ui.add(egui::DragValue::new(&mut i).range(p.minimum as i32..=p.maximum as i32).speed(*step.max(&1)));
                     v = i as f32;
+                    r
                 })
-                .response
+                .inner
             }
             Kind::Slider | Kind::Header => {
                 ui.label(&pres.title);
@@ -266,6 +270,7 @@ pub fn control(ui: &mut egui::Ui, preset: &str, p: &ShaderParam, values: &mut Ha
                 ui.add(egui::Slider::new(&mut v, p.minimum..=p.maximum).step_by(step as f64))
             }
         };
+        touched |= crate::ntsc_panel::edited(&r) || r.clicked();
         r.on_hover_text(format!("{} ({})", pres.title, p.name));
         if let Some(c) = &pres.caption {
             ui.weak(c);
@@ -277,7 +282,8 @@ pub fn control(ui: &mut egui::Ui, preset: &str, p: &ShaderParam, values: &mut Ha
             ui.colored_label(color, g.hint);
         }
     }
-    if v != before {
+    // Only a value someone set (see ntsc_panel::edited).
+    if v != before && touched {
         values.insert(p.name.clone(), v);
         true
     } else {

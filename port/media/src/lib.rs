@@ -11,6 +11,8 @@ pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    /// The frame rate as stored (numerator, denominator), for writing.
+    pub fps_rational: (u32, u32),
     pub total_frames: usize,
     pub duration: f64,
     /// Clockwise degrees applied to stored frames to show them upright.
@@ -64,6 +66,69 @@ pub fn rotate(w: u32, h: u32, rgba: &[u8], degrees: u32) -> (u32, u32, Vec<u8>) 
 
 #[cfg(windows)]
 mod mf;
+#[cfg(windows)]
+mod mf_writer;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    H264,
+    Hevc,
+}
+
+/// An MP4 being written: frames in order, and the source clip's audio
+/// (decoded and re-encoded as AAC, once per loop) alongside.
+pub struct VideoWriter {
+    #[cfg(windows)]
+    inner: mf_writer::Writer,
+}
+
+impl VideoWriter {
+    /// `fps` as (numerator, denominator). `audio_from`: the clip whose
+    /// sound to carry, `loops` times over.
+    pub fn create(
+        path: &std::path::Path,
+        size: (u32, u32),
+        fps: (u32, u32),
+        codec: Codec,
+        bitrate: u32,
+        audio_from: Option<&std::path::Path>,
+        loops: usize,
+    ) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            Ok(Self { inner: mf_writer::Writer::create(path, size, fps, codec, bitrate, audio_from, loops)? })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (path, size, fps, codec, bitrate, audio_from, loops);
+            anyhow::bail!("MP4 export needs the Windows build (Media Foundation)")
+        }
+    }
+
+    /// The next frame, RGBA8 at the writer's size.
+    pub fn write(&mut self, rgba: &[u8]) -> Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.write(rgba)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rgba;
+            anyhow::bail!("MP4 export needs the Windows build")
+        }
+    }
+
+    pub fn finish(self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.finish()
+        }
+        #[cfg(not(windows))]
+        {
+            anyhow::bail!("MP4 export needs the Windows build")
+        }
+    }
+}
 
 pub struct VideoReader {
     #[cfg(windows)]
@@ -112,7 +177,7 @@ mod tests {
 
     #[test]
     fn frame_numbers_follow_the_mac() {
-        let info = VideoInfo { width: 1, height: 1, fps: 29.97, total_frames: VideoInfo::frames_for(4.004, 29.97), duration: 4.004, rotation: 0 };
+        let info = VideoInfo { width: 1, height: 1, fps: 29.97, fps_rational: (30000, 1001), total_frames: VideoInfo::frames_for(4.004, 29.97), duration: 4.004, rotation: 0 };
         assert_eq!(info.total_frames, 120);
         assert_eq!(info.timescale(), 30.0);
         assert_eq!(info.frame_at(1.0), 30);

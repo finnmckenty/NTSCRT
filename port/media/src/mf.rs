@@ -30,7 +30,7 @@ pub struct Reader {
     start: i64,
 }
 
-fn startup() -> Result<()> {
+pub(crate) fn startup() -> Result<()> {
     // Both are reference counted; once per thread that opens a clip is fine.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -75,7 +75,8 @@ impl Reader {
                 .map(|v| v.Anonymous.Anonymous.Anonymous.uhVal as f64 / HNS)
                 .unwrap_or(0.0);
             let (uw, uh) = if rotation % 180 == 90 { (h, w) } else { (w, h) };
-            let info = VideoInfo { width: uw, height: uh, fps, total_frames: VideoInfo::frames_for(duration, fps), duration, rotation };
+            let fps_rational = if num > 0 && den > 0 { (num, den) } else { (30, 1) };
+            let info = VideoInfo { width: uw, height: uh, fps, fps_rational, total_frames: VideoInfo::frames_for(duration, fps), duration, rotation };
             let mut r = Self { reader, info, stored: (w, h, stride), next: Some(0), last: None, start: 0 };
             // Time zero is the first frame's timestamp; keep that frame as 0.
             let (stamp, sample) = r.read()?.context("the clip has no frames")?;

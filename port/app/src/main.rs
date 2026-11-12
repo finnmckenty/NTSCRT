@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod export;
 mod ntsc_panel;
 mod shader_panel;
 mod worker;
@@ -17,7 +18,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use ntscrt_media::VideoInfo;
+use ntscrt_media::{Codec, VideoInfo};
+use std::sync::Arc;
 use worker::{Event, Request};
 use std::time::{Duration, Instant};
 
@@ -101,12 +103,31 @@ struct App {
     status: String,
     error: Option<String>,
 
+    // Export (the Mac's popover, as a window).
+    export_open: bool,
+    export_format: export::Format,
+    export_long_edge: u32,
+    export_quality: usize,
+    export_loops: usize,
+    export_snap: bool,
+    gif_width: u32,
+    gif_fps: u32,
+    still_seconds: f64,
+    still_fps: u32,
+    export_job: Option<(Arc<export::Progress>, Receiver<Result<String, String>>)>,
+    export_status: String,
+    /// The still as opened (exports render it on their own engine), or the clip's path.
+    still: Option<Image>,
+    source_path: Option<PathBuf>,
+
     snapshot: Option<PathBuf>,
     snapshot_requested: bool,
     /// NTSCRT_SNAPSHOT_AFTER=seconds: wait this long first.
     snapshot_after: Option<(Instant, f64)>,
     /// NTSCRT_PLAY=1: play the clip as soon as it's open.
     autoplay: bool,
+    /// NTSCRT_EXPORT=<file>: export there once the preview is up, then quit.
+    auto_export: Option<PathBuf>,
 }
 
 impl App {
@@ -160,10 +181,25 @@ impl App {
             shown_seq: 0,
             status: String::new(),
             error: None,
+            export_open: false,
+            export_format: export::Format::Mp4(Codec::H264),
+            export_long_edge: 1920,
+            export_quality: 1,
+            export_loops: 1,
+            export_snap: false,
+            gif_width: 480,
+            gif_fps: 12,
+            still_seconds: 5.0,
+            still_fps: 30,
+            export_job: None,
+            export_status: String::new(),
+            still: None,
+            source_path: None,
             snapshot: std::env::var_os("NTSCRT_UI_SNAPSHOT").map(PathBuf::from),
             snapshot_requested: false,
             snapshot_after: std::env::var("NTSCRT_SNAPSHOT_AFTER").ok().and_then(|v| v.parse().ok()).map(|s| (Instant::now(), s)),
             autoplay: std::env::var("NTSCRT_PLAY").as_deref() == Ok("1"),
+            auto_export: std::env::var_os("NTSCRT_EXPORT").map(PathBuf::from),
         };
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
         if let Some(p) = start {
@@ -185,6 +221,21 @@ impl App {
                 app.crop_enabled = true;
             }
         }
+        if std::env::var("NTSCRT_ANIMATE").as_deref() == Ok("0") {
+            app.animate = false;
+        }
+        if let Some(p) = &app.auto_export {
+            let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            app.export_format = match ext.as_str() {
+                "png" => export::Format::Png,
+                "gif" => export::Format::Gif,
+                _ if std::env::var("NTSCRT_EXPORT_HEVC").as_deref() == Ok("1") => export::Format::Mp4(Codec::Hevc),
+                _ => export::Format::Mp4(Codec::H264),
+            };
+            if let Some(n) = std::env::var("NTSCRT_EXPORT_LOOPS").ok().and_then(|v| v.parse().ok()) {
+                app.export_loops = n;
+            }
+        }
         if std::env::var("NTSCRT_COMPARE").as_deref() == Ok("1") {
             app.compare = true;
             app.compare_x = 0.6;
@@ -199,6 +250,8 @@ impl App {
         self.error = None;
         self.source_texture = None;
         self.source_pixels = None;
+        self.source_path = Some(path.to_path_buf());
+        self.still = None;
         if matches!(ext.as_str(), "mp4" | "mov" | "m4v") {
             // The worker opens it and reports its size (see Event::Opened).
             self.source = Some((name, 0, 0));
@@ -216,7 +269,9 @@ impl App {
                 self.original_size = Some((w, h));
                 self.video = None;
                 self.playing = None;
-                let _ = self.requests.send(Request::Still(Image::new(w, h, img.into_raw())));
+                let image = Image::new(w, h, img.into_raw());
+                self.still = Some(image.clone());
+                let _ = self.requests.send(Request::Still(image));
             }
             Err(e) => self.error = Some(format!("Couldn't open {}: {e}", path.display())),
         }
@@ -602,6 +657,159 @@ impl App {
         }));
     }
 
+    /// The chain input's size (for snapping exports onto the scanline grid).
+    fn chain_input(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.picture_size()?;
+        Some(if self.downscale {
+            let d = DownscaleSpec::for_width(self.downscale_width, (w, h), self.method);
+            (d.width, d.height)
+        } else {
+            (w, h)
+        })
+    }
+
+    fn export_size(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.picture_size()?;
+        let aspect = w as f64 / h.max(1) as f64;
+        let snap = if self.export_snap { self.chain_input() } else { None };
+        Some(match self.export_format {
+            export::Format::Gif => ntscrt_engine::export::gif_size(self.gif_width, aspect, snap),
+            _ => ntscrt_engine::export::video_size(self.export_long_edge, aspect, snap),
+        })
+    }
+
+    fn export_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.export_open;
+        egui::Window::new("Export").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            use export::Format;
+            ui.horizontal(|ui| {
+                ui.label("Format");
+                for (f, name) in [(Format::Png, "PNG"), (Format::Mp4(Codec::H264), "MP4 (H.264)"), (Format::Mp4(Codec::Hevc), "MP4 (HEVC)"), (Format::Gif, "GIF")] {
+                    ui.selectable_value(&mut self.export_format, f, name);
+                }
+            });
+            let video = self.video;
+            match self.export_format {
+                Format::Gif => {
+                    ui.horizontal(|ui| {
+                        ui.label("Width");
+                        ui.add(egui::DragValue::new(&mut self.gif_width).range(64..=1920).suffix(" px"));
+                        ui.label("Frame rate");
+                        ui.add(egui::DragValue::new(&mut self.gif_fps).range(1..=50).suffix(" fps"));
+                    });
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        ui.label("Long edge");
+                        ui.add(egui::DragValue::new(&mut self.export_long_edge).range(64..=4096).suffix(" px"));
+                    });
+                }
+            }
+            if let Format::Mp4(_) = self.export_format {
+                ui.horizontal(|ui| {
+                    ui.label("Quality");
+                    for (i, (name, _)) in ntscrt_engine::export::QUALITIES.iter().enumerate() {
+                        ui.selectable_value(&mut self.export_quality, i, *name);
+                    }
+                });
+                if video.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label("Loop");
+                        ui.add(egui::DragValue::new(&mut self.export_loops).range(1..=50).suffix("×"))
+                            .on_hover_text("Repeat the clip inside the file, for places that don't loop video.");
+                    });
+                }
+            }
+            if video.is_none() && self.export_format != Format::Png {
+                ui.horizontal(|ui| {
+                    ui.label("Length");
+                    ui.add(egui::DragValue::new(&mut self.still_seconds).range(0.5..=60.0).speed(0.1).suffix(" s"));
+                    if let Format::Mp4(_) = self.export_format {
+                        ui.add(egui::DragValue::new(&mut self.still_fps).range(1..=60).suffix(" fps"));
+                    }
+                });
+            }
+            ui.checkbox(&mut self.export_snap, "Snap size to scanline grid")
+                .on_hover_text("Pick a nearby size where every scanline lands evenly. Without it, exports avoid banding by rendering larger and scaling down.");
+            if let Some((w, h)) = self.export_size() {
+                let mut line = format!("{w} × {h}");
+                if self.export_format == Format::Gif {
+                    let seconds = video.map_or(self.still_seconds, |v| v.duration);
+                    let mb = 0.8 * (w * h) as f64 * (seconds * self.gif_fps as f64) / 1e6;
+                    line += &format!(", about {mb:.1} MB");
+                    if mb > 10.0 {
+                        line += " (over 10 MB: many places won't take it)";
+                    }
+                }
+                ui.weak(line);
+            }
+            ui.separator();
+            match &self.export_job {
+                Some((progress, _)) => {
+                    let done = progress.done.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
+                    ui.add(egui::ProgressBar::new(done).show_percentage());
+                    if ui.button("Cancel").clicked() {
+                        progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                None => {
+                    if ui.add_enabled(self.source.is_some() && self.original_size.is_some(), egui::Button::new("Export…")).clicked() {
+                        self.start_export(None);
+                    }
+                }
+            }
+            if !self.export_status.is_empty() {
+                ui.label(&self.export_status);
+            }
+        });
+        self.export_open = open;
+    }
+
+    /// Start an export into `path`, or ask where.
+    fn start_export(&mut self, path: Option<PathBuf>) {
+        use export::Format;
+        let (Some(size), Some(picture)) = (self.export_size(), self.picture_size()) else { return };
+        let ext = match self.export_format {
+            Format::Png => "png",
+            Format::Mp4(_) => "mp4",
+            Format::Gif => "gif",
+        };
+        let path = path.or_else(|| {
+            let stem = self.source_path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or("NTSCRT".into());
+            rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("{stem} NTSCRT.{ext}")).save_file()
+        });
+        let Some(path) = path else { return };
+        let media = match (&self.still, &self.source_path, self.video) {
+            (Some(img), _, None) => export::Media::Still(img.clone()),
+            (_, Some(p), Some(_)) => export::Media::Video(p.clone()),
+            _ => return,
+        };
+        let fps = self.video.map_or(self.still_fps as f64, |v| v.fps);
+        let job = export::Job {
+            format: self.export_format,
+            path,
+            size,
+            media,
+            crop: self.crop_enabled.then_some(self.crop),
+            settings: self.settings(picture),
+            png_frame: if self.video.is_some() { self.video_frame } else { self.frame },
+            bitrate: ntscrt_engine::export::bitrate(size, fps, ntscrt_engine::export::QUALITIES[self.export_quality].1),
+            loops: self.export_loops,
+            still_seconds: self.still_seconds,
+            still_fps: self.still_fps,
+            gif_fps: self.gif_fps,
+        };
+        let progress = Arc::new(export::Progress::default());
+        let (tx, rx) = channel();
+        let p = progress.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(export::run(job, p).map_err(|e| format!("{e:#}")));
+        });
+        self.export_status = "Exporting…".into();
+        self.export_job = Some((progress, rx));
+    }
+
     fn toggle_play(&mut self) {
         self.playing = match self.playing {
             Some(_) => None,
@@ -841,9 +1049,32 @@ impl eframe::App for App {
             self.open(&p);
         }
 
+        if let Some((_, rx)) = &self.export_job {
+            if let Ok(r) = rx.try_recv() {
+                self.export_status = match r {
+                    Ok(m) => m,
+                    Err(e) => format!("Export failed: {e}"),
+                };
+                self.export_job = None;
+                if let Some(p) = self.auto_export.take() {
+                    let _ = std::fs::write(p.with_extension("log"), &self.export_status);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if let Some(p) = self.auto_export.clone() {
+            if self.export_job.is_none() && self.shown_seq != 0 && self.shown_seq == self.seq {
+                self.start_export(Some(p));
+            }
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        self.export_window(&ctx);
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 self.preset_menu(ui);
+                if ui.button("Export…").clicked() {
+                    self.export_open = true;
+                }
                 if let Some(name) = &self.look_name {
                     ui.label(name);
                 }
