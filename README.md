@@ -16,6 +16,12 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 
 **Requirements:** macOS 14 or later. The app is a universal binary (Apple Silicon + Intel).
 
+**Windows (preview):** the same release has `NTSCRT-<version>-windows-x64.zip`.
+- Unzip it anywhere and run `ntscrt.exe`. 64-bit Windows 10 or 11.
+- It isn't code-signed yet, so Windows may warn about it: click **More info**, then **Run anyway**.
+- Every feature of the Mac app except ProRes export. Looks and presets are the same files on both.
+- Tested in a virtual machine so far, not yet on a real Windows PC. Please open an issue if something misbehaves.
+
 > **Intel note:** I build and test NTSCRT on Apple Silicon and haven't personally tested the Intel build. Intel support exists thanks to a contributed fix ([#1](../../pull/1)) verified by its author on an Intel iMac Pro — if something misbehaves on your Intel Mac, please open an issue.
 
 ## Using the app
