@@ -29,6 +29,10 @@ pub struct Look {
     pub shader_preset: Option<String>,
     pub shader_params: HashMap<String, f32>,
     pub keys: Vec<Keyframe>,
+    pub timeline_enabled: Option<bool>,
+    /// A still's animation length and frame rate.
+    pub timeline_duration: Option<f64>,
+    pub timeline_fps: Option<u32>,
     /// Only a crop that's on travels with a look (the Mac's rule); a look
     /// without one leaves the current crop alone.
     pub crop: Option<Crop>,
@@ -89,6 +93,11 @@ impl Look {
             look.shader_preset = s.get("preset").and_then(Value::as_str).map(str::to_string);
             look.shader_params = floats(s.get("params"));
         }
+        if let Some(t) = raw.get("timeline").and_then(Value::as_object) {
+            look.timeline_enabled = t.get("enabled").and_then(Value::as_bool);
+            look.timeline_duration = t.get("duration").and_then(Value::as_f64);
+            look.timeline_fps = t.get("fps").and_then(Value::as_u64).map(|f| f as u32);
+        }
         if let Some(keys) = raw.get("timeline").and_then(|t| t.get("keys")).and_then(Value::as_array) {
             look.keys = keys
                 .iter()
@@ -134,9 +143,6 @@ impl Look {
         }
         if section("digital").is_some_and(|d| d.get("enabled").and_then(Value::as_bool).unwrap_or(false)) {
             out.push("Digital video");
-        }
-        if self.keys.len() > 1 {
-            out.push("animation (showing its first keyframe)");
         }
         if self.raw.get("downscale").and_then(|d| d.get("method")).is_some() && self.downscale_method.is_none() {
             out.push("its downscale method");
@@ -197,6 +203,14 @@ pub struct LookState<'a> {
     pub shader_preset: &'a str,
     pub shader_params: &'a HashMap<String, f32>,
     pub crop: Option<Crop>,
+    pub timeline: Option<TimelineState<'a>>,
+}
+
+pub struct TimelineState<'a> {
+    pub enabled: bool,
+    pub duration: f64,
+    pub fps: u32,
+    pub keys: &'a [Keyframe],
 }
 
 /// A look file: `base` (the look last loaded, if any) with this version's
@@ -218,6 +232,17 @@ pub fn write_look(base: Option<&Map<String, Value>>, s: &LookState) -> String {
     look.insert("ntsc".into(), serde_json::json!({ "enabled": s.ntsc_enabled, "settings": s.ntsc_settings }));
     let params: Map<String, Value> = s.shader_params.iter().map(|(k, v)| (k.clone(), Value::from(*v as f64))).collect();
     look.insert("shader".into(), serde_json::json!({ "enabled": s.shader_enabled, "preset": s.shader_preset, "params": params }));
+    if let Some(t) = &s.timeline {
+        let keys: Vec<Value> = t
+            .keys
+            .iter()
+            .map(|k| {
+                let shader: Map<String, Value> = k.shader.iter().map(|(n, v)| (n.clone(), Value::from(*v as f64))).collect();
+                serde_json::json!({ "t": k.t, "easing": k.easing.raw(), "shader": shader, "ntsc": k.ntsc, "glitch": k.glitch, "digital": k.digital })
+            })
+            .collect();
+        look.insert("timeline".into(), serde_json::json!({ "enabled": t.enabled, "duration": t.duration, "fps": t.fps, "keys": keys }));
+    }
     match s.crop {
         Some(c) => {
             look.insert("crop".into(), serde_json::json!({ "ratio": c.ratio.label(), "x": c.x, "y": c.y, "scale": c.scale }));
@@ -274,6 +299,7 @@ mod tests {
                 shader_preset: "royale",
                 shader_params: &params,
                 crop: Some(Crop { x: 0.25, ..Crop::new(Ratio::new(9, 16)) }),
+                timeline: None,
             },
         );
         let back = Look::parse(&out).unwrap();
@@ -284,5 +310,47 @@ mod tests {
         assert_eq!(back.raw["glitch"], look.raw["glitch"], "kept");
         assert_eq!(back.keys.len(), 1, "keys kept");
         assert!(Look::parse(r#"{"kind":"ntscrt-video-feedback"}"#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn keyframes_round_trip_in_the_macs_format() {
+        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets/5 second glitch.json")).unwrap();
+        let look = Look::parse(&src).unwrap();
+        assert!(look.keys.len() > 1);
+        let ntsc = look.ntsc_settings.clone().unwrap_or_default();
+        let params = HashMap::new();
+        let out = write_look(
+            Some(&look.raw),
+            &LookState {
+                downscale_enabled: true,
+                downscale_width: 384,
+                downscale_preset: "Custom",
+                downscale_method: DownscaleMethod::Area,
+                ntsc_enabled: true,
+                ntsc_settings: &ntsc,
+                shader_enabled: true,
+                shader_preset: "glow_gauss",
+                shader_params: &params,
+                crop: None,
+                timeline: Some(TimelineState { enabled: true, duration: 5.0, fps: 30, keys: &look.keys }),
+            },
+        );
+        let back = Look::parse(&out).unwrap();
+        assert_eq!(back.keys.len(), look.keys.len());
+        for (a, b) in back.keys.iter().zip(&look.keys) {
+            assert_eq!((a.t, a.easing), (b.t, b.easing));
+            assert_eq!(a.shader, b.shader, "shader at {}", b.t);
+            for (k, v) in &b.ntsc {
+                assert_eq!(a.ntsc.get(k), Some(v), "ntsc {k} at {}", b.t);
+            }
+            assert_eq!(a.glitch, b.glitch, "glitch at {}", b.t);
+            assert_eq!(a.digital, b.digital, "digital at {}", b.t);
+        }
+        assert_eq!((back.timeline_duration, back.timeline_fps), (Some(5.0), Some(30)));
     }
 }

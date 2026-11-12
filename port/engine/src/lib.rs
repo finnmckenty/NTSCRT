@@ -12,7 +12,7 @@ mod look;
 mod ntsc_ui;
 pub mod preview;
 pub mod timeline;
-pub use look::{write_look, Look, LookState};
+pub use look::{write_look, Look, LookState, TimelineState};
 pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
 pub use serde_json;
 

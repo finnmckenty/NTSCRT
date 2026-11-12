@@ -12,6 +12,7 @@
 mod export;
 mod ntsc_panel;
 mod shader_panel;
+mod timeline_ui;
 mod worker;
 
 use std::collections::HashMap;
@@ -112,8 +113,16 @@ struct App {
     export_snap: bool,
     gif_width: u32,
     gif_fps: u32,
-    still_seconds: f64,
-    still_fps: u32,
+    // The timeline (the Mac's Animate): keys, a still's length and rate,
+    // the playhead (0…1), still playback, and the key being edited.
+    timeline_open: bool,
+    keys: Vec<ntscrt_engine::timeline::Keyframe>,
+    timeline_seconds: f64,
+    timeline_fps: u32,
+    playhead: f64,
+    timeline_playing: Option<(Instant, f64)>,
+    selected_key: Option<usize>,
+    key_drag: Option<usize>,
     export_job: Option<(Arc<export::Progress>, Receiver<Result<String, String>>)>,
     export_status: String,
     /// The still as opened (exports render it on their own engine), or the clip's path.
@@ -189,8 +198,14 @@ impl App {
             export_snap: false,
             gif_width: 480,
             gif_fps: 12,
-            still_seconds: 5.0,
-            still_fps: 30,
+            timeline_open: false,
+            keys: Vec::new(),
+            timeline_seconds: 5.0,
+            timeline_fps: 30,
+            playhead: 0.0,
+            timeline_playing: None,
+            selected_key: None,
+            key_drag: None,
             export_job: None,
             export_status: String::new(),
             still: None,
@@ -357,14 +372,19 @@ impl App {
             }
         }
         if let Some(v) = look.shader_enabled { self.crt = v }
-        // A look with keyframes opens at its start (the Mac scrubs to 0).
-        if let Some(first) = look.keys.first() {
-            if let Some(values) = self.shader_values.get_mut(&self.shader) {
-                values.extend(first.shader.iter().map(|(k, v)| (k.clone(), *v)));
-            }
-            if !first.ntsc.is_empty() {
-                self.ntsc_values = first.ntsc.clone();
-            }
+        if let Some(d) = look.timeline_duration { self.timeline_seconds = d }
+        if let Some(f) = look.timeline_fps { self.timeline_fps = f }
+        if look.raw.contains_key("timeline") {
+            self.keys = look.keys.clone();
+            self.selected_key = None;
+            self.timeline_playing = None;
+            self.timeline_open = look.timeline_enabled.unwrap_or(false);
+        }
+        // A look with keyframes opens the timeline at its start (as the Mac
+        // does: otherwise the animation is loaded but invisible).
+        if !self.keys.is_empty() && look.raw.contains_key("timeline") {
+            self.timeline_open = true;
+            self.scrub(0.0);
         }
         self.look_notes = look.unported();
         self.look_name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
@@ -388,6 +408,12 @@ impl App {
                 shader_preset: CRT_SHADERS[self.shader].0,
                 shader_params: self.shader_values.get(&self.shader).unwrap_or(&empty),
                 crop: self.crop_enabled.then_some(self.crop),
+                timeline: Some(ntscrt_engine::TimelineState {
+                    enabled: self.timeline_open,
+                    duration: self.timeline_seconds,
+                    fps: self.timeline_fps,
+                    keys: &self.keys,
+                }),
             },
         );
         match std::fs::write(path, json) {
@@ -632,6 +658,7 @@ impl App {
                 if ui.add(egui::Slider::new(&mut f, 0..=last).show_value(false)).changed() {
                     self.playing = None;
                     self.video_frame = f;
+                    self.sync_playhead_to_frame();
                 }
                 ui.monospace(format!("{}/{} · {:.2}s", self.video_frame + 1, v.total_frames, self.video_frame as f64 / v.timescale()));
             }));
@@ -642,7 +669,7 @@ impl App {
                 .on_hover_text("Split the view: the full pipeline on the left, the original on the right. Drag the line to move the split.");
             ui.toggle_value(&mut self.integer_scale, "Integer scale")
                 .on_hover_text("Snap the picture to whole-pixel multiples, for perfectly even scanlines.");
-            ui.toggle_value(&mut self.animate, "Animate")
+            ui.toggle_value(&mut self.animate, "Live noise")
                 .on_hover_text("Keep tape noise and jitter moving.");
             ui.separator();
             ui.label("Zoom");
@@ -723,9 +750,9 @@ impl App {
             if video.is_none() && self.export_format != Format::Png {
                 ui.horizontal(|ui| {
                     ui.label("Length");
-                    ui.add(egui::DragValue::new(&mut self.still_seconds).range(0.5..=60.0).speed(0.1).suffix(" s"));
+                    ui.add(egui::DragValue::new(&mut self.timeline_seconds).range(0.5..=120.0).speed(0.1).suffix(" s"));
                     if let Format::Mp4(_) = self.export_format {
-                        ui.add(egui::DragValue::new(&mut self.still_fps).range(1..=60).suffix(" fps"));
+                        ui.add(egui::DragValue::new(&mut self.timeline_fps).range(1..=60).suffix(" fps"));
                     }
                 });
             }
@@ -734,7 +761,7 @@ impl App {
             if let Some((w, h)) = self.export_size() {
                 let mut line = format!("{w} × {h}");
                 if self.export_format == Format::Gif {
-                    let seconds = video.map_or(self.still_seconds, |v| v.duration);
+                    let seconds = video.map_or(self.timeline_seconds, |v| v.duration);
                     let mb = 0.8 * (w * h) as f64 * (seconds * self.gif_fps as f64) / 1e6;
                     line += &format!(", about {mb:.1} MB");
                     if mb > 10.0 {
@@ -785,7 +812,18 @@ impl App {
             (_, Some(p), Some(_)) => export::Media::Video(p.clone()),
             _ => return,
         };
-        let fps = self.video.map_or(self.still_fps as f64, |v| v.fps);
+        let fps = self.video.map_or(self.timeline_fps as f64, |v| v.fps);
+        let timeline = (self.timeline_open && !self.keys.is_empty()).then(|| {
+            self.ensure_shader();
+            let meta = match self.shader_params.get(&self.shader) {
+                Some(Ok(ps)) => ps
+                    .iter()
+                    .map(|p| (p.name.clone(), ntscrt_engine::timeline::ShaderMeta { minimum: p.minimum, maximum: p.maximum, step: p.step }))
+                    .collect(),
+                _ => HashMap::new(),
+            };
+            (self.keys.clone(), meta, self.ntsc_settings.clone())
+        });
         let job = export::Job {
             format: self.export_format,
             path,
@@ -794,10 +832,12 @@ impl App {
             crop: self.crop_enabled.then_some(self.crop),
             settings: self.settings(picture),
             png_frame: if self.video.is_some() { self.video_frame } else { self.frame },
+            png_t: self.playhead,
             bitrate: ntscrt_engine::export::bitrate(size, fps, ntscrt_engine::export::QUALITIES[self.export_quality].1),
             loops: self.export_loops,
-            still_seconds: self.still_seconds,
-            still_fps: self.still_fps,
+            still_seconds: self.timeline_seconds,
+            still_fps: self.timeline_fps,
+            timeline,
             gif_fps: self.gif_fps,
         };
         let progress = Arc::new(export::Progress::default());
@@ -885,6 +925,7 @@ impl App {
         if let (Some((since, from)), Some(v)) = (self.playing, self.video) {
             let f = from + (since.elapsed().as_secs_f64() * v.fps) as usize;
             self.video_frame = f % v.total_frames.max(1);
+            self.sync_playhead_to_frame();
             ctx.request_repaint();
         }
 
@@ -1041,9 +1082,14 @@ impl eframe::App for App {
                 (src.1, src.2) = (w, h);
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) && self.video.is_some() && !ctx.egui_wants_keyboard_input() {
-            self.toggle_play();
+        if ctx.input(|i| i.key_pressed(egui::Key::Space)) && !ctx.egui_wants_keyboard_input() {
+            if self.timeline_open {
+                self.toggle_timeline_play();
+            } else if self.video.is_some() {
+                self.toggle_play();
+            }
         }
+        self.advance_timeline(&ctx);
         let dropped = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty()));
         if let Some(p) = dropped {
             self.open(&p);
@@ -1075,6 +1121,9 @@ impl eframe::App for App {
                 if ui.button("Export…").clicked() {
                     self.export_open = true;
                 }
+                if ui.toggle_value(&mut self.timeline_open, "Animate").on_hover_text("Keyframe the whole look and export it as video.").changed() && self.timeline_open {
+                    self.scrub(self.playhead);
+                }
                 if let Some(name) = &self.look_name {
                     ui.label(name);
                 }
@@ -1086,7 +1135,20 @@ impl eframe::App for App {
                 }
             });
         });
+        // Editing while parked on a keyframe updates it: compare the values
+        // before and after the panels are drawn.
+        let before = (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone());
         egui::Panel::left("sidebar").resizable(false).exact_size(SIDEBAR_WIDTH).show(ui, |ui| self.sidebar(ui));
+        if (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone()) != before {
+            self.auto_key();
+        }
+        if self.timeline_open {
+            egui::Panel::bottom("timeline").show(ui, |ui| {
+                ui.add_space(4.0);
+                self.timeline_bar(ui);
+                ui.add_space(4.0);
+            });
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(13, 13, 15)))
             .show(ui, |ui| self.preview(ui));
