@@ -9,6 +9,7 @@
 pub mod crop;
 pub mod export;
 pub mod glitch;
+pub mod howl;
 mod look;
 mod ntsc_ui;
 pub mod preview;
@@ -16,6 +17,8 @@ pub mod timeline;
 pub use look::{write_look, Look, LookState, TimelineState};
 pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
 pub use ntscrt_codec as codec;
+pub use howl::feedback::HowlRender;
+pub use howl::HowlSettings;
 pub use serde_json;
 
 use std::path::{Path, PathBuf};
@@ -279,6 +282,8 @@ pub struct Engine {
     next_source: u64,
     prepared: Option<Prepared>,
     chain: Option<Chain>,
+    /// A Screen Loop in progress (exports only).
+    howl: Option<howl::feedback::HowlState>,
 }
 
 /// `NTSCRT_BACKEND` (or the spike's `SPIKE_BACKEND`) = gl | dx12 | vulkan | metal.
@@ -352,6 +357,7 @@ impl Engine {
             next_source: 1,
             prepared: None,
             chain: None,
+            howl: None,
         })
     }
 
@@ -471,6 +477,8 @@ impl Engine {
             None => input,
         };
         let chain_input = self.apply_glitch(&mut enc, chain_input, settings);
+        // A Screen Loop also draws this frame's TV picture for the camera.
+        self.howl_feed(&mut enc, &chain_input, settings)?;
         let (iw, ih) = (chain_input.width(), chain_input.height());
         let render_size = match &settings.shader {
             Some(_) => {
@@ -634,26 +642,7 @@ impl Engine {
     }
 
     fn load_chain(&mut self, shader: &ShaderSpec) -> Result<()> {
-        if self.chain.as_ref().map(|c| &c.preset) != Some(&shader.preset) {
-            self.chain = None;
-            let initial = preset_parameters(&shader.preset)?.into_iter().map(|p| (p.name, p.initial)).collect();
-            let preset = ShaderPreset::try_parse(&shader.preset, ShaderFeatures::NONE).map_err(|e| anyhow!("preset: {e}"))?;
-            let chain = FilterChain::load_from_preset(preset, &self.device, &self.queue, None)
-                .map_err(|e| anyhow!("shader {}: {e}", shader.preset.display()))?;
-            self.chain = Some(Chain { preset: shader.preset.clone(), chain, initial });
-        }
-        let c = self.chain.as_mut().expect("loaded");
-        let params = c.chain.parameters();
-        for (name, value) in &c.initial {
-            let v = shader.params.iter().find(|(n, _)| n == name).map_or(*value, |(_, v)| *v);
-            params.set_parameter_value(name, v);
-        }
-        for (name, _) in &shader.params {
-            if params.parameter_value(name).is_none() {
-                return Err(anyhow!("{} has no parameter {name}", shader.preset.display()));
-            }
-        }
-        Ok(())
+        load_chain_into(&mut self.chain, &self.device, &self.queue, shader)
     }
 
     fn read_back(&self, mut enc: wgpu::CommandEncoder, tex: &wgpu::Texture) -> Result<Image> {
@@ -747,4 +736,28 @@ pub fn app_shader_defaults(id: &str) -> Vec<(String, f32)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Load `shader`'s preset into `slot` (unless it's loaded already) and set
+/// its parameters: the given values over the preset's own.
+fn load_chain_into(slot: &mut Option<Chain>, device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>, shader: &ShaderSpec) -> Result<()> {
+    if slot.as_ref().map(|c| &c.preset) != Some(&shader.preset) {
+        *slot = None;
+        let initial = preset_parameters(&shader.preset)?.into_iter().map(|p| (p.name, p.initial)).collect();
+        let preset = ShaderPreset::try_parse(&shader.preset, ShaderFeatures::NONE).map_err(|e| anyhow!("preset: {e}"))?;
+        let chain = FilterChain::load_from_preset(preset, device, queue, None).map_err(|e| anyhow!("shader {}: {e}", shader.preset.display()))?;
+        *slot = Some(Chain { preset: shader.preset.clone(), chain, initial });
+    }
+    let c = slot.as_mut().expect("loaded");
+    let params = c.chain.parameters();
+    for (name, value) in &c.initial {
+        let v = shader.params.iter().find(|(n, _)| n == name).map_or(*value, |(_, v)| *v);
+        params.set_parameter_value(name, v);
+    }
+    for (name, _) in &shader.params {
+        if params.parameter_value(name).is_none() {
+            return Err(anyhow!("{} has no parameter {name}", shader.preset.display()));
+        }
+    }
+    Ok(())
 }

@@ -92,6 +92,8 @@ jobs:
           cp -R Vendor/slang-shaders/crt Vendor/slang-shaders/include "$d/shaders/"
           cp -R Vendor/slang-shaders/blurs/shaders/royale "$d/shaders/blurs/shaders/"
           cp presets/*.json "$d/presets/"
+          mkdir -p "$d/presets/Screen Loop"
+          cp "presets/Screen Loop/"*.json "$d/presets/Screen Loop/"
           cp LICENSE THIRD_PARTY_NOTICES.md "$d/"
           cp licenses/* port/licenses/rust-crates-windows.txt "$d/licenses/"
           cp port/package-readme.txt "$d/README.txt"

@@ -14,6 +14,7 @@ mod digital_panel;
 mod export;
 mod glitch_panel;
 mod ntsc_panel;
+mod screen_loop;
 mod shader_panel;
 mod timeline_ui;
 mod worker;
@@ -151,6 +152,9 @@ struct App {
     autoplay: bool,
     /// NTSCRT_EXPORT=<file>: export there once the preview is up, then quit.
     auto_export: Option<PathBuf>,
+    screen_loop: screen_loop::ScreenLoop,
+    /// NTSCRT_SCREEN_LOOP=1 (or a render hook): open it once a picture is up.
+    auto_screen_loop: bool,
 }
 
 impl App {
@@ -235,6 +239,8 @@ impl App {
             snapshot_after: std::env::var("NTSCRT_SNAPSHOT_AFTER").ok().and_then(|v| v.parse().ok()).map(|s| (Instant::now(), s)),
             autoplay: std::env::var("NTSCRT_PLAY").as_deref() == Ok("1"),
             auto_export: std::env::var_os("NTSCRT_EXPORT").map(PathBuf::from),
+            screen_loop: screen_loop::ScreenLoop::new(std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").map(PathBuf::from)),
+            auto_screen_loop: std::env::var("NTSCRT_SCREEN_LOOP").as_deref() == Ok("1") || std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").is_some(),
         };
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
         if let Some(p) = start {
@@ -1029,10 +1035,10 @@ impl App {
     /// Start an export into `path`, or ask where.
     fn start_export(&mut self, path: Option<PathBuf>) {
         use export::Format;
-        let (Some(size), Some(picture)) = (self.export_size(), self.picture_size()) else { return };
+        let Some(size) = self.export_size() else { return };
         let ext = match self.export_format {
             Format::Png => "png",
-            Format::Mp4(_) => "mp4",
+            Format::Mp4(_) | Format::Frames => "mp4",
             Format::Gif => "gif",
         };
         let path = path.or_else(|| {
@@ -1040,10 +1046,25 @@ impl App {
             rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("{stem} NTSCRT.{ext}")).save_file()
         });
         let Some(path) = path else { return };
+        let Some(job) = self.export_job(self.export_format, path, size) else { return };
+        let progress = Arc::new(export::Progress::default());
+        let (tx, rx) = channel();
+        let p = progress.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(export::run(job, p).map_err(|e| format!("{e:#}")));
+        });
+        self.export_status = "Exporting…".into();
+        self.export_job = Some((progress, rx));
+    }
+
+    /// An export of the current look (the Export window's, and Screen Loop's
+    /// renders and drafts, which adjust it).
+    pub(crate) fn export_job(&mut self, format: export::Format, path: PathBuf, size: (u32, u32)) -> Option<export::Job> {
+        let picture = self.picture_size()?;
         let media = match (&self.still, &self.source_path, self.video) {
             (Some(img), _, None) => export::Media::Still(img.clone()),
             (_, Some(p), Some(_)) => export::Media::Video(p.clone()),
-            _ => return,
+            _ => return None,
         };
         let fps = self.video.map_or(self.timeline_fps as f64, |v| v.fps);
         let timeline = (self.timeline_open && !self.keys.is_empty()).then(|| {
@@ -1057,8 +1078,8 @@ impl App {
             };
             (self.keys.clone(), meta, self.ntsc_settings.clone())
         });
-        let job = export::Job {
-            format: self.export_format,
+        Some(export::Job {
+            format,
             path,
             size,
             media,
@@ -1072,15 +1093,16 @@ impl App {
             still_fps: self.timeline_fps,
             timeline,
             gif_fps: self.gif_fps,
-        };
-        let progress = Arc::new(export::Progress::default());
-        let (tx, rx) = channel();
-        let p = progress.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(export::run(job, p).map_err(|e| format!("{e:#}")));
-        });
-        self.export_status = "Exporting…".into();
-        self.export_job = Some((progress, rx));
+            howl: None,
+            frame_limit: None,
+            sink: None,
+        })
+    }
+
+    /// A UI snapshot is due: Live noise holds still, so the frame it waits
+    /// for arrives.
+    fn snapshot_due(&self) -> bool {
+        self.snapshot.is_some() && self.snapshot_after.is_none_or(|(t, s)| t.elapsed().as_secs_f64() >= s)
     }
 
     fn toggle_play(&mut self) {
@@ -1147,9 +1169,7 @@ impl App {
         // frames a second with NTSC on and 60 without (the Mac's draw rates).
         if self.animate && self.video.is_none() {
             let interval = Duration::from_secs_f64(if self.ntsc { 1.0 / 30.0 } else { 1.0 / 60.0 });
-            // A snapshot due holds the frame still, so the one it waits for arrives.
-            let snapshot_due = self.snapshot.is_some() && self.snapshot_after.is_none_or(|(t, s)| t.elapsed().as_secs_f64() >= s);
-            if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval && !snapshot_due {
+            if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval && !self.snapshot_due() {
                 self.frame = self.frame.wrapping_add(1);
                 self.last_tick = Instant::now();
             }
@@ -1327,7 +1347,7 @@ impl eframe::App for App {
         self.advance_timeline(&ctx);
         // The receiver's wall clock while Live noise runs on a still (steps
         // capped, so a stall doesn't read as a jump and re-simulate).
-        let running = self.animate && self.video.is_none() && !self.timeline_open;
+        let running = self.animate && self.video.is_none() && !self.timeline_open && !self.snapshot_due();
         if running {
             if let Some(last) = self.animate_last {
                 self.animate_clock += last.elapsed().as_secs_f64().clamp(0.0, 0.1);
@@ -1361,11 +1381,32 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         self.export_window(&ctx);
+        if self.auto_screen_loop && self.original_size.is_some() && self.shown_seq != 0 {
+            self.auto_screen_loop = false;
+            // For the UI snapshot: the window inside the main one, where the
+            // screenshot sees it.
+            if self.snapshot.is_some() {
+                ctx.set_embed_viewports(true);
+            }
+            if let Some(p) = std::env::var_os("NTSCRT_SCREEN_LOOP_PRESET") {
+                self.load_screen_loop_preset(Path::new(&p));
+            }
+            self.open_screen_loop();
+        }
+        self.screen_loop_window(&ctx);
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 self.preset_menu(ui);
                 if ui.button("Export…").clicked() {
                     self.export_open = true;
+                }
+                let can = self.original_size.is_some() && !self.screen_loop.rendering();
+                if ui
+                    .add_enabled(can, egui::Button::new("Screen Loop"))
+                    .on_hover_text("Screen Loop: point a camcorder at the TV that's showing its own picture — video feedback, a tunnel of copies with your look on every pass")
+                    .clicked()
+                {
+                    self.open_screen_loop();
                 }
                 if ui.toggle_value(&mut self.timeline_open, "Animate").on_hover_text("Keyframe the whole look and export it as video.").changed() && self.timeline_open {
                     self.scrub(self.playhead);
@@ -1431,4 +1472,14 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("NTSCRT", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// Show a file in Explorer (Finder on the Mac).
+fn reveal(path: &Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = path;
 }

@@ -97,9 +97,10 @@ Done and checked against the Mac (each step committed; CI re-checks on every pus
 | Timeline (keyframes, easings, auto-key) | the Mac's TimelineEvaluator ported with tests |
 | Glitch (receiver simulation + GPU) | simulation bit-identical to the Mac's (plans, CI test); GPU output byte-identical on 12/13 cases (CI) |
 | Digital video (camera, DCT codec, Video 1, keyframed history, One field, formats) | codec bit-identical to the Mac's on 25 cases (resizing within 1–2 code values); all of DigitalVideoTests and Video1Tests ported; pipeline tests (One field, capture size, determinism); drawing the panel changes no value (test) |
+| Screen Loop (camera, ring, run-up, auto exposure, counter, pad, drafts, presets) | a still's GIF within a mean of 6/255 of the Mac's own render (frames 0–59; GIF palettes and 44 passes of feedback); pose, fixed point, run-up, presets and pad rules ported with tests; GPU tests (tunnel builds, determinism) |
 | Package (NTSCRT-windows-x64 artifact) | every CRT preset loads from the packaged shaders (CI) |
 
-Still to do: Screen Loop, render-ahead caching for smoother playback, real-hardware testing, signing and an installer.
+Still to do: render-ahead caching for smoother playback, real-hardware testing, signing and an installer.
 
 Found along the way:
 - The Mac release bundles `crt/` and `include/` but not `blurs/shaders/royale`, so CRT Royale can't load in the released Mac app (the Desktop dev build reads the repo's folder, which hides it). The Windows package includes the folder.
