@@ -67,7 +67,8 @@ jobs:
           # The Glitch stage against the Mac's (port/scripts/make-glitch-refs.sh).
           for ref in port/spike/ref-mac/glitch/*.png; do
             n=$(basename "$ref" .png); [ "$n" = in ] && continue
-            read -r time knobs < "port/spike/ref-mac/glitch/$n.args"
+            # (checked out with Windows line endings: drop the CR)
+            read -r time knobs < <(tr -d '\r' < "port/spike/ref-mac/glitch/$n.args")
             $bin/glitch-render port/spike/ref-mac/glitch/in.png "$time" "out/glitch-$n.png" $knobs > "out/glitch-$n.log" 2>&1 \
               || { echo "::error::glitch $n failed to render"; tail -5 "out/glitch-$n.log"; fail=1; continue; }
             printf '%-22s ' "glitch: $n"
