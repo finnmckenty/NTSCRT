@@ -5,9 +5,9 @@ name: Windows port
 
 on:
   push:
-    paths: ["port/**", "Vendor/**", ".github/workflows/windows-port.yml"]
+    paths: ["port/**", "Vendor/**", "presets/**", ".github/workflows/windows-port.yml"]
   pull_request:
-    paths: ["port/**", "Vendor/**", ".github/workflows/windows-port.yml"]
+    paths: ["port/**", "Vendor/**", "presets/**", ".github/workflows/windows-port.yml"]
   workflow_dispatch:
 
 jobs:
@@ -80,3 +80,32 @@ jobs:
         with:
           name: windows-spike-output
           path: out/
+      - name: Package
+        shell: bash
+        run: |
+          d=package/NTSCRT
+          mkdir -p "$d/shaders/blurs/shaders" "$d/presets" "$d/licenses"
+          cp port/target/release/ntscrt.exe "$d/"
+          # The shaders the seven CRT presets use: crt/ and include/ (as the
+          # Mac bundles), plus blurs/shaders/royale, which crt-royale needs.
+          cp -R Vendor/slang-shaders/crt Vendor/slang-shaders/include "$d/shaders/"
+          cp -R Vendor/slang-shaders/blurs/shaders/royale "$d/shaders/blurs/shaders/"
+          cp presets/*.json "$d/presets/"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$d/"
+          cp licenses/* port/licenses/rust-crates-windows.txt "$d/licenses/"
+          cp port/package-readme.txt "$d/README.txt"
+      - name: Check the package loads every CRT shader
+        shell: bash
+        env:
+          SPIKE_BACKEND: dx12
+        run: |
+          fail=0
+          for sh in crt-aperture crt-easymode crtglow_gauss crtglow_lanczos crt-hyllian crt-royale crtsim; do
+            port/target/release/ntscrt-spike TestAssets/testpattern.png "package/NTSCRT/shaders/crt/$sh.slangp" "out/pkg-$sh.png" 640 480 > "out/pkg-$sh.log" 2>&1 \
+              && echo "ok: $sh" || { echo "::error::$sh doesn't load from the package"; tail -3 "out/pkg-$sh.log"; fail=1; }
+          done
+          exit $fail
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NTSCRT-windows-x64
+          path: package/
