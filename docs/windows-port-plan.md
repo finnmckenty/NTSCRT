@@ -107,7 +107,7 @@ Playback:
 - Measured (M1 Max, native, 1920×1440): NTSC about 15 ms, upload 2, GPU and read back 5.5, so the CPU stages were most of a frame; now they overlap the rest. The Digital stage's Lanczos shrink went from 17 to 3.6 ms by reading rows in order (same bytes). In the VM a 1920×1440 clip without the cache went from about 12 to 15–28 frames a second, and Cheap camcorder from under 1 to 5 under the same heavy host load.
 - Compare while playing gets the original box-filtered to the display size on the GPU, not the whole frame each time.
 
-Still to do: real-hardware testing, signing and an installer.
+Users have run the preview on real Windows PCs (reported 2026-11-12; no hardware details yet). Still to do: signing and an installer, and speed measurements on real hardware.
 
 Found along the way:
 - The Mac release bundles `crt/` and `include/` but not `blurs/shaders/royale`, so CRT Royale can't load in the released Mac app (the Desktop dev build reads the repo's folder, which hides it). The Windows package includes the folder.
@@ -146,7 +146,7 @@ The order follows the signal chain. Each piece gets a golden-image test: the Swi
 - Code signing with **Azure Trusted Signing** (roughly $10 a month), to avoid Windows' "unknown publisher" warning.
 - A GitHub Actions release job that builds x64 and ARM64, signs, and attaches the files to the same GitHub release as the Mac DMG.
 - Bundle presets, shaders and license notices; the slang shaders are largely GPL, as on the Mac.
-- **Before the first release:** test on real Windows hardware, an NVIDIA and an Intel/AMD machine, for speed and driver bugs. Use a borrowed PC, a cheap mini PC, or an hourly cloud PC with a graphics card.
+- **Before the first release** (done by users since 0.22.0, without details): test on real Windows hardware, an NVIDIA and an Intel/AMD machine, for speed and driver bugs. Use a borrowed PC, a cheap mini PC, or an hourly cloud PC with a graphics card.
 
 ## Where each kind of test runs
 
