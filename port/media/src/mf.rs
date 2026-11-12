@@ -133,7 +133,10 @@ impl Reader {
                 return Ok(last.clone());
             }
         }
-        if self.next != Some(index) {
+        // A short way ahead, decoding on is cheaper than seeking back to a
+        // keyframe and decoding forward from there.
+        let ahead = self.next.is_some_and(|n| n <= index && index - n <= 12);
+        if !ahead {
             self.seek(index)?;
         }
         // Decode on until the frame at or past `index` (after a seek the

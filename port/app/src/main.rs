@@ -14,6 +14,7 @@ mod digital_panel;
 mod export;
 mod glitch_panel;
 mod ntsc_panel;
+mod prefetch;
 mod screen_loop;
 mod shader_panel;
 mod timeline_ui;
@@ -1199,6 +1200,7 @@ impl App {
                 frame: self.video_frame,
                 crop,
                 want_source: self.compare,
+                playing: self.playing.is_some(),
             });
             self.sent = Some(want);
         }

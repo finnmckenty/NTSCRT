@@ -10,7 +10,9 @@ use eframe::egui;
 use ntscrt_engine::crop::Crop;
 use ntscrt_engine::preview::PreviewPlan;
 use ntscrt_engine::{Engine, Image, Settings};
-use ntscrt_media::{VideoInfo, VideoReader};
+use ntscrt_media::VideoInfo;
+
+use crate::prefetch::Prefetch;
 
 pub enum Request {
     Still(Image),
@@ -25,6 +27,8 @@ pub enum Request {
         crop: Option<Crop>,
         /// Send the cropped picture back too (for Compare) when it changed.
         want_source: bool,
+        /// Playing: the newest decoded frame up to `frame` will do.
+        playing: bool,
     },
 }
 
@@ -36,7 +40,7 @@ pub enum Event {
 
 enum Media {
     Still(Image),
-    Video(VideoReader),
+    Video(Prefetch),
 }
 
 pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Context) {
@@ -77,7 +81,7 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                     (clip_path, clip, clip_crop) = (None, None, None);
                     (picture_key, sent_key) = (None, None);
                 }
-                Request::Video(path) => match VideoReader::open(&path) {
+                Request::Video(path) => match Prefetch::open(&path) {
                     Ok(reader) => {
                         send(Event::Opened(Ok(reader.info())));
                         media = Some(Media::Video(reader));
@@ -89,18 +93,32 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                 r @ Request::Render { .. } => render = Some(r),
             }
         }
-        let Some(Request::Render { seq, settings, plan, full, frame, crop, want_source }) = render else { continue };
+        let Some(Request::Render { seq, mut settings, plan, full, frame, crop, want_source, playing }) = render else { continue };
         let t = Instant::now();
         let result = (|| -> anyhow::Result<Image> {
-            let frame = if matches!(media, Some(Media::Video(_))) { frame } else { 0 };
             let decode_start = Instant::now();
+            // While playing, the newest frame decoded so far stands in (its
+            // own noise seed and Digital frame with it).
+            let mut frame = if matches!(media, Some(Media::Video(_))) { frame } else { 0 };
+            let mut decoded = None;
+            if let (Some(Media::Video(reader)), true) = (media.as_ref(), playing) {
+                let (got, img) = reader.frame_upto(frame)?;
+                if got != frame {
+                    settings.frame = got + 1;
+                    if let Some(d) = settings.digital.as_mut() {
+                        d.frame = got as i64;
+                    }
+                    frame = got;
+                }
+                decoded = Some(img);
+            }
             if picture_key != Some((frame, crop)) {
                 let pic = match media.as_mut() {
                     Some(Media::Still(img)) => img.clone(),
-                    Some(Media::Video(reader)) => {
-                        let f = reader.frame(frame)?;
-                        Image::new(f.width, f.height, f.rgba)
-                    }
+                    Some(Media::Video(reader)) => match decoded {
+                        Some(img) => img.as_ref().clone(),
+                        None => reader.frame(frame)?.as_ref().clone(),
+                    },
                     None => anyhow::bail!("nothing open"),
                 };
                 let pic = match crop {

@@ -100,7 +100,9 @@ Done and checked against the Mac (each step committed; CI re-checks on every pus
 | Screen Loop (camera, ring, run-up, auto exposure, counter, pad, drafts, presets) | a still's GIF within a mean of 6/255 of the Mac's own render (frames 0–59; GIF palettes and 44 passes of feedback); pose, fixed point, run-up, presets and pad rules ported with tests; GPU tests (tunnel builds, determinism) |
 | Package (NTSCRT-windows-x64 artifact) | every CRT preset loads from the packaged shaders (CI) |
 
-Still to do: render-ahead caching for smoother playback, real-hardware testing, signing and an installer.
+Playback decodes ahead on a thread of its own and shows the newest decoded frame while playing (in the VM, a 1920×1440 clip went from about 2 to 9 frames a second; ntsc-rs at full size is now the main cost there).
+
+Still to do: caching baked frames for replays (the Mac's ChainInputCache), real-hardware testing, signing and an installer.
 
 Found along the way:
 - The Mac release bundles `crt/` and `include/` but not `blurs/shaders/royale`, so CRT Royale can't load in the released Mac app (the Desktop dev build reads the repo's folder, which hides it). The Windows package includes the folder.
