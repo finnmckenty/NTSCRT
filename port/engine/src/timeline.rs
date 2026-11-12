@@ -181,8 +181,28 @@ impl Evaluator {
             .collect()
     }
 
-    /// The keys' stored Glitch and Digital values at `t` (held, not yet
-    /// interpolated: those stages aren't ported).
+    /// Glitch knobs at `t`: sliders interpolate, toggles hold until the
+    /// next key. Keys saved before the stage existed carry none.
+    pub fn glitch(&self, t: f64) -> Map<String, Value> {
+        let (a, b, u) = self.segment(t);
+        if u == 0.0 {
+            return a.glitch.clone();
+        }
+        a.glitch
+            .iter()
+            .map(|(id, va)| {
+                let toggle = crate::glitch::params::param(id).is_some_and(|p| p.is_toggle());
+                let v = match (va.as_f64(), b.glitch.get(id).and_then(Value::as_f64)) {
+                    (Some(x), Some(y)) if !toggle => Value::from(x + (y - x) * u),
+                    _ => va.clone(),
+                };
+                (id.clone(), v)
+            })
+            .collect()
+    }
+
+    /// The keys' stored Digital video values at `t` (held, not yet
+    /// interpolated: that stage isn't ported).
     pub fn first_key(&self) -> &Keyframe {
         &self.keys[0]
     }

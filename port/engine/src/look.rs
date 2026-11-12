@@ -29,6 +29,11 @@ pub struct Look {
     pub shader_preset: Option<String>,
     pub shader_params: HashMap<String, f32>,
     pub keys: Vec<Keyframe>,
+    /// The Glitch stage: on/off and knobs (missing knobs are healthy).
+    /// Looks from before the stage load it on and healthy, which renders
+    /// exactly as they always looked.
+    pub glitch_enabled: bool,
+    pub glitch_values: crate::glitch::GlitchSettings,
     pub timeline_enabled: Option<bool>,
     /// A still's animation length and frame rate.
     pub timeline_duration: Option<f64>,
@@ -36,29 +41,6 @@ pub struct Look {
     /// Only a crop that's on travels with a look (the Mac's rule); a look
     /// without one leaves the current crop alone.
     pub crop: Option<Crop>,
-}
-
-/// Glitch knobs that change the picture when moved off their healthy value
-/// (the Mac's `GlitchParam` defaults; the rest only matter once one of these
-/// has moved).
-const GLITCH_HEALTHY: [(&str, f64); 13] = [
-    ("signal_strength", 1.0),
-    ("vertical_hold", 0.0),
-    ("horizontal_hold", 0.0),
-    ("brightness", 0.0),
-    ("ghost_level", 0.0),
-    ("hum", 0.0),
-    ("head_switch", 0.0),
-    ("timebase_jitter", 0.0),
-    ("crinkle", 0.0),
-    ("head_clog", 0.0),
-    ("tracking", 0.0),
-    ("search_speed", 1.0),
-    ("dropouts", 0.0),
-];
-
-fn glitch_active(values: &Map<String, Value>) -> bool {
-    GLITCH_HEALTHY.iter().any(|(k, healthy)| values.get(*k).and_then(Value::as_f64).is_some_and(|v| (v - healthy).abs() > 1e-9))
 }
 
 fn floats(v: Option<&Value>) -> HashMap<String, f32> {
@@ -92,6 +74,12 @@ impl Look {
             look.shader_enabled = s.get("enabled").and_then(Value::as_bool);
             look.shader_preset = s.get("preset").and_then(Value::as_str).map(str::to_string);
             look.shader_params = floats(s.get("params"));
+        }
+        look.glitch_enabled = true;
+        if let Some(g) = raw.get("glitch").and_then(Value::as_object) {
+            let values = object(g.get("values"));
+            look.glitch_values = crate::glitch::GlitchSettings::from_values(values.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k, f))));
+            look.glitch_enabled = g.get("enabled").and_then(Value::as_bool).unwrap_or(true);
         }
         if let Some(t) = raw.get("timeline").and_then(Value::as_object) {
             look.timeline_enabled = t.get("enabled").and_then(Value::as_bool);
@@ -135,12 +123,6 @@ impl Look {
     pub fn unported(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         let section = |k: &str| self.raw.get(k).and_then(Value::as_object);
-        let glitch_on = section("glitch").is_some_and(|g| g.get("enabled").and_then(Value::as_bool).unwrap_or(true));
-        let glitch_moved = section("glitch").is_some_and(|g| glitch_active(&object(g.get("values"))))
-            || self.keys.iter().any(|k| glitch_active(&k.glitch));
-        if glitch_on && glitch_moved {
-            out.push("Glitch");
-        }
         if section("digital").is_some_and(|d| d.get("enabled").and_then(Value::as_bool).unwrap_or(false)) {
             out.push("Digital video");
         }
@@ -187,6 +169,8 @@ impl Look {
             downscale,
             shader,
             frame,
+            // The receiver at time zero (a look's first moment).
+            glitch: self.glitch_enabled.then(|| crate::glitch::GlitchFrame { settings: self.glitch_values.clone(), time: 0.0, history: None }),
         })
     }
 }
@@ -204,6 +188,7 @@ pub struct LookState<'a> {
     pub shader_params: &'a HashMap<String, f32>,
     pub crop: Option<Crop>,
     pub timeline: Option<TimelineState<'a>>,
+    pub glitch: Option<(bool, &'a crate::glitch::GlitchSettings)>,
 }
 
 pub struct TimelineState<'a> {
@@ -232,6 +217,9 @@ pub fn write_look(base: Option<&Map<String, Value>>, s: &LookState) -> String {
     look.insert("ntsc".into(), serde_json::json!({ "enabled": s.ntsc_enabled, "settings": s.ntsc_settings }));
     let params: Map<String, Value> = s.shader_params.iter().map(|(k, v)| (k.clone(), Value::from(*v as f64))).collect();
     look.insert("shader".into(), serde_json::json!({ "enabled": s.shader_enabled, "preset": s.shader_preset, "params": params }));
+    if let Some((enabled, g)) = s.glitch {
+        look.insert("glitch".into(), serde_json::json!({ "enabled": enabled, "values": g.values }));
+    }
     if let Some(t) = &s.timeline {
         let keys: Vec<Value> = t
             .keys
@@ -281,7 +269,7 @@ mod tests {
             "downscale":{"enabled":true,"width":256,"method":"lanczos"},"ntsc":{"enabled":false,"settings":{"luma_smear":0.5}},
             "shader":{"enabled":true,"preset":"royale","params":{"x":1}}}"#;
         let look = Look::parse(json).unwrap();
-        assert_eq!(look.unported(), vec!["Glitch", "Digital video"]);
+        assert_eq!(look.unported(), vec!["Digital video"]);
         assert_eq!(look.crop, Some(Crop::new(Ratio::SQUARE)));
         assert_eq!(look.downscale_method, Some(DownscaleMethod::Lanczos));
         let ntsc = look.ntsc_settings.clone().unwrap();
@@ -300,6 +288,7 @@ mod tests {
                 shader_params: &params,
                 crop: Some(Crop { x: 0.25, ..Crop::new(Ratio::new(9, 16)) }),
                 timeline: None,
+                glitch: None,
             },
         );
         let back = Look::parse(&out).unwrap();
@@ -338,6 +327,7 @@ mod timeline_tests {
                 shader_params: &params,
                 crop: None,
                 timeline: Some(TimelineState { enabled: true, duration: 5.0, fps: 30, keys: &look.keys }),
+                glitch: None,
             },
         );
         let back = Look::parse(&out).unwrap();

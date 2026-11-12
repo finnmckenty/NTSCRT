@@ -76,6 +76,11 @@ impl App {
         if !ntsc.is_empty() {
             self.ntsc_values = ntsc;
         }
+        for (k, v) in ev.glitch(self.playhead) {
+            if let Some(f) = v.as_f64() {
+                self.glitch_values.values.insert(k, f);
+            }
+        }
     }
 
     /// Keep the playhead on the clip's frame (playback, the scrubber).
@@ -100,7 +105,7 @@ impl App {
             easing: Easing::Linear,
             shader: self.shader_values.get(&self.shader).cloned().unwrap_or_default(),
             ntsc: self.ntsc_values.clone(),
-            glitch: section("glitch"),
+            glitch: self.glitch_values.values.iter().map(|(k, v)| (k.clone(), Value::from(*v))).collect(),
             digital: section("digital"),
         }
     }

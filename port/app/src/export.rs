@@ -71,8 +71,23 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
     }
     let info = reader.as_ref().map(|r| r.info());
     let evaluator = job.timeline.as_ref().and_then(|(keys, meta, ntsc)| Evaluator::new(keys, meta.clone(), ntsc));
-    // The animation's values at `t` (0…1) over the look's.
-    let animate = |s: &mut Settings, t: f64| {
+    // The glitch knobs as set (keys interpolate over them).
+    let glitch_base = job.settings.glitch.as_ref().map(|g| g.settings.clone());
+    // The animation's values at `t` (0…1) over the look's, and the receiver
+    // at `seconds` (exports run their own receiver from zero, frame by frame).
+    let animate = |s: &mut Settings, t: f64, seconds: f64| {
+        if let (Some(g), Some(base)) = (s.glitch.as_mut(), &glitch_base) {
+            g.time = seconds;
+            g.history = None;
+            g.settings = base.clone();
+            if let Some(ev) = &evaluator {
+                for (k, v) in ev.glitch(t) {
+                    if let Some(f) = v.as_f64() {
+                        g.settings.values.insert(k, f);
+                    }
+                }
+            }
+        }
         let Some(ev) = &evaluator else { return };
         if let Some(shader) = s.shader.as_mut() {
             let mut values: HashMap<String, f32> = shader.params.iter().cloned().collect();
@@ -118,7 +133,8 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
         Format::Png => {
             let seed = if info.is_some() { job.png_frame + 1 } else { job.png_frame };
             let mut s = picture(&mut engine, job.png_frame, seed)?;
-            animate(&mut s, job.png_t);
+            let seconds = s.glitch.as_ref().map_or(0.0, |g| g.time);
+            animate(&mut s, job.png_t, seconds);
             let img = engine.render_export(&s, job.size)?;
             image::RgbaImage::from_raw(img.width, img.height, img.rgba).context("image")?.save(&job.path)?;
             progress.done.store(1000, Ordering::Relaxed);
@@ -138,7 +154,7 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
                 let clip_frame = i % frames;
                 // Each pass renders the same frames again (seeded alike).
                 let mut s = picture(&mut engine, clip_frame, clip_frame + 1)?;
-                animate(&mut s, clip_frame as f64 / frames.saturating_sub(1).max(1) as f64);
+                animate(&mut s, clip_frame as f64 / frames.saturating_sub(1).max(1) as f64, i as f64 * fps.1 as f64 / fps.0 as f64);
                 let img = engine.render_export(&s, job.size)?;
                 writer.write(&img.rgba)?;
                 tick(i, total)?;
@@ -167,7 +183,11 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
                 let f = clip_frame(i);
                 let seed = if info.is_some() { f + 1 } else { i + 1 };
                 let mut s = picture(&mut engine, f, seed)?;
-                animate(&mut s, i as f64 / frames.saturating_sub(1).max(1) as f64);
+                let seconds = match info {
+                    Some(v) => f as f64 / v.fps.max(1.0),
+                    None => i as f64 / gif_fps,
+                };
+                animate(&mut s, i as f64 / frames.saturating_sub(1).max(1) as f64, seconds);
                 let mut img = engine.render_export(&s, job.size)?;
                 let mut frame = gif::Frame::from_rgba_speed(w, h, &mut img.rgba, 10);
                 frame.delay = delay;

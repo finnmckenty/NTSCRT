@@ -8,6 +8,7 @@
 
 pub mod crop;
 pub mod export;
+pub mod glitch;
 mod look;
 mod ntsc_ui;
 pub mod preview;
@@ -139,6 +140,8 @@ pub struct Settings {
     pub shader: Option<ShaderSpec>,
     /// Seeds the NTSC noise and is the shader's frame count.
     pub frame: usize,
+    /// The Glitch stage (between the downscale and the CRT), when on.
+    pub glitch: Option<glitch::GlitchFrame>,
 }
 
 /// A shader parameter as the preset declares it.
@@ -209,6 +212,8 @@ pub struct Engine {
     nearest: wgpu::ComputePipeline,
     area: wgpu::ComputePipeline,
     separable: wgpu::ComputePipeline,
+    glitch_gpu: glitch::stage::Gpu,
+    glitch: glitch::stage::Renderer,
     source: Option<(u64, Image)>,
     next_source: u64,
     prepared: Option<Prepared>,
@@ -271,6 +276,7 @@ impl Engine {
         };
         let (nearest, area, separable) =
             (pipeline("downscale_nearest"), pipeline("downscale_area"), pipeline("downscale_separable"));
+        let glitch_gpu = glitch::stage::Gpu::new(&device);
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -278,6 +284,8 @@ impl Engine {
             nearest,
             area,
             separable,
+            glitch_gpu,
+            glitch: glitch::stage::Renderer::default(),
             source: None,
             next_source: 1,
             prepared: None,
@@ -309,6 +317,7 @@ impl Engine {
             Some(spec) => self.downscale(&mut enc, &input, spec),
             None => input,
         };
+        let chain_input = self.apply_glitch(&mut enc, chain_input, settings);
         let Some(shader) = &settings.shader else {
             return self.read_back(enc, &chain_input);
         };
@@ -346,6 +355,7 @@ impl Engine {
             Some(spec) => self.downscale(&mut enc, &input, spec),
             None => input,
         };
+        let chain_input = self.apply_glitch(&mut enc, chain_input, settings);
         let size = (plan.render_width.max(1), plan.render_height.max(1));
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::STORAGE_BINDING
@@ -398,6 +408,7 @@ impl Engine {
             Some(spec) => self.downscale(&mut enc, &input, spec),
             None => input,
         };
+        let chain_input = self.apply_glitch(&mut enc, chain_input, settings);
         let (iw, ih) = (chain_input.width(), chain_input.height());
         let render_size = match &settings.shader {
             Some(_) => {
@@ -526,6 +537,22 @@ impl Engine {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.dispatch_workgroups(grid.0.div_ceil(8), grid.1.div_ceil(8), 1);
+    }
+
+    /// The Glitch stage over the chain input, when on: what the simulated TV
+    /// shows of it at this moment.
+    fn apply_glitch(&mut self, enc: &mut wgpu::CommandEncoder, chain_input: wgpu::Texture, settings: &Settings) -> wgpu::Texture {
+        let Some(frame) = &settings.glitch else { return chain_input };
+        let (w, h) = (chain_input.width(), chain_input.height());
+        let plan = self.glitch.plan(glitch::receiver::Raster::new(w as usize, h as usize), frame);
+        let out = texture(
+            &self.device,
+            (w, h),
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            "glitch",
+        );
+        self.glitch_gpu.encode(&self.device, &self.queue, enc, &chain_input, &out, &plan);
+        out
     }
 
     fn load_chain(&mut self, shader: &ShaderSpec) -> Result<()> {

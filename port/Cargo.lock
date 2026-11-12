@@ -2379,6 +2379,8 @@ name = "ntscrt-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "libm",
  "librashader",
  "ntsc-rs",
  "pollster 0.4.0",

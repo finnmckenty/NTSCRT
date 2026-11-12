@@ -82,6 +82,7 @@ fn main() -> Result<()> {
         downscale,
         shader: Some(ShaderSpec { preset: pos[1].clone().into(), params }),
         frame,
+        glitch: None,
     };
     let mut result = engine.render(&settings, out)?;
 

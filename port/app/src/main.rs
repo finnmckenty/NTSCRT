@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod export;
+mod glitch_panel;
 mod ntsc_panel;
 mod shader_panel;
 mod timeline_ui;
@@ -54,6 +55,13 @@ struct App {
     ntsc: bool,
     ntsc_settings: Vec<NtscSetting>,
     ntsc_values: Map<String, Value>,
+    /// The Glitch stage (on by default, healthy: no effect until a knob turns).
+    glitch_enabled: bool,
+    glitch_values: ntscrt_engine::glitch::GlitchSettings,
+    /// The receiver's clock on a still without a timeline: wall-clock time
+    /// while Live noise runs (the Mac's animateClock).
+    animate_clock: f64,
+    animate_last: Option<Instant>,
     crt: bool,
     shader: usize,
     /// Each shader's parameters (as its preset declares them), loaded on first use.
@@ -157,6 +165,10 @@ impl App {
             ntsc: true,
             ntsc_settings: ntsc_settings(),
             ntsc_values: ntsc_default_values(),
+            glitch_enabled: true,
+            glitch_values: ntscrt_engine::glitch::GlitchSettings::default(),
+            animate_clock: 0.0,
+            animate_last: None,
             crt: true,
             shader_params: HashMap::new(),
             shader_values: HashMap::new(),
@@ -372,6 +384,8 @@ impl App {
             }
         }
         if let Some(v) = look.shader_enabled { self.crt = v }
+        self.glitch_enabled = look.glitch_enabled;
+        self.glitch_values = look.glitch_values.clone();
         if let Some(d) = look.timeline_duration { self.timeline_seconds = d }
         if let Some(f) = look.timeline_fps { self.timeline_fps = f }
         if look.raw.contains_key("timeline") {
@@ -408,6 +422,7 @@ impl App {
                 shader_preset: CRT_SHADERS[self.shader].0,
                 shader_params: self.shader_values.get(&self.shader).unwrap_or(&empty),
                 crop: self.crop_enabled.then_some(self.crop),
+                glitch: Some((self.glitch_enabled, &self.glitch_values)),
                 timeline: Some(ntscrt_engine::TimelineState {
                     enabled: self.timeline_open,
                     duration: self.timeline_seconds,
@@ -485,6 +500,61 @@ impl App {
         Some(if self.downscale { DownscaleSpec::for_width(self.downscale_width, (*w, *h), self.method).height } else { *h })
     }
 
+    /// The receiver's clock for the frame on screen: a clip's own time, the
+    /// timeline's frame on a still, else wall-clock time while Live noise
+    /// runs (the Mac's glitchTime).
+    fn glitch_time(&self) -> f64 {
+        if let Some(v) = self.video {
+            return self.video_frame as f64 / v.fps.max(1.0);
+        }
+        if self.timeline_open {
+            let frame = (self.playhead * self.timeline_frames().saturating_sub(1).max(1) as f64).round();
+            return frame / self.timeline_fps.max(1) as f64;
+        }
+        self.animate_clock
+    }
+
+    /// How the knobs vary over the timeline, so a jump re-simulates the
+    /// history an export would run through (None without keyframes).
+    fn glitch_history(&self) -> Option<ntscrt_engine::glitch::GlitchHistory> {
+        if !self.timeline_open || self.keys.is_empty() {
+            return None;
+        }
+        let ev = Arc::new(ntscrt_engine::timeline::Evaluator::new(&self.keys, HashMap::new(), &self.ntsc_settings)?);
+        let fps = self.video.map_or(self.timeline_fps as f64, |v| v.fps).max(1.0);
+        let total = self.timeline_frames();
+        let base = self.glitch_values.clone();
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for k in &self.keys {
+            k.t.to_bits().hash(&mut hasher);
+            for (n, v) in &k.glitch {
+                n.hash(&mut hasher);
+                v.to_string().hash(&mut hasher);
+            }
+        }
+        total.hash(&mut hasher);
+        for (n, v) in &base.values {
+            n.hash(&mut hasher);
+            v.to_bits().hash(&mut hasher);
+        }
+        Some(ntscrt_engine::glitch::GlitchHistory {
+            frame_duration: 1.0 / fps,
+            id: hasher.finish(),
+            settings_at: Arc::new(move |t| {
+                let frame = (t * fps).round();
+                let nt = if total > 1 { (frame / (total - 1) as f64).clamp(0.0, 1.0) } else { 0.0 };
+                let mut s = base.clone();
+                for (k, v) in ev.glitch(nt) {
+                    if let Some(f) = v.as_f64() {
+                        s.values.insert(k, f);
+                    }
+                }
+                s
+            }),
+        })
+    }
+
     fn settings(&self, source: (u32, u32)) -> Settings {
         let shader = match (&self.shaders, self.crt) {
             (Some(root), true) => {
@@ -503,6 +573,11 @@ impl App {
             // A clip's noise is seeded by its frame number + 1, as the Mac's
             // video export and PNG do; a still's by the Animate counter.
             frame: if self.video.is_some() { self.video_frame + 1 } else { self.frame },
+            glitch: self.glitch_enabled.then(|| ntscrt_engine::glitch::GlitchFrame {
+                settings: self.glitch_values.clone(),
+                time: self.glitch_time(),
+                history: self.glitch_history(),
+            }),
         }
     }
 
@@ -590,6 +665,20 @@ impl App {
             egui::CollapsingHeader::new("Settings").id_salt("ntsc-settings").default_open(true).show(ui, |ui| {
                 ntsc_panel::controls(ui, &self.ntsc_settings, &mut self.ntsc_values);
             });
+        });
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.glitch_enabled, egui::RichText::new("Glitch").heading())
+                .on_hover_text("A simulated TV and VCR, for dramatic failures: rolling, tearing, bending, snow, tracking noise. With every knob healthy the picture is untouched.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("Every knob back to healthy").clicked() {
+                    self.glitch_values = ntscrt_engine::glitch::GlitchSettings::default();
+                }
+            });
+        });
+        ui.add_enabled_ui(self.glitch_enabled, |ui| {
+            glitch_panel::controls(ui, &mut self.glitch_values);
         });
         ui.separator();
 
@@ -1090,6 +1179,17 @@ impl eframe::App for App {
             }
         }
         self.advance_timeline(&ctx);
+        // The receiver's wall clock while Live noise runs on a still (steps
+        // capped, so a stall doesn't read as a jump and re-simulate).
+        let running = self.animate && self.video.is_none() && !self.timeline_open;
+        if running {
+            if let Some(last) = self.animate_last {
+                self.animate_clock += last.elapsed().as_secs_f64().clamp(0.0, 0.1);
+            }
+            self.animate_last = Some(Instant::now());
+        } else {
+            self.animate_last = None;
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty()));
         if let Some(p) = dropped {
             self.open(&p);
@@ -1137,9 +1237,9 @@ impl eframe::App for App {
         });
         // Editing while parked on a keyframe updates it: compare the values
         // before and after the panels are drawn.
-        let before = (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone());
+        let before = (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone());
         egui::Panel::left("sidebar").resizable(false).exact_size(SIDEBAR_WIDTH).show(ui, |ui| self.sidebar(ui));
-        if (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone()) != before {
+        if (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone()) != before {
             self.auto_key();
         }
         if self.timeline_open {

@@ -64,6 +64,15 @@ jobs:
             printf '%-22s ' "look: $n"
             $bin/compare "$ref" "out/look-$n.png" || { echo "::error::look $n differs from the Mac reference"; fail=1; }
           done
+          # The Glitch stage against the Mac's (port/scripts/make-glitch-refs.sh).
+          for ref in port/spike/ref-mac/glitch/*.png; do
+            n=$(basename "$ref" .png); [ "$n" = in ] && continue
+            read -r time knobs < "port/spike/ref-mac/glitch/$n.args"
+            $bin/glitch-render port/spike/ref-mac/glitch/in.png "$time" "out/glitch-$n.png" $knobs > "out/glitch-$n.log" 2>&1 \
+              || { echo "::error::glitch $n failed to render"; tail -5 "out/glitch-$n.log"; fail=1; continue; }
+            printf '%-22s ' "glitch: $n"
+            COMPARE_BORDER=0 $bin/compare "$ref" "out/glitch-$n.png" || { echo "::error::glitch $n differs from the Mac reference"; fail=1; }
+          done
           grep -h adapter out/crt-aperture-plain.log
           exit $fail
       - uses: actions/upload-artifact@v4
