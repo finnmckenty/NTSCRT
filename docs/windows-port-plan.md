@@ -12,14 +12,14 @@ Started 2026-11-11.
 - Everything else (codec, Glitch receiver, Screen Loop, timeline, presets) is ordinary math and logic: it gets translated, not redesigned.
 - ntsc-rs's own desktop app runs on Windows, built with **eframe/egui** and GStreamer. It's a useful reference for the toolchain.
 
-## Decisions (recommended; confirm before Phase 2)
+## Decisions (confirmed by Finn, 2026-11-11)
 
 | | Recommendation | Why |
 |---|---|---|
-| Architecture | **Shared Rust core** (`core/` in this repo) with a Windows app on top. The Mac app stays Swift and untouched during the port, and can move onto the core later. | One engine instead of two forever; ntsc-rs and librashader are Rust already. |
-| GPU | **wgpu**: Metal on the Mac, D3D12/Vulkan on real PCs | One codebase; librashader has a wgpu runtime; the core can be built and checked on the Mac first. |
-| Windows interface | **egui (eframe)** | Fast to build; ntsc-rs proves it with the same libraries; the panels are mostly parameter lists, which egui does well. Less native-looking than WinUI. |
-| Video in/out | **Media Foundation** (Windows' own) | Hardware H.264/HEVC decode and encode with no licensing burden. ProRes has no Windows encoder: leave it out of Windows v1, or add FFmpeg later (LGPL, dynamic only). |
+| Architecture | **A Rust engine with the Windows app on top, in `port/`.** The Mac app — code, interface, build, releases — stays exactly as it is; it is the priority and is not touched for the port. New features get built twice (Swift for the Mac, Rust for Windows), kept in line by golden-image tests. | ntsc-rs and librashader are Rust already. |
+| GPU | **wgpu**: D3D12/Vulkan on real PCs, GL in the VM (Metal when the Rust code runs on the Mac for testing) | librashader has a wgpu runtime; the engine can be built and checked on the Mac first. |
+| Windows interface | **egui (eframe)** — confirmed | Fast to build; ntsc-rs proves it with the same libraries; the panels are mostly parameter lists, which egui does well. Less native-looking than WinUI. |
+| Video in/out | **Media Foundation** (Windows' own) | Hardware H.264/HEVC decode and encode with no licensing burden. **No ProRes on Windows** (Finn: not needed). |
 | GIF | A Rust GIF encoder with an MIT/BSD quantizer | Avoid `imagequant`/gifski, which are GPL/AGPL. |
 | Targets | **x64** first (most users), plus native **ARM64** (the VM, Snapdragon laptops) | The VM runs both: ARM64 natively, x64 under emulation. |
 | Looks | The **same JSON** as the Mac app | Looks and presets move between platforms. |
@@ -123,8 +123,8 @@ The order follows the signal chain. Each piece gets a golden-image test: the Swi
 | GitHub Actions windows-latest | D3D12 WARP | Unit and golden tests on every push |
 | Real PC | NVIDIA / Intel / AMD | Speed and drivers, before each release |
 
-## Open questions for Finn
+## Settled questions
 
-1. Is egui's look acceptable? It's clean but not native Windows.
-2. Is it OK for Windows v1 to ship without ProRes export?
-3. Once the core exists, should the Mac app eventually move onto it, or stay Swift indefinitely?
+- egui's look: yes.
+- ProRes on Windows: not needed.
+- The Mac app moving onto the Rust engine: no — the Mac app isn't touched.
