@@ -241,6 +241,43 @@ impl DigitalVideoRenderer {
         source_fps: f64,
         settings: &DigitalSettings,
         history: Option<&DigitalHistory>,
+        earlier: Option<&mut FrameVisitor<'_>>,
+    ) {
+        self.run_frame(n, pixels, width, height, row_bytes, capture_size, source_fps, settings, history, earlier);
+        Self::upscale(&self.shown, capture_size, pixels, width, height, row_bytes);
+    }
+
+    /// `process` for a frame that won't be seen: the codec takes it (so the
+    /// next frames come out right) but `pixels` is left as it was.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_unseen(
+        &mut self,
+        n: i64,
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        row_bytes: usize,
+        capture_size: (usize, usize),
+        source_fps: f64,
+        settings: &DigitalSettings,
+        history: Option<&DigitalHistory>,
+        earlier: Option<&mut FrameVisitor<'_>>,
+    ) {
+        self.run_frame(n, pixels, width, height, row_bytes, capture_size, source_fps, settings, history, earlier);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_frame(
+        &mut self,
+        n: i64,
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        row_bytes: usize,
+        capture_size: (usize, usize),
+        source_fps: f64,
+        settings: &DigitalSettings,
+        history: Option<&DigitalHistory>,
         mut earlier: Option<&mut FrameVisitor<'_>>,
     ) {
         let structure = settings;
@@ -287,8 +324,6 @@ impl DigitalVideoRenderer {
             self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
         }
         self.last_settings = Some(now);
-
-        Self::upscale(&self.shown, capture_size, pixels, width, height, row_bytes);
     }
 
     // MARK: - running the stream

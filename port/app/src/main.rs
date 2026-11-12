@@ -16,6 +16,7 @@ mod frame_cache;
 mod glitch_panel;
 mod ntsc_panel;
 mod prefetch;
+mod producer;
 mod screen_loop;
 mod shader_panel;
 mod timeline_ui;
@@ -40,6 +41,11 @@ use ntscrt_engine::crop::{Crop, Ratio};
 use ntscrt_engine::preview::{self, PreviewPlan};
 
 const SIDEBAR_WIDTH: f32 = 330.0;
+
+/// How far from the compare line (points) a press still takes hold of it.
+const COMPARE_GRAB: f32 = 12.0;
+/// The compare line's grip, a pill at mid-height.
+const COMPARE_GRIP: egui::Vec2 = egui::vec2(18.0, 30.0);
 
 /// The sidebar sections' open/closed state, starting as the Mac's do: Crop
 /// closed, Digital video closed until it's turned on, the rest open.
@@ -152,6 +158,9 @@ struct App {
     sent: Option<(Settings, PreviewPlan, bool, usize, Option<Crop>, bool)>,
     texture: Option<egui::TextureHandle>,
     shown_seq: u64,
+    /// NTSCRT_PROFILE=1: frames shown, and where their time went, each second.
+    profile: Option<Profile>,
+    sent_at: Instant,
     status: String,
     error: Option<String>,
 
@@ -255,6 +264,8 @@ impl App {
             sent: None,
             texture: None,
             shown_seq: 0,
+            profile: std::env::var_os("NTSCRT_PROFILE").map(|_| Profile::new()),
+            sent_at: Instant::now(),
             status: String::new(),
             error: None,
             export_open: false,
@@ -1290,11 +1301,13 @@ impl App {
         );
         let zoomed = self.zoom > 1.001;
 
-        // Animate: the frame advances once the last one is on screen, at 30
-        // frames a second with NTSC on and 60 without (the Mac's draw rates).
+        // Animate: the frame advances at 30 frames a second with NTSC on and
+        // 60 without (the Mac's draw rates), as fast as rendering keeps up.
         if self.animate && self.video.is_none() {
             let interval = Duration::from_secs_f64(if self.ntsc { 1.0 / 30.0 } else { 1.0 / 60.0 });
-            if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval && !self.snapshot_due() {
+            // One frame may wait behind the one rendering, so the render
+            // thread never sits idle waiting for the window.
+            if self.seq <= self.shown_seq + 1 && self.last_tick.elapsed() >= interval && !self.snapshot_due() {
                 self.frame = self.frame.wrapping_add(1);
                 self.last_tick = Instant::now();
             }
@@ -1312,8 +1325,10 @@ impl App {
         let settings = self.settings((w, h));
         let crop = self.crop_enabled.then_some(self.crop);
         let want = (settings, plan, zoomed, self.video_frame, crop, self.compare);
-        // While playing, ask for the next frame once the last is on screen.
-        let ready = self.playing.is_none() || self.shown_seq == self.seq;
+        // While playing, ask for the next frame while the last is still on
+        // its way (one waiting behind the one being rendered), so the
+        // render thread never sits idle waiting for the window.
+        let ready = self.playing.is_none() || self.seq <= self.shown_seq + 1;
         if self.sent.as_ref() != Some(&want) && ready {
             self.seq += 1;
             let _ = self.requests.send(Request::Render {
@@ -1327,6 +1342,7 @@ impl App {
                 playing: self.playing.is_some(),
             });
             self.sent = Some(want);
+            self.sent_at = Instant::now();
         }
 
         // What part of the picture is shown: all of it, or zoomed and panned.
@@ -1353,23 +1369,54 @@ impl App {
                 let right = egui::Rect::from_min_max(egui::pos2(x, target.top()), target.max);
                 painter.with_clip_rect(right).image(tex.id(), target, uv, egui::Color32::WHITE);
             }
-            painter.line_segment([egui::pos2(x, target.top()), egui::pos2(x, target.bottom())], egui::Stroke::new(1.0, egui::Color32::WHITE));
         }
 
         // Interaction: drag the compare line, drag to pan when zoomed,
         // Alt/Ctrl-scroll or pinch to zoom, double-click to fit.
         let response = ui.interact(avail, ui.scope_id().with("preview"), egui::Sense::click_and_drag());
+        // The line takes a press anywhere within COMPARE_GRAB of it, or on
+        // its grip; judged where the press began (a drag only starts once
+        // the pointer has moved, by which time it may have left the line).
+        let line_x = target.left() + self.compare_x * target.width();
+        let grip = egui::Rect::from_center_size(egui::pos2(line_x, target.center().y), egui::vec2(COMPARE_GRIP.x + 8.0, COMPARE_GRIP.y + 8.0));
+        let on_line = |p: egui::Pos2| (p.x - line_x).abs() <= COMPARE_GRAB && p.y >= target.top() - COMPARE_GRAB && p.y <= target.bottom() + COMPARE_GRAB || grip.contains(p);
+        let hovering_line = self.compare && response.hover_pos().is_some_and(on_line);
+        if self.compare {
+            let x = line_x;
+            let lit = hovering_line || self.dragging_compare;
+            let shadow = egui::Color32::from_black_alpha(110);
+            painter.line_segment([egui::pos2(x, target.top()), egui::pos2(x, target.bottom())], egui::Stroke::new(3.0, shadow));
+            painter.line_segment([egui::pos2(x, target.top()), egui::pos2(x, target.bottom())], egui::Stroke::new(if lit { 2.0 } else { 1.0 }, egui::Color32::WHITE));
+            // The grip: a pill with arrows, on the line at mid-height.
+            let pill = egui::Rect::from_center_size(egui::pos2(x, target.center().y), COMPARE_GRIP);
+            let fill = if lit { egui::Color32::WHITE } else { egui::Color32::from_gray(235) };
+            painter.rect_filled(pill.expand(1.0), COMPARE_GRIP.x / 2.0 + 1.0, shadow);
+            painter.rect_filled(pill, COMPARE_GRIP.x / 2.0, fill);
+            let ink = egui::Color32::from_gray(40);
+            let c = pill.center();
+            for dir in [-1.0f32, 1.0] {
+                let tip = egui::pos2(c.x + dir * 6.0, c.y);
+                let back = c.x + dir * 2.0;
+                painter.add(egui::Shape::convex_polygon(vec![tip, egui::pos2(back, c.y - 4.0), egui::pos2(back, c.y + 4.0)], ink, egui::Stroke::NONE));
+            }
+        }
+        if self.compare && (hovering_line || self.dragging_compare) {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+
         if response.drag_started() {
-            if let Some(p) = response.interact_pointer_pos() {
-                let x = target.left() + self.compare_x * target.width();
-                self.dragging_compare = self.compare && (p.x - x).abs() < 8.0;
+            let origin = ctx.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
+            if let Some(p) = origin {
+                self.dragging_compare = self.compare && on_line(p);
                 self.crop_drag = Some((self.crop, p));
             }
         }
         if response.dragged() {
             if self.dragging_compare {
                 if let Some(p) = response.interact_pointer_pos() {
-                    self.compare_x = ((p.x - target.left()) / target.width()).clamp(0.0, 1.0);
+                    // A few points inside the edges, so it can always be grabbed again.
+                    let m = (3.0 / target.width().max(1.0)).min(0.5);
+                    self.compare_x = ((p.x - target.left()) / target.width()).clamp(m, 1.0 - m);
                 }
             } else if self.crop_enabled && !zoomed {
                 // Drag the picture to move the crop: the picture follows the hand.
@@ -1410,6 +1457,9 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(p) = &mut self.profile {
+            p.painted();
+        }
         let events: Vec<Event> = self.events.try_iter().collect();
         for e in events {
             let (seq, result, millis) = match e {
@@ -1440,8 +1490,20 @@ impl eframe::App for App {
                 }
                 Event::Rendered { seq, result, millis, source } => {
                     if let Some(src) = source {
+                        // While a clip plays this is every frame: refill the
+                        // texture rather than make a new one, and a clip's
+                        // frames are opaque, so they need no premultiplying.
+                        let size = [src.width as usize, src.height as usize];
+                        let color = if self.video.is_some() {
+                            egui::ColorImage::from_rgba_premultiplied(size, &src.rgba)
+                        } else {
+                            egui::ColorImage::from_rgba_unmultiplied(size, &src.rgba)
+                        };
+                        match &mut self.source_texture {
+                            Some(t) => t.set(color, egui::TextureOptions::LINEAR),
+                            None => self.source_texture = Some(ctx.load_texture("original", color, egui::TextureOptions::LINEAR)),
+                        }
                         self.source_pixels = Some(src);
-                        self.source_texture = None;
                     }
                     (seq, result, millis)
                 }
@@ -1449,16 +1511,24 @@ impl eframe::App for App {
             let r = Rendered { seq, result, millis };
             match r.result {
                 Ok(img) => {
+                    let upload = Instant::now();
                     let color = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba);
                     match &mut self.texture {
                         Some(t) => t.set(color, egui::TextureOptions::NEAREST),
                         None => self.texture = Some(ctx.load_texture("preview", color, egui::TextureOptions::NEAREST)),
                     }
+                    if let Some(p) = &mut self.profile {
+                        p.shown(r.millis as f64, upload.elapsed().as_secs_f64() * 1000.0, self.sent_at.elapsed().as_secs_f64() * 1000.0);
+                    }
                     self.shown_seq = r.seq;
                     self.status = format!("{} × {}, rendered in {} ms", img.width, img.height, r.millis);
                     self.error = None;
                 }
-                Err(e) => self.error = Some(e),
+                Err(e) => {
+                    self.error = Some(e);
+                    // Answered all the same: playback asks for the next.
+                    self.shown_seq = r.seq;
+                }
             }
         }
         // The picture's size follows the crop.
@@ -1578,13 +1648,15 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(13, 13, 15)))
             .show(ui, |ui| self.preview(ui));
 
-        // NTSCRT_UI_SNAPSHOT: screenshot once the latest request is on screen.
+        // NTSCRT_UI_SNAPSHOT: screenshot once the latest request is on screen
+        // (while playing, there's always one more on its way).
         if let Some(path) = self.snapshot.clone() {
             let waited = self.snapshot_after.is_none_or(|(t, s)| t.elapsed().as_secs_f64() >= s);
             if !waited {
                 ctx.request_repaint();
             }
-            if waited && !self.snapshot_requested && self.shown_seq != 0 && self.shown_seq == self.seq {
+            let caught_up = self.shown_seq == self.seq || self.playing.is_some() && self.seq <= self.shown_seq + 1;
+            if waited && !self.snapshot_requested && self.shown_seq != 0 && caught_up {
                 self.snapshot_requested = true;
                 let close = ctx.clone();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
@@ -1620,4 +1692,42 @@ fn reveal(path: &Path) {
     let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = path;
+}
+
+/// Preview frames per second and their average costs, on stderr.
+struct Profile {
+    since: Instant,
+    shown: u32,
+    render: f64,
+    upload: f64,
+    latency: f64,
+    paints: u32,
+}
+
+impl Profile {
+    fn new() -> Self {
+        Self { since: Instant::now(), shown: 0, render: 0.0, upload: 0.0, latency: 0.0, paints: 0 }
+    }
+    fn shown(&mut self, render: f64, upload: f64, latency: f64) {
+        self.shown += 1;
+        self.render += render;
+        self.upload += upload;
+        self.latency += latency;
+    }
+    fn painted(&mut self) {
+        self.paints += 1;
+        let t = self.since.elapsed().as_secs_f64();
+        if t >= 1.0 {
+            let n = self.shown.max(1) as f64;
+            eprintln!(
+                "profile ui: {:.1} frames/s shown, {:.0} paints/s; per frame: render {:.1} ms, upload {:.1} ms, request→shown {:.1} ms",
+                self.shown as f64 / t,
+                self.paints as f64 / t,
+                self.render / n,
+                self.upload / n,
+                self.latency / n
+            );
+            *self = Self::new();
+        }
+    }
 }

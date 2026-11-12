@@ -46,6 +46,11 @@ impl FrameCache {
         self.entries.get(&frame).filter(|e| e.0 == stamp).map(|e| e.1.clone())
     }
 
+    /// The frames held for `stamp`.
+    pub fn frames(&self, stamp: u64) -> std::collections::HashSet<usize> {
+        self.entries.iter().filter(|(_, e)| e.0 == stamp).map(|(f, _)| *f).collect()
+    }
+
     /// Frames held for `stamp`.
     pub fn count(&self, stamp: u64) -> usize {
         self.entries.values().filter(|e| e.0 == stamp).count()

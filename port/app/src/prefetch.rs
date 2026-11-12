@@ -61,23 +61,6 @@ impl Prefetch {
         self.info
     }
 
-    /// While playing: the newest frame decoded up to `index`, without
-    /// waiting if there is one (playback drops what decoding can't keep up
-    /// with), else frame `index`.
-    pub fn frame_upto(&self, index: usize) -> Result<(usize, Arc<Image>)> {
-        let index = index.min(self.info.total_frames.saturating_sub(1));
-        {
-            let (lock, cv) = &*self.shared;
-            let mut st = lock.lock().expect("prefetch");
-            if let Some((n, img)) = st.ring.iter().rev().find(|(n, _)| *n <= index && *n + SEEK_PAST >= index).cloned() {
-                st.want = index;
-                cv.notify_all();
-                return Ok((n, img));
-            }
-        }
-        Ok((index, self.frame(index)?))
-    }
-
     /// Frame `index` (held to the clip), waiting for it if need be.
     pub fn frame(&self, index: usize) -> Result<Arc<Image>> {
         let index = index.min(self.info.total_frames.saturating_sub(1));

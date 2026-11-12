@@ -127,6 +127,29 @@ fn to_u8(v: f32) -> u8 {
     (v + 0.5 + 1e-4).floor().clamp(0.0, 255.0) as u8
 }
 
+/// The vertical pass: every source column at `dh` rows, in 8 bits. A whole
+/// row at a time, tap by tap: the same sums in the same order as pixel by
+/// pixel, but reading memory in order (several times faster).
+fn down_pass(src: &[u8], width: usize, height: usize, row_bytes: usize, ty: &Taps, dh: usize) -> Vec<u8> {
+    let mut mid = vec![0u8; dh * width * 4];
+    mid.par_chunks_mut(width * 4).enumerate().for_each(|(y, row)| {
+        let first = ty.start[y];
+        let w = &ty.weights[y * ty.len..(y + 1) * ty.len];
+        let mut acc = vec![0f32; width * 4];
+        for (t, &wt) in w.iter().enumerate() {
+            let j = (first + t as i64).clamp(0, height as i64 - 1) as usize;
+            let r = &src[j * row_bytes..j * row_bytes + width * 4];
+            for (a, &v) in acc.iter_mut().zip(r) {
+                *a += wt * v as f32;
+            }
+        }
+        for (o, &a) in row.iter_mut().zip(&acc) {
+            *o = to_u8(a);
+        }
+    });
+    mid
+}
+
 /// Scale 4-channel 8-bit `src` (`width` × `height`, `row_bytes` apart) to
 /// `out` (`dw` × `dh`, tightly packed). Channels are treated alike, so the
 /// order (RGBA or BGRA) doesn't matter.
@@ -134,24 +157,7 @@ pub fn scale_lanczos(src: &[u8], width: usize, height: usize, row_bytes: usize, 
     let tx = taps(width, dw, Axis::Across);
     let ty = taps(height, dh, Axis::Down);
     // Down first: every source column at the output height, in 8 bits.
-    let mut mid = vec![0u8; dh * width * 4];
-    mid.par_chunks_mut(width * 4).enumerate().for_each(|(y, row)| {
-        let first = ty.start[y];
-        let w = &ty.weights[y * ty.len..(y + 1) * ty.len];
-        let rows: Vec<&[u8]> = (0..ty.len)
-            .map(|t| {
-                let j = (first + t as i64).clamp(0, height as i64 - 1) as usize;
-                &src[j * row_bytes..j * row_bytes + width * 4]
-            })
-            .collect();
-        for x in 0..width * 4 {
-            let mut acc = 0f32;
-            for (r, &wt) in rows.iter().zip(w) {
-                acc += wt * r[x] as f32;
-            }
-            row[x] = to_u8(acc);
-        }
-    });
+    let mid = down_pass(src, width, height, row_bytes, &ty, dh);
     // Then across.
     out[..dw * dh * 4].par_chunks_mut(dw * 4).enumerate().for_each(|(y, row)| {
         let m = &mid[y * width * 4..(y + 1) * width * 4];
@@ -170,4 +176,51 @@ pub fn scale_lanczos(src: &[u8], width: usize, height: usize, row_bytes: usize, 
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The down pass as first written, pixel by pixel: the row-at-a-time
+    /// pass must give exactly its bytes.
+    fn down_pixel_by_pixel(src: &[u8], width: usize, height: usize, row_bytes: usize, dh: usize) -> Vec<u8> {
+        let ty = taps(height, dh, Axis::Down);
+        let mut mid = vec![0u8; dh * width * 4];
+        for (y, row) in mid.chunks_mut(width * 4).enumerate() {
+            let first = ty.start[y];
+            let w = &ty.weights[y * ty.len..(y + 1) * ty.len];
+            let rows: Vec<&[u8]> = (0..ty.len)
+                .map(|t| {
+                    let j = (first + t as i64).clamp(0, height as i64 - 1) as usize;
+                    &src[j * row_bytes..j * row_bytes + width * 4]
+                })
+                .collect();
+            for x in 0..width * 4 {
+                let mut acc = 0f32;
+                for (r, &wt) in rows.iter().zip(w) {
+                    acc += wt * r[x] as f32;
+                }
+                row[x] = to_u8(acc);
+            }
+        }
+        mid
+    }
+
+    #[test]
+    fn the_row_at_a_time_down_pass_matches_pixel_by_pixel() {
+        // Noise with some structure, padded rows, reductions and enlargements.
+        let (w, h, rb) = (97, 211, 97 * 4 + 12);
+        let mut seed = 12345u32;
+        let src: Vec<u8> = (0..rb * h)
+            .map(|i| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((seed >> 24) as usize ^ (i / 7 % 256)) as u8
+            })
+            .collect();
+        for dh in [400, 211, 150, 105, 52, 33, 7] {
+            let ty = taps(h, dh, Axis::Down);
+            assert_eq!(down_pass(&src, w, h, rb, &ty, dh), down_pixel_by_pixel(&src, w, h, rb, dh), "down to {dh} rows");
+        }
+    }
 }

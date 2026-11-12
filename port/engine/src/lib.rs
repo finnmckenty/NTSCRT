@@ -263,9 +263,42 @@ struct Chain {
     initial: Vec<(String, f32)>,
 }
 
+type PreparedKey = (u64, Option<NtscSettings>, usize, Option<DigitalFrame>);
+
 struct Prepared {
-    key: (u64, Option<NtscSettings>, usize, Option<DigitalFrame>),
+    key: PreparedKey,
     texture: wgpu::Texture,
+}
+
+/// What a source's CPU stages depend on. Without NTSC the frame doesn't
+/// change the picture (only the shader's frame count), so it isn't part of it.
+fn prepared_key(source: u64, settings: &Settings) -> PreparedKey {
+    (source, settings.ntsc.clone(), if settings.ntsc.is_some() { settings.frame } else { 0 }, settings.digital.clone())
+}
+
+/// The Digital video stage's codec takes this frame, for a frame that won't
+/// be shown (playback catching up): later frames come out as they would
+/// have, and `pixels` is left as it was.
+pub fn digital_unseen(digital: &mut codec::DigitalVideoRenderer, settings: &Settings, pixels: &Image, earlier: Option<&mut FrameVisitor<'_>>) {
+    if let Some(d) = &settings.digital {
+        let (w, h) = (pixels.width as usize, pixels.height as usize);
+        digital.process_unseen(d.frame, &pixels.rgba, w, h, w * 4, d.capture, d.source_fps, &d.settings, d.history.as_ref().map(|h| h.0.as_ref()), earlier);
+    }
+}
+
+/// The stages that run on the CPU, in place: Digital video (a camera and
+/// codec ahead of the analog signal), then NTSC. `digital` carries the
+/// codec's state from frame to frame, so a clip's frames go through one
+/// renderer in order.
+pub fn cpu_stages(digital: &mut codec::DigitalVideoRenderer, settings: &Settings, pixels: &mut Image, earlier: Option<&mut FrameVisitor<'_>>) -> Result<()> {
+    if let Some(d) = &settings.digital {
+        let (w, h) = (pixels.width as usize, pixels.height as usize);
+        digital.process(d.frame, &mut pixels.rgba, w, h, w * 4, d.capture, d.source_fps, &d.settings, d.history.as_ref().map(|h| h.0.as_ref()), earlier);
+    }
+    if let Some(ntsc) = &settings.ntsc {
+        apply_ntsc(pixels, ntsc, settings.frame)?;
+    }
+    Ok(())
 }
 
 pub struct Engine {
@@ -375,6 +408,18 @@ impl Engine {
         self.prepared = None;
     }
 
+    /// The Digital video stage's codec state, for playback's producer to
+    /// carry on from (and to give back with `put_digital` when it stops).
+    pub fn take_digital(&mut self) -> codec::DigitalVideoRenderer {
+        self.prepared = None;
+        std::mem::take(&mut self.digital)
+    }
+
+    pub fn put_digital(&mut self, digital: codec::DigitalVideoRenderer) {
+        self.digital = digital;
+        self.prepared = None;
+    }
+
     pub fn source_size(&self) -> Option<(u32, u32)> {
         self.source.as_ref().map(|(_, i)| (i.width, i.height))
     }
@@ -447,6 +492,43 @@ impl Engine {
         self.read_back(enc, &chain_input)
     }
 
+    /// `bake` and the preview from it in one go: one trip to the GPU and
+    /// back instead of two, and no re-upload.
+    pub fn bake_and_preview(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool, earlier: Option<&mut FrameVisitor<'_>>) -> Result<(Image, Image)> {
+        let t = std::time::Instant::now();
+        let input = self.prepare(settings, earlier)?;
+        self.last_prepare_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let chain_input = match settings.downscale {
+            Some(spec) => self.downscale(&mut enc, &input, spec),
+            None => input,
+        };
+        let baked = self.encode_read(&mut enc, &chain_input);
+        let shown = self.encode_preview(&mut enc, chain_input, settings, plan, full_render)?;
+        let shown = self.encode_read(&mut enc, &shown);
+        let mut images = self.finish_reads(enc, vec![baked, shown])?.into_iter();
+        let (baked, shown) = (images.next().expect("baked"), images.next().expect("shown"));
+        Ok((baked, shown))
+    }
+
+    /// The source picture (before any stage) box-filtered to `size`: the
+    /// original Compare shows, at the size it's shown.
+    pub fn fit_source(&mut self, size: (u32, u32)) -> Result<Image> {
+        let (_, source) = self.source.as_ref().context("no picture loaded")?;
+        let tex = texture(&self.device, (source.width, source.height), wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, "compare source");
+        self.queue.write_texture(
+            tex.as_image_copy(),
+            &source.rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(source.width * 4), rows_per_image: Some(source.height) },
+            tex.size(),
+        );
+        let size = (size.0.max(1), size.1.max(1));
+        let out = texture(&self.device, size, wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC, "compare fit");
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        self.dispatch(&mut enc, &self.area, &tex, &out, &[source.width, source.height, size.0, size.1], size);
+        self.read_back(enc, &out)
+    }
+
     /// The preview from a baked chain input (see `bake`).
     pub fn render_preview_baked(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool, baked: &Image) -> Result<Image> {
         let tex = texture(
@@ -466,7 +548,13 @@ impl Engine {
     }
 
     fn preview_from(&mut self, mut enc: wgpu::CommandEncoder, chain_input: wgpu::Texture, settings: &Settings, plan: preview::PreviewPlan, full_render: bool) -> Result<Image> {
-        let chain_input = self.apply_glitch(&mut enc, chain_input, settings);
+        let shown = self.encode_preview(&mut enc, chain_input, settings, plan, full_render)?;
+        self.read_back(enc, &shown)
+    }
+
+    /// The preview's GPU work from the chain input: the texture to show.
+    fn encode_preview(&mut self, enc: &mut wgpu::CommandEncoder, chain_input: wgpu::Texture, settings: &Settings, plan: preview::PreviewPlan, full_render: bool) -> Result<wgpu::Texture> {
+        let chain_input = self.apply_glitch(enc, chain_input, settings);
         let size = (plan.render_width.max(1), plan.render_height.max(1));
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::STORAGE_BINDING
@@ -483,7 +571,7 @@ impl Engine {
                     .frame(
                         &chain_input,
                         &Viewport { x: 0.0, y: 0.0, mvp: None, output: WgpuOutputView::new_from_raw(&view, sz, rendered.format()), size: sz },
-                        &mut enc,
+                        enc,
                         settings.frame,
                         None,
                     )
@@ -491,11 +579,11 @@ impl Engine {
             }
             None => {
                 let (iw, ih) = (chain_input.width(), chain_input.height());
-                self.dispatch(&mut enc, &self.nearest, &chain_input, &rendered, &[iw, ih, size.0, size.1], size);
+                self.dispatch(enc, &self.nearest, &chain_input, &rendered, &[iw, ih, size.0, size.1], size);
             }
         }
         if full_render || !plan.needs_downsample() {
-            return self.read_back(enc, &rendered);
+            return Ok(rendered);
         }
         let shown = texture(
             &self.device,
@@ -503,8 +591,8 @@ impl Engine {
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
             "preview display",
         );
-        self.dispatch(&mut enc, &self.area, &rendered, &shown, &[size.0, size.1, shown.width(), shown.height()], (shown.width(), shown.height()));
-        self.read_back(enc, &shown)
+        self.dispatch(enc, &self.area, &rendered, &shown, &[size.0, size.1, shown.width(), shown.height()], (shown.width(), shown.height()));
+        Ok(shown)
     }
 
     /// An exported frame at exactly `out`: the chain into `out`, or — when
@@ -576,34 +664,29 @@ impl Engine {
     /// NTSC settings or frame change).
     fn prepare(&mut self, settings: &Settings, earlier: Option<&mut FrameVisitor<'_>>) -> Result<wgpu::Texture> {
         let (id, source) = self.source.as_ref().context("no picture loaded")?;
-        // Without NTSC the frame doesn't change the picture (only the
-        // shader's frame count), so it isn't part of the key.
-        let key = (*id, settings.ntsc.clone(), if settings.ntsc.is_some() { settings.frame } else { 0 }, settings.digital.clone());
+        let key = prepared_key(*id, settings);
         if let Some(p) = &self.prepared {
             if p.key == key {
                 return Ok(p.texture.clone());
             }
         }
         let mut pixels = source.clone();
-        // Digital video first: a camera and codec ahead of the analog signal.
-        if let Some(d) = &settings.digital {
-            let (w, h) = (pixels.width as usize, pixels.height as usize);
-            self.digital.process(
-                d.frame,
-                &mut pixels.rgba,
-                w,
-                h,
-                w * 4,
-                d.capture,
-                d.source_fps,
-                &d.settings,
-                d.history.as_ref().map(|h| h.0.as_ref()),
-                earlier,
-            );
-        }
-        if let Some(ntsc) = &settings.ntsc {
-            apply_ntsc(&mut pixels, ntsc, settings.frame)?;
-        }
+        cpu_stages(&mut self.digital, settings, &mut pixels, earlier)?;
+        let tex = self.upload_prepared(key, &pixels);
+        Ok(tex)
+    }
+
+    /// A frame whose CPU stages (`cpu_stages` with these settings) already
+    /// ran elsewhere — playback's producer thread: `clean` becomes the
+    /// source, `processed` what the GPU stages start from.
+    pub fn set_prepared(&mut self, clean: Image, processed: &Image, settings: &Settings) {
+        self.set_source(clean);
+        let key = prepared_key(self.source.as_ref().expect("set").0, settings);
+        self.upload_prepared(key, processed);
+        self.last_prepare_ms = 0.0;
+    }
+
+    fn upload_prepared(&mut self, key: PreparedKey, pixels: &Image) -> wgpu::Texture {
         let tex = texture(
             &self.device,
             (pixels.width, pixels.height),
@@ -617,7 +700,7 @@ impl Engine {
             tex.size(),
         );
         self.prepared = Some(Prepared { key, texture: tex.clone() });
-        Ok(tex)
+        tex
     }
 
     fn downscale(&self, enc: &mut wgpu::CommandEncoder, src: &wgpu::Texture, spec: DownscaleSpec) -> wgpu::Texture {
@@ -691,6 +774,12 @@ impl Engine {
     }
 
     fn read_back(&self, mut enc: wgpu::CommandEncoder, tex: &wgpu::Texture) -> Result<Image> {
+        let read = self.encode_read(&mut enc, tex);
+        Ok(self.finish_reads(enc, vec![read])?.pop().expect("one"))
+    }
+
+    /// Copy a texture into a buffer the CPU can read, once submitted.
+    fn encode_read(&self, enc: &mut wgpu::CommandEncoder, tex: &wgpu::Texture) -> PendingRead {
         let (w, h) = (tex.width(), tex.height());
         let stride = (w * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -707,17 +796,41 @@ impl Engine {
             },
             tex.size(),
         );
-        self.queue.submit([enc.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely())?;
-        let data = buffer.slice(..).get_mapped_range();
-        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-        for row in data.chunks(stride as usize) {
-            rgba.extend_from_slice(&row[..(w * 4) as usize]);
-        }
-        drop(data);
-        Ok(Image::new(w, h, rgba))
+        PendingRead { buffer, size: (w, h), stride }
     }
+
+    /// Submit, wait once, and read every buffer back.
+    fn finish_reads(&self, enc: wgpu::CommandEncoder, reads: Vec<PendingRead>) -> Result<Vec<Image>> {
+        self.queue.submit([enc.finish()]);
+        for r in &reads {
+            r.buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        }
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        Ok(reads
+            .into_iter()
+            .map(|r| {
+                let (w, h) = r.size;
+                let data = r.buffer.slice(..).get_mapped_range();
+                let row = (w * 4) as usize;
+                let mut rgba = Vec::with_capacity(row * h as usize);
+                if r.stride as usize == row {
+                    rgba.extend_from_slice(&data[..row * h as usize]);
+                } else {
+                    for line in data.chunks(r.stride as usize) {
+                        rgba.extend_from_slice(&line[..row]);
+                    }
+                }
+                drop(data);
+                Image::new(w, h, rgba)
+            })
+            .collect())
+    }
+}
+
+struct PendingRead {
+    buffer: wgpu::Buffer,
+    size: (u32, u32),
+    stride: u32,
 }
 
 /// The folder of RetroArch's slang shaders: `NTSCRT_SHADERS`, else a

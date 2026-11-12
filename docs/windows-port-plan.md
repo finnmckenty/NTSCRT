@@ -102,7 +102,10 @@ Done and checked against the Mac (each step committed; CI re-checks on every pus
 
 Playback:
 - Decodes ahead on a thread of its own and shows the newest decoded frame while playing (in the VM, a 1920×1440 clip went from about 2 to 9 frames a second; ntsc-rs at full size is the main cost there).
-- Keeps each frame's baked chain input (the Mac's ChainInputCache, up to 1 GiB) and, while paused, bakes ahead of the playhead; the palette says how many frames are cached. Cached frames render in about 17 ms in the VM.
+- Keeps each frame's baked chain input (the Mac's ChainInputCache, up to 1 GiB) and, while paused, bakes ahead of the playhead once the requests have stopped for a quarter second (so a slider drag isn't held up behind a bake); the palette says how many frames are cached. Cached frames render in about 17 ms in the VM.
+- While playing, a producer thread (the Mac's PlaybackPipeline) crops and runs the CPU stages a few frames ahead, so the render thread only does the GPU part, and the window keeps one request waiting behind the one rendering. With Digital video on, every frame goes through the codec in order; a producer falling behind runs only the codec for frames playback has passed (with NTSC on), instead of jumping and re-running from a keyframe. Tests check each faster route gives the same pixels as the plain one.
+- Measured (M1 Max, native, 1920×1440): NTSC about 15 ms, upload 2, GPU and read back 5.5, so the CPU stages were most of a frame; now they overlap the rest. The Digital stage's Lanczos shrink went from 17 to 3.6 ms by reading rows in order (same bytes). In the VM a 1920×1440 clip without the cache went from about 12 to 15–28 frames a second, and Cheap camcorder from under 1 to 5 under the same heavy host load.
+- Compare while playing gets the original box-filtered to the display size on the GPU, not the whole frame each time.
 
 Still to do: real-hardware testing, signing and an installer.
 

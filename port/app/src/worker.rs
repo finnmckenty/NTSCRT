@@ -1,10 +1,13 @@
 //! The render thread: it owns the engine and the open picture or clip,
 //! decodes the frame asked for, crops it, and renders. Only the latest
 //! render request is worked on; the window shows whatever arrives last.
+//! While a clip plays, the producer (producer.rs) does the decoding,
+//! cropping and CPU stages ahead on its own thread.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ntscrt_engine::crop::Crop;
@@ -13,6 +16,10 @@ use ntscrt_engine::{Engine, Image, Settings};
 use ntscrt_media::VideoInfo;
 
 use crate::prefetch::Prefetch;
+use crate::producer::{settings_for_frame, Producer};
+
+/// How long the requests must stop before a paused clip bakes ahead.
+const FILL_AFTER: Duration = Duration::from_millis(250);
 
 pub enum Request {
     Still(Image),
@@ -52,7 +59,7 @@ struct Fill {
 
 enum Media {
     Still(Image),
-    Video(Prefetch),
+    Video(Arc<Prefetch>),
 }
 
 pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Context) {
@@ -81,14 +88,29 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
     // What the engine's picture is: (frame, crop), and what was last sent back.
     let mut picture_key: Option<(usize, Option<Crop>)> = None;
     let mut picture: Option<Image> = None;
-    let mut sent_key: Option<(usize, Option<Crop>)> = None;
+    // `picture` is Compare's original fitted to the display (playing), not
+    // the whole frame; and what was last sent back, likewise.
+    let mut picture_fit = false;
+    let mut sent_key: Option<(usize, Option<Crop>, bool)> = None;
     // A clip's baked frames, and which clip they're of.
     let mut cache = crate::frame_cache::FrameCache::default();
     let mut clip_id = 0u64;
 
     let mut fill: Option<Fill> = None;
+    // While a clip plays: its frames' CPU stages, made ahead on a thread.
+    let mut producer: Option<Producer> = None;
+    let mut last_request = Instant::now();
     loop {
-        let first = if fill.is_some() {
+        // Baking ahead waits until the requests settle: a frame of it holds
+        // up the next request, so mid-drag it would halve the preview's rate.
+        let settle = FILL_AFTER.saturating_sub(last_request.elapsed());
+        let first = if fill.is_some() && !settle.is_zero() {
+            match requests.recv_timeout(settle) {
+                Ok(r) => r,
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => continue,
+            }
+        } else if fill.is_some() {
             match requests.try_recv() {
                 Ok(r) => r,
                 Err(TryRecvError::Disconnected) => break,
@@ -158,6 +180,7 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
         for r in std::iter::once(first).chain(requests.try_iter()) {
             match r {
                 Request::Still(img) => {
+                    producer = None;
                     media = Some(Media::Still(img));
                     (clip_path, clip, clip_crop) = (None, None, None);
                     (picture_key, sent_key) = (None, None);
@@ -165,7 +188,8 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                 Request::Video(path) => match Prefetch::open(&path) {
                     Ok(reader) => {
                         send(Event::Opened(Ok(reader.info())));
-                        media = Some(Media::Video(reader));
+                        producer = None;
+                        media = Some(Media::Video(Arc::new(reader)));
                         (clip_path, clip, clip_crop) = (Some(path.clone()), None, None);
                         clip_id += 1;
                         cache.clear();
@@ -177,6 +201,12 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
             }
         }
         let Some(Request::Render { seq, mut settings, plan, full, frame, crop, want_source, playing }) = render else { continue };
+        if !playing {
+            if let Some(p) = producer.take() {
+                engine.put_digital(p.finish());
+            }
+        }
+        last_request = Instant::now();
         let t = Instant::now();
         let mut shown_frame = frame;
         let result = (|| -> anyhow::Result<Image> {
@@ -184,7 +214,7 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
             // While playing, the newest frame decoded so far stands in (its
             // own noise seed and Digital frame with it).
             let is_video = matches!(media, Some(Media::Video(_)));
-            let mut frame = if is_video { frame } else { 0 };
+            let frame = if is_video { frame } else { 0 };
             let stamp = crate::frame_cache::stamp(clip_id, crop, &settings);
             // Baked already: no decoding, no CPU stages. (Compare needs the
             // picture itself, so it decodes.)
@@ -195,26 +225,70 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                 }
                 return out;
             }
-            let mut decoded = None;
+            // Playing: the producer has the CPU stages done; the newest
+            // frame it has up to `frame` stands in (its own noise seed and
+            // Digital frame with it).
             if let (Some(Media::Video(reader)), true) = (media.as_ref(), playing) {
-                let (got, img) = reader.frame_upto(frame)?;
-                if got != frame {
-                    settings.frame = got + 1;
-                    if let Some(d) = settings.digital.as_mut() {
-                        d.frame = got as i64;
+                if producer.as_ref().map(|p| (p.stamp, p.with_clean)) != Some((stamp, want_source)) {
+                    if let Some(p) = producer.take() {
+                        engine.put_digital(p.finish());
                     }
-                    frame = got;
+                    let digital = engine.take_digital();
+                    producer = Some(Producer::start(reader.clone(), clip_path.clone(), settings.clone(), crop, stamp, frame, cache.frames(stamp), want_source, digital));
                 }
+                let made = producer.as_ref().expect("started").take(frame)?;
+                let got = made.frame;
+                settings = settings_for_frame(&settings, got);
                 shown_frame = got;
-                decoded = Some(img);
+                let decoded = decode_start.elapsed().as_secs_f64() * 1000.0;
+                // Compare's original, at the size it's shown (a clip's
+                // full-size frame to the window every frame is a lot).
+                let fit_source = want_source && !full;
+                if want_source && full {
+                    picture = Some(made.clean.clone());
+                }
+                picture_fit = fit_source;
+                let out = match (made.processed, cache.get(got, stamp)) {
+                    (Some(processed), _) => {
+                        let up = Instant::now();
+                        engine.set_prepared(made.clean, &processed, &settings);
+                        let up = up.elapsed().as_secs_f64() * 1000.0;
+                        let gpu = Instant::now();
+                        let (baked, out) = engine.bake_and_preview(&settings, plan, full, None)?;
+                        if profile {
+                            eprintln!("profile frame {got}: upload {up:.1} ms, GPU + read back {:.1} ms", gpu.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        cache.insert(got, stamp, baked);
+                        out
+                    }
+                    (None, Some(baked)) => {
+                        engine.set_source(made.clean);
+                        engine.render_preview_baked(&settings, plan, full, &baked)?
+                    }
+                    // Not cached after all (it filled up): the CPU stages here.
+                    (None, None) => {
+                        engine.set_source(made.clean);
+                        let mut none = None;
+                        let visitor = if settings.digital.is_some() { &mut clip } else { &mut none };
+                        let (baked, out) = crate::clip_frames::with_visitor(visitor, |v| engine.bake_and_preview(&settings, plan, full, v))?;
+                        cache.insert(got, stamp, baked);
+                        out
+                    }
+                };
+                if fit_source {
+                    picture = Some(engine.fit_source((plan.display_width, plan.display_height))?);
+                }
+                picture_key = Some((got, crop));
+                if profile {
+                    eprintln!("profile frame {got}: produced, wait {decoded:.1} ms, total {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+                }
+                return Ok(out);
             }
-            if picture_key != Some((frame, crop)) {
+            // A fitted original won't do once paused (it may be zoomed into).
+            if picture_key != Some((frame, crop)) || want_source && picture_fit {
                 let pic = match media.as_mut() {
                     Some(Media::Still(img)) => img.clone(),
-                    Some(Media::Video(reader)) => match decoded {
-                        Some(img) => img.as_ref().clone(),
-                        None => reader.frame(frame)?.as_ref().clone(),
-                    },
+                    Some(Media::Video(reader)) => reader.frame(frame)?.as_ref().clone(),
                     None => anyhow::bail!("nothing open"),
                 };
                 let pic = match crop {
@@ -224,6 +298,7 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                 engine.set_source(pic.clone());
                 picture = Some(pic);
                 picture_key = Some((frame, crop));
+                picture_fit = false;
             }
             if settings.digital.is_some() && clip_path.is_some() && clip_crop != Some(crop) {
                 clip = clip_path.as_deref().and_then(|p| crate::clip_frames::ClipFrames::open(p, crop).ok());
@@ -234,14 +309,10 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
             let visitor = if settings.digital.is_some() { &mut clip } else { &mut none };
             let rendered = if is_video {
                 // Bake it for next time.
-                match crate::clip_frames::with_visitor(visitor, |v| engine.bake(&settings, v)) {
-                    Ok(baked) => {
-                        let out = engine.render_preview_baked(&settings, plan, full, &baked);
-                        cache.insert(frame, stamp, baked);
-                        out
-                    }
-                    Err(e) => Err(e),
-                }
+                crate::clip_frames::with_visitor(visitor, |v| engine.bake_and_preview(&settings, plan, full, v)).map(|(baked, out)| {
+                    cache.insert(frame, stamp, baked);
+                    out
+                })
             } else {
                 crate::clip_frames::with_visitor(visitor, |v| engine.render_preview(&settings, plan, full, v))
             };
@@ -263,9 +334,10 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
         if matches!(media, Some(Media::Video(_))) {
             send(Event::Cached(cache.count(crate::frame_cache::stamp(clip_id, crop, &settings))));
         }
-        let source = (want_source && sent_key != picture_key).then(|| picture.clone()).flatten();
+        let key = picture_key.map(|(f, c)| (f, c, picture_fit));
+        let source = (want_source && sent_key != key).then(|| picture.clone()).flatten();
         if source.is_some() {
-            sent_key = picture_key;
+            sent_key = key;
         }
         send(Event::Rendered { seq, result, millis: t.elapsed().as_millis(), source });
     }
