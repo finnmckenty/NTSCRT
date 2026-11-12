@@ -69,7 +69,12 @@ fn control(ui: &mut egui::Ui, s: &NtscSetting, values: &mut Map<String, Value>) 
         NtscKind::Int { min, max } => {
             ui.label(&s.label);
             let mut v = number(values, &s.name).round() as i64;
-            let r = hover(ui.add(egui::Slider::new(&mut v, *min as i64..=*max as i64)), s);
+            // A huge range (the random seed) is a number field, not a slider.
+            let r = if (*max as i64 - *min as i64) > 10_000 {
+                hover(ui.add(egui::DragValue::new(&mut v).range(*min as i64..=*max as i64)), s)
+            } else {
+                hover(ui.add(egui::Slider::new(&mut v, *min as i64..=*max as i64)), s)
+            };
             if r.changed() {
                 values.insert(s.name.clone(), Value::from(v));
                 changed = true;

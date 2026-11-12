@@ -6,8 +6,10 @@
 //! pinned commit is on wgpu 28, newer than nothing egui ships with, so the
 //! app's window can't share a device with it. Frames come back as RGBA8.
 
+pub mod crop;
 mod look;
 mod ntsc_ui;
+pub mod preview;
 pub mod timeline;
 pub use look::{write_look, Look, LookState};
 pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
@@ -331,11 +333,65 @@ impl Engine {
         self.read_back(enc, &out)
     }
 
+    /// The preview: the chain at the plan's render size (the CRT shader, or
+    /// without it the chain input enlarged with hard edges, as the Mac's
+    /// ShaderBypass does), then box-filtered to the display size — unless
+    /// `full_render` (zoomed in: the Mac samples the full render, since the
+    /// box filter averages scanlines flat at small display multiples).
+    pub fn render_preview(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool) -> Result<Image> {
+        let input = self.prepare(settings)?;
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let chain_input = match settings.downscale {
+            Some(spec) => self.downscale(&mut enc, &input, spec),
+            None => input,
+        };
+        let size = (plan.render_width.max(1), plan.render_height.max(1));
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING;
+        let rendered = texture(&self.device, size, usage, "preview render");
+        match &settings.shader {
+            Some(shader) => {
+                self.load_chain(shader)?;
+                let chain = &mut self.chain.as_mut().expect("loaded").chain;
+                let view = rendered.create_view(&Default::default());
+                let sz = Size::new(size.0, size.1);
+                chain
+                    .frame(
+                        &chain_input,
+                        &Viewport { x: 0.0, y: 0.0, mvp: None, output: WgpuOutputView::new_from_raw(&view, sz, rendered.format()), size: sz },
+                        &mut enc,
+                        settings.frame,
+                        None,
+                    )
+                    .map_err(|e| anyhow!("shader: {e}"))?;
+            }
+            None => {
+                let (iw, ih) = (chain_input.width(), chain_input.height());
+                self.dispatch(&mut enc, &self.nearest, &chain_input, &rendered, &[iw, ih, size.0, size.1], size);
+            }
+        }
+        if full_render || !plan.needs_downsample() {
+            return self.read_back(enc, &rendered);
+        }
+        let shown = texture(
+            &self.device,
+            (plan.display_width.max(1), plan.display_height.max(1)),
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+            "preview display",
+        );
+        self.dispatch(&mut enc, &self.area, &rendered, &shown, &[size.0, size.1, shown.width(), shown.height()], (shown.width(), shown.height()));
+        self.read_back(enc, &shown)
+    }
+
     /// The source after the NTSC stage, on the GPU (cached until the source,
     /// NTSC settings or frame change).
     fn prepare(&mut self, settings: &Settings) -> Result<wgpu::Texture> {
         let (id, source) = self.source.as_ref().context("no picture loaded")?;
-        let key = (*id, settings.ntsc.clone(), settings.frame);
+        // Without NTSC the frame doesn't change the picture (only the
+        // shader's frame count), so it isn't part of the key.
+        let key = (*id, settings.ntsc.clone(), if settings.ntsc.is_some() { settings.frame } else { 0 });
         if let Some(p) = &self.prepared {
             if p.key == key {
                 return Ok(p.texture.clone());

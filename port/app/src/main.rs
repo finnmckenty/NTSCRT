@@ -15,7 +15,7 @@ mod shader_panel;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ntscrt_engine::serde_json::{Map, Value};
@@ -23,12 +23,14 @@ use ntscrt_engine::{
     app_shader_defaults, find_presets, find_shaders, write_look, Look, LookState, ntsc_default_values, ntsc_settings, ntsc_values_json, preset_parameters, DownscaleMethod,
     DownscaleSpec, Engine, Image, NtscSetting, NtscSettings, Settings, ShaderParam, ShaderSpec, CRT_SHADERS,
 };
+use ntscrt_engine::crop::{Crop, Ratio};
+use ntscrt_engine::preview::{self, PreviewPlan};
 
 const SIDEBAR_WIDTH: f32 = 330.0;
 
 enum Request {
     Source(Image),
-    Render { seq: u64, settings: Settings, output: (u32, u32) },
+    Render { seq: u64, settings: Settings, plan: PreviewPlan, full: bool },
 }
 
 struct Rendered {
@@ -57,9 +59,9 @@ fn worker(requests: Receiver<Request>, results: Sender<Rendered>, info: Sender<S
                 r @ Request::Render { .. } => render = Some(r),
             }
         }
-        if let Some(Request::Render { seq, settings, output }) = render {
+        if let Some(Request::Render { seq, settings, plan, full }) = render {
             let t = Instant::now();
-            let result = engine.render(&settings, output).map_err(|e| format!("{e:#}"));
+            let result = engine.render_preview(&settings, plan, full).map_err(|e| format!("{e:#}"));
             let _ = results.send(Rendered { seq, result, millis: t.elapsed().as_millis() });
             ctx.request_repaint();
         }
@@ -95,8 +97,33 @@ struct App {
     look_notes: Vec<&'static str>,
     downscale_preset: String,
 
+    // Preview (the Mac's palette: Compare, Integer scale, Animate, Zoom).
+    integer_scale: bool,
+    zoom: f32,
+    /// Pan in normalized picture space.
+    pan: egui::Vec2,
+    compare: bool,
+    compare_x: f32,
+    dragging_compare: bool,
+    animate: bool,
+    /// Seeds the NTSC noise and is the shader's frame count; advances while
+    /// Animate is on (the Mac's frameCounter).
+    frame: usize,
+    last_tick: Instant,
+    source_texture: Option<egui::TextureHandle>,
+    /// The picture as the chain sees it (cropped), for Compare.
+    source_pixels: Option<Image>,
+    /// The picture as opened.
+    original: Option<Image>,
+    crop_enabled: bool,
+    crop: Crop,
+    /// The crop the engine's picture was made with.
+    applied_crop: Option<Option<Crop>>,
+    /// Dragging the picture: the crop and pointer where the drag began.
+    crop_drag: Option<(Crop, egui::Pos2)>,
+
     seq: u64,
-    sent: Option<(Settings, (u32, u32))>,
+    sent: Option<(Settings, PreviewPlan, bool)>,
     texture: Option<egui::TextureHandle>,
     shown_seq: u64,
     status: String,
@@ -135,6 +162,22 @@ impl App {
             look_notes: Vec::new(),
             downscale_preset: "VGA (320px)".into(),
             shader: CRT_SHADERS.iter().position(|s| s.0 == "glow_gauss").unwrap_or(0),
+            integer_scale: true,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            compare: false,
+            compare_x: 0.5,
+            dragging_compare: false,
+            animate: true,
+            frame: 0,
+            last_tick: Instant::now(),
+            source_texture: None,
+            source_pixels: None,
+            original: None,
+            crop_enabled: false,
+            crop: Crop::new(Ratio::SQUARE),
+            applied_crop: None,
+            crop_drag: None,
             seq: 0,
             sent: None,
             texture: None,
@@ -151,6 +194,23 @@ impl App {
         if let Some(p) = std::env::var_os("NTSCRT_LOOK") {
             app.load_look(Path::new(&p));
         }
+        // NTSCRT_CROP=ratio[,x,y,zoom] and NTSCRT_COMPARE=1, for headless checks.
+        if let Ok(spec) = std::env::var("NTSCRT_CROP") {
+            let mut parts = spec.split(',');
+            if let Some(r) = parts.next().and_then(Ratio::from_label) {
+                let mut c = Crop::new(r);
+                let mut next = || parts.next().and_then(|v| v.trim().parse::<f64>().ok());
+                if let Some(x) = next() { c.x = x }
+                if let Some(y) = next() { c.y = y }
+                if let Some(z) = next() { c.scale = z }
+                app.crop = c;
+                app.crop_enabled = true;
+            }
+        }
+        if std::env::var("NTSCRT_COMPARE").as_deref() == Ok("1") {
+            app.compare = true;
+            app.compare_x = 0.6;
+        }
         app
     }
 
@@ -161,12 +221,73 @@ impl App {
                 let (w, h) = img.dimensions();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.source = Some((name, w, h));
-                let _ = self.requests.send(Request::Source(Image::new(w, h, img.into_raw())));
+                self.original = Some(Image::new(w, h, img.into_raw()));
+                self.applied_crop = None;
+                self.apply_source();
                 self.sent = None;
                 self.error = None;
             }
             Err(e) => self.error = Some(format!("Couldn't open {}: {e}", path.display())),
         }
+    }
+
+    /// Hand the engine the picture, cropped (the crop comes before anything
+    /// else, as on the Mac).
+    fn apply_source(&mut self) {
+        let want = self.crop_enabled.then_some(self.crop);
+        if self.applied_crop == Some(want) {
+            return;
+        }
+        let Some(original) = &self.original else { return };
+        let image = match want {
+            Some(c) => c.apply(original),
+            None => original.clone(),
+        };
+        if let Some(src) = &mut self.source {
+            (src.1, src.2) = (image.width, image.height);
+        }
+        self.source_pixels = Some(image.clone());
+        self.source_texture = None;
+        let _ = self.requests.send(Request::Source(image));
+        self.applied_crop = Some(want);
+    }
+
+    fn crop_panel(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.crop_enabled, egui::RichText::new("Crop").heading())
+            .on_hover_text("Cut the picture to an aspect ratio before anything else sees it. Drag the picture in the preview to move the crop.");
+        if !self.crop_enabled {
+            return;
+        }
+        let mut ratio_button = |ui: &mut egui::Ui, r: Ratio| {
+            if ui.selectable_label(self.crop.ratio == r, r.label()).clicked() {
+                self.crop = Crop::new(r);
+            }
+        };
+        ui.horizontal(|ui| ratio_button(ui, Ratio::SQUARE));
+        ui.horizontal(|ui| Ratio::PORTRAIT.into_iter().for_each(|r| ratio_button(ui, r)));
+        ui.horizontal(|ui| Ratio::LANDSCAPE.into_iter().for_each(|r| ratio_button(ui, r)));
+        let Some(original) = &self.original else { return };
+        let (w, h) = (original.width, original.height);
+        let (_, _, cw, ch) = self.crop.rect(w, h);
+        if cw < w {
+            ui.label("Left / right");
+            ui.add(egui::Slider::new(&mut self.crop.x, 0.0..=1.0).show_value(false));
+        }
+        if ch < h {
+            ui.label("Up / down");
+            ui.add(egui::Slider::new(&mut self.crop.y, 0.0..=1.0).show_value(false));
+        }
+        ui.label("Zoom in");
+        let mut pct = self.crop.scale * 100.0;
+        if ui.add(egui::Slider::new(&mut pct, 100.0..=Crop::MAX_SCALE * 100.0).suffix("%").max_decimals(0)).changed() {
+            self.crop.scale = pct / 100.0;
+        }
+        ui.horizontal(|ui| {
+            ui.weak(format!("{cw} × {ch} of {w} × {h}"));
+            if ui.small_button("Center").clicked() {
+                (self.crop.x, self.crop.y) = (0.5, 0.5);
+            }
+        });
     }
 
     /// Load a look (the Mac app's preset JSON), as the Mac's `loadLook` does.
@@ -178,6 +299,10 @@ impl App {
                 return;
             }
         };
+        if let Some(c) = look.crop {
+            self.crop = c;
+            self.crop_enabled = true;
+        }
         if let Some(v) = look.downscale_enabled { self.downscale = v }
         if let Some(v) = look.downscale_width { self.downscale_width = v }
         if let Some(v) = &look.downscale_preset { self.downscale_preset = v.clone() }
@@ -227,6 +352,7 @@ impl App {
                 shader_enabled: self.crt,
                 shader_preset: CRT_SHADERS[self.shader].0,
                 shader_params: self.shader_values.get(&self.shader).unwrap_or(&empty),
+                crop: self.crop_enabled.then_some(self.crop),
             },
         );
         match std::fs::write(path, json) {
@@ -313,7 +439,7 @@ impl App {
             ntsc: self.ntsc.then(|| NtscSettings::Json(ntsc_values_json(&self.ntsc_values))),
             downscale: self.downscale.then(|| DownscaleSpec::for_width(self.downscale_width, source, self.method)),
             shader,
-            frame: 1,
+            frame: self.frame,
         }
     }
 
@@ -347,14 +473,18 @@ impl App {
             }
         });
         match &self.source {
-            Some((name, w, h)) => {
+            Some((name, _, _)) => {
                 ui.label(name);
-                ui.weak(format!("{w} × {h} px"));
+                if let Some(o) = &self.original {
+                    ui.weak(format!("{} × {} px", o.width, o.height));
+                }
             }
             None => {
                 ui.weak("Open an image, or drop one on the window.");
             }
         }
+        ui.separator();
+        self.crop_panel(ui);
         ui.separator();
 
         ui.checkbox(&mut self.downscale, egui::RichText::new("Downscale").heading());
@@ -446,32 +576,176 @@ impl App {
         });
     }
 
+    fn palette(&mut self, ui: &mut egui::Ui) {
+        // Its own backing: the preview behind it is near-black in either theme.
+        let frame = egui::Frame::new().fill(ui.visuals().panel_fill).corner_radius(6.0).inner_margin(egui::Margin::symmetric(8, 3));
+        frame.show(ui, |ui| ui.horizontal(|ui| {
+            ui.toggle_value(&mut self.compare, "Compare")
+                .on_hover_text("Split the view: the full pipeline on the left, the original on the right. Drag the line to move the split.");
+            ui.toggle_value(&mut self.integer_scale, "Integer scale")
+                .on_hover_text("Snap the picture to whole-pixel multiples, for perfectly even scanlines.");
+            ui.toggle_value(&mut self.animate, "Animate")
+                .on_hover_text("Keep tape noise and jitter moving.");
+            ui.separator();
+            ui.label("Zoom");
+            let mut pct = self.zoom * 100.0;
+            if ui.add(egui::Slider::new(&mut pct, 100.0..=1200.0).suffix("%").max_decimals(0)).changed() {
+                self.set_zoom(pct / 100.0);
+            }
+            if ui.button("Fit").on_hover_text("Back to 100% (or double-click the picture)").clicked() {
+                self.set_zoom(1.0);
+            }
+            ui.weak("Alt/Ctrl-scroll to zoom; drag to pan.");
+        }));
+    }
+
+    fn set_zoom(&mut self, z: f32) {
+        self.zoom = z.clamp(1.0, 12.0);
+        if self.zoom <= 1.0 {
+            self.pan = egui::Vec2::ZERO;
+        }
+        self.clamp_pan();
+    }
+
+    /// Panning can't go past the picture's edge at the current zoom.
+    fn clamp_pan(&mut self) {
+        let half = (1.0 - 1.0 / self.zoom) * 0.5;
+        self.pan = egui::vec2(self.pan.x.clamp(-half, half), self.pan.y.clamp(-half, half));
+    }
+
     fn preview(&mut self, ui: &mut egui::Ui) {
         let Some((_, w, h)) = self.source else {
             ui.centered_and_justified(|ui| ui.label("Open an image (or drop one here) to start."));
             return;
         };
-        let avail = ui.available_rect_before_wrap();
-        let aspect = w as f32 / h as f32;
-        let mut size = avail.size();
-        if size.x / size.y > aspect { size.x = size.y * aspect } else { size.y = size.x / aspect }
-        let rect = egui::Rect::from_center_size(avail.center(), size);
-        let ppp = ui.ctx().pixels_per_point();
-        let output = (((size.x * ppp).round() as u32).max(16), ((size.y * ppp).round() as u32).max(16));
+        let ctx = ui.ctx().clone();
+        let full = ui.available_rect_before_wrap();
+        let palette_h = 40.0;
+        let avail = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, full.max.y - palette_h));
+        let mut palette_ui = ui.new_child(
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(egui::pos2(full.min.x + 8.0, avail.max.y + 4.0), full.max)),
+        );
+        self.palette(&mut palette_ui);
+
+        // The chain input's size: the Downscale's, else the picture's.
+        let input = if self.downscale {
+            let d = DownscaleSpec::for_width(self.downscale_width, (w, h), self.method);
+            (d.width, d.height)
+        } else {
+            (w, h)
+        };
+        let ppp = ctx.pixels_per_point();
+        let aspect = input.0 as f32 / input.1 as f32;
+        let mut fit = avail.size();
+        if fit.x / fit.y > aspect { fit.x = fit.y * aspect } else { fit.y = fit.x / aspect }
+        let drawable = (((fit.x * ppp).floor() as u32).max(16), ((fit.y * ppp).floor() as u32).max(16));
+        let plan = preview::plan(input, drawable, self.integer_scale);
+        // The picture's rect: the display size in pixels, centered, on whole pixels.
+        let center_px = avail.center().to_vec2() * ppp;
+        let min_px = egui::vec2(
+            (center_px.x - plan.display_width as f32 / 2.0).round(),
+            (center_px.y - plan.display_height as f32 / 2.0).round(),
+        );
+        let target = egui::Rect::from_min_size(
+            (min_px / ppp).to_pos2(),
+            egui::vec2(plan.display_width as f32, plan.display_height as f32) / ppp,
+        );
+        let zoomed = self.zoom > 1.001;
+
+        // Animate: the frame advances once the last one is on screen, at 30
+        // frames a second with NTSC on and 60 without (the Mac's draw rates).
+        if self.animate {
+            let interval = Duration::from_secs_f64(if self.ntsc { 1.0 / 30.0 } else { 1.0 / 60.0 });
+            if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval {
+                self.frame = self.frame.wrapping_add(1);
+                self.last_tick = Instant::now();
+            }
+            ctx.request_repaint_after(interval);
+        }
 
         let settings = self.settings((w, h));
-        let want = (settings, output);
+        let want = (settings, plan, zoomed);
         if self.sent.as_ref() != Some(&want) {
             self.seq += 1;
-            let _ = self.requests.send(Request::Render { seq: self.seq, settings: want.0.clone(), output });
+            let _ = self.requests.send(Request::Render { seq: self.seq, settings: want.0.clone(), plan, full: zoomed });
             self.sent = Some(want);
         }
 
+        // What part of the picture is shown: all of it, or zoomed and panned.
+        let uv = if zoomed {
+            let c = egui::pos2(0.5 - self.pan.x, 0.5 - self.pan.y);
+            let half = 0.5 / self.zoom;
+            egui::Rect::from_min_max(egui::pos2(c.x - half, c.y - half), egui::pos2(c.x + half, c.y + half))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+        };
+        let painter = ui.painter_at(avail);
         if let Some(tex) = &self.texture {
-            ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            painter.image(tex.id(), target, uv, egui::Color32::WHITE);
+        }
+        if self.compare {
+            if self.source_texture.is_none() {
+                if let Some(img) = &self.source_pixels {
+                    let color = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba);
+                    self.source_texture = Some(ctx.load_texture("original", color, egui::TextureOptions::LINEAR));
+                }
+            }
+            let x = target.left() + self.compare_x * target.width();
+            if let Some(tex) = &self.source_texture {
+                let right = egui::Rect::from_min_max(egui::pos2(x, target.top()), target.max);
+                painter.with_clip_rect(right).image(tex.id(), target, uv, egui::Color32::WHITE);
+            }
+            painter.line_segment([egui::pos2(x, target.top()), egui::pos2(x, target.bottom())], egui::Stroke::new(1.0, egui::Color32::WHITE));
+        }
+
+        // Interaction: drag the compare line, drag to pan when zoomed,
+        // Alt/Ctrl-scroll or pinch to zoom, double-click to fit.
+        let response = ui.interact(avail, ui.scope_id().with("preview"), egui::Sense::click_and_drag());
+        if response.drag_started() {
+            if let Some(p) = response.interact_pointer_pos() {
+                let x = target.left() + self.compare_x * target.width();
+                self.dragging_compare = self.compare && (p.x - x).abs() < 8.0;
+                self.crop_drag = Some((self.crop, p));
+            }
+        }
+        if response.dragged() {
+            if self.dragging_compare {
+                if let Some(p) = response.interact_pointer_pos() {
+                    self.compare_x = ((p.x - target.left()) / target.width()).clamp(0.0, 1.0);
+                }
+            } else if self.crop_enabled && !zoomed {
+                // Drag the picture to move the crop: the picture follows the hand.
+                if let (Some(original), Some((start, from)), Some(p)) = (&self.original, self.crop_drag, response.interact_pointer_pos()) {
+                    let (ow, oh) = (original.width, original.height);
+                    let (x, y, cw, _) = start.rect(ow, oh);
+                    // Source pixels per point on screen.
+                    let k = cw as f32 / target.width();
+                    let d = p - from;
+                    self.crop = start.placed(x as f64 - (d.x * k) as f64, y as f64 - (d.y * k) as f64, cw as f64, ow, oh);
+                }
+            } else if zoomed {
+                let d = response.drag_delta();
+                self.pan += egui::vec2(d.x / target.width(), d.y / target.height()) / self.zoom;
+                self.clamp_pan();
+            }
+        }
+        if response.drag_stopped() {
+            self.dragging_compare = false;
+            self.crop_drag = None;
+        }
+        if response.double_clicked() {
+            self.set_zoom(1.0);
+        }
+        if response.hovered() {
+            let (scroll, pinch, modifier) = ctx.input(|i| (i.smooth_scroll_delta().y, i.zoom_delta(), i.modifiers.alt || i.modifiers.command));
+            if pinch != 1.0 {
+                self.set_zoom(self.zoom * pinch);
+            } else if modifier && scroll != 0.0 {
+                self.set_zoom(self.zoom * (1.0 + scroll * 0.005));
+            }
         }
         if let Some(e) = &self.error {
-            ui.painter().text(avail.left_top() + egui::vec2(8.0, 8.0), egui::Align2::LEFT_TOP, e, egui::FontId::proportional(14.0), egui::Color32::LIGHT_RED);
+            painter.text(avail.left_top() + egui::vec2(8.0, 8.0), egui::Align2::LEFT_TOP, e, egui::FontId::proportional(14.0), egui::Color32::LIGHT_RED);
         }
     }
 }
@@ -497,6 +771,7 @@ impl eframe::App for App {
                 Err(e) => self.error = Some(e),
             }
         }
+        self.apply_source();
         let dropped = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty()));
         if let Some(p) = dropped {
             self.open(&p);

@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 
 use crate::timeline::{Easing, Keyframe};
+use crate::crop::{Crop, Ratio};
 use crate::DownscaleMethod;
 
 #[derive(Clone, Debug, Default)]
@@ -28,6 +29,9 @@ pub struct Look {
     pub shader_preset: Option<String>,
     pub shader_params: HashMap<String, f32>,
     pub keys: Vec<Keyframe>,
+    /// Only a crop that's on travels with a look (the Mac's rule); a look
+    /// without one leaves the current crop alone.
+    pub crop: Option<Crop>,
 }
 
 /// Glitch knobs that change the picture when moved off their healthy value
@@ -101,6 +105,19 @@ impl Look {
                 .collect();
             look.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
         }
+        if let Some(c) = raw.get("crop").and_then(Value::as_object) {
+            if let Some(ratio) = c.get("ratio").and_then(Value::as_str).and_then(Ratio::from_label) {
+                // Looks from before the crop could zoom have one position.
+                let position = c.get("position").and_then(Value::as_f64).unwrap_or(0.5);
+                let unit = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(position).clamp(0.0, 1.0);
+                look.crop = Some(Crop {
+                    ratio,
+                    x: unit("x"),
+                    y: unit("y"),
+                    scale: c.get("scale").and_then(Value::as_f64).unwrap_or(1.0).clamp(1.0, Crop::MAX_SCALE),
+                });
+            }
+        }
         look.raw = raw;
         Ok(look)
     }
@@ -117,9 +134,6 @@ impl Look {
         }
         if section("digital").is_some_and(|d| d.get("enabled").and_then(Value::as_bool).unwrap_or(false)) {
             out.push("Digital video");
-        }
-        if self.raw.contains_key("crop") {
-            out.push("crop");
         }
         if self.keys.len() > 1 {
             out.push("animation (showing its first keyframe)");
@@ -182,6 +196,7 @@ pub struct LookState<'a> {
     pub shader_enabled: bool,
     pub shader_preset: &'a str,
     pub shader_params: &'a HashMap<String, f32>,
+    pub crop: Option<Crop>,
 }
 
 /// A look file: `base` (the look last loaded, if any) with this version's
@@ -203,6 +218,14 @@ pub fn write_look(base: Option<&Map<String, Value>>, s: &LookState) -> String {
     look.insert("ntsc".into(), serde_json::json!({ "enabled": s.ntsc_enabled, "settings": s.ntsc_settings }));
     let params: Map<String, Value> = s.shader_params.iter().map(|(k, v)| (k.clone(), Value::from(*v as f64))).collect();
     look.insert("shader".into(), serde_json::json!({ "enabled": s.shader_enabled, "preset": s.shader_preset, "params": params }));
+    match s.crop {
+        Some(c) => {
+            look.insert("crop".into(), serde_json::json!({ "ratio": c.ratio.label(), "x": c.x, "y": c.y, "scale": c.scale }));
+        }
+        None => {
+            look.remove("crop");
+        }
+    }
     // serde_json's Map is a BTreeMap (sorted) without the preserve_order feature.
     serde_json::to_string_pretty(&Value::Object(look)).expect("JSON")
 }
@@ -233,7 +256,8 @@ mod tests {
             "downscale":{"enabled":true,"width":256,"method":"lanczos"},"ntsc":{"enabled":false,"settings":{"luma_smear":0.5}},
             "shader":{"enabled":true,"preset":"royale","params":{"x":1}}}"#;
         let look = Look::parse(json).unwrap();
-        assert_eq!(look.unported(), vec!["Glitch", "Digital video", "crop"]);
+        assert_eq!(look.unported(), vec!["Glitch", "Digital video"]);
+        assert_eq!(look.crop, Some(Crop::new(Ratio::SQUARE)));
         assert_eq!(look.downscale_method, Some(DownscaleMethod::Lanczos));
         let ntsc = look.ntsc_settings.clone().unwrap();
         let params = HashMap::from([("x".to_string(), 2.0f32)]);
@@ -249,14 +273,15 @@ mod tests {
                 shader_enabled: true,
                 shader_preset: "royale",
                 shader_params: &params,
+                crop: Some(Crop { x: 0.25, ..Crop::new(Ratio::new(9, 16)) }),
             },
         );
         let back = Look::parse(&out).unwrap();
+        assert_eq!(back.crop.map(|c| (c.ratio, c.x)), Some((Ratio::new(9, 16), 0.25)));
         assert_eq!(back.version, 2);
         assert_eq!(back.downscale_width, Some(320));
         assert_eq!(back.shader_params["x"], 2.0);
         assert_eq!(back.raw["glitch"], look.raw["glitch"], "kept");
-        assert_eq!(back.raw["crop"], look.raw["crop"], "kept");
         assert_eq!(back.keys.len(), 1, "keys kept");
         assert!(Look::parse(r#"{"kind":"ntscrt-video-feedback"}"#).is_err());
     }
