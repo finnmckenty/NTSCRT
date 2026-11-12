@@ -129,12 +129,14 @@ fn run(reader: &mut VideoReader, info: VideoInfo, shared: &(Mutex<State>, Condva
                     st.ring.pop_front();
                 }
                 let have = |n: usize| st.ring.iter().any(|(m, _)| *m == n);
-                // Off the decoded run (backward, or far ahead): start over there.
-                let restart = match pos {
-                    None => true,
-                    Some(p) => want + 2 < st.ring.front().map_or(p, |f| f.0) || want > p + SEEK_PAST,
-                };
-                if restart && !have(want) {
+                // Off the decoded run (it's contiguous: before its start, or
+                // far past its end): start over there.
+                let restart = !have(want)
+                    && match pos {
+                        None => true,
+                        Some(p) => want < st.ring.front().map_or(p, |f| f.0) || want > p + SEEK_PAST,
+                    };
+                if restart {
                     st.ring.clear();
                     pos = Some(want);
                 }
