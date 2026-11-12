@@ -6,7 +6,10 @@
 //! pinned commit is on wgpu 28, newer than nothing egui ships with, so the
 //! app's window can't share a device with it. Frames come back as RGBA8.
 
+mod look;
 mod ntsc_ui;
+pub mod timeline;
+pub use look::{write_look, Look, LookState};
 pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
 pub use serde_json;
 
@@ -478,6 +481,24 @@ pub fn find_shaders() -> Option<PathBuf> {
     while let Some(d) = dir {
         let candidate = d.join("Vendor/slang-shaders");
         if candidate.join("crt").is_dir() {
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// The bundled presets folder: `NTSCRT_PRESETS`, else `presets` next to the
+/// program, else `presets` in a folder above it (a checkout of the repo).
+pub fn find_presets() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("NTSCRT_PRESETS") {
+        return Some(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent();
+    while let Some(d) = dir {
+        let candidate = d.join("presets");
+        if candidate.is_dir() && std::fs::read_dir(&candidate).ok()?.flatten().any(|e| e.path().extension().is_some_and(|x| x == "json")) {
             return Some(candidate);
         }
         dir = d.parent();

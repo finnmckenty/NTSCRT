@@ -56,6 +56,14 @@ jobs:
                 || { echo "::error::$sh-$mode differs from the Mac reference"; fail=1; }
             done
           done
+          # Bundled presets the Windows version shows completely (port/scripts/make-look-refs.py).
+          for ref in port/spike/ref-mac/looks/*.png; do
+            n=$(basename "$ref" .png)
+            $bin/ntscrt-spike TestAssets/testpattern.png - "out/look-$n.png" 1280 960 --look "presets/$n.json" > "out/look-$n.log" 2>&1 \
+              || { echo "::error::look $n failed to render"; tail -5 "out/look-$n.log"; fail=1; continue; }
+            printf '%-22s ' "look: $n"
+            $bin/compare "$ref" "out/look-$n.png" || { echo "::error::look $n differs from the Mac reference"; fail=1; }
+          done
           grep -h adapter out/crt-aperture-plain.log
           exit $fail
       - uses: actions/upload-artifact@v4

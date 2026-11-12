@@ -3,7 +3,7 @@
 //!
 //!   ntscrt-spike <input.png> <preset.slangp> <output.png> [outW outH] [downW downH method]
 //!                [--ntsc default|<settings.json>] [--frame N] [--set NAME=VALUE ...]
-//!                [--no-selftest]
+//!                [--no-selftest] [--look <look.json>]
 //!
 //! Like crt-smoke it sets the preset's first parameter to its midpoint before
 //! rendering (crt-smoke's set/get self-test), unless --no-selftest.
@@ -15,12 +15,14 @@ use ntscrt_engine::{preset_parameters, DownscaleMethod, DownscaleSpec, Engine, I
 fn main() -> Result<()> {
     let mut pos = Vec::new();
     let (mut ntsc, mut frame, mut sets, mut selftest) = (None, 1usize, Vec::new(), true);
+    let mut look: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--ntsc" => ntsc = Some(it.next().context("--ntsc needs a value")?),
             "--frame" => frame = it.next().context("--frame needs a value")?.parse()?,
             "--no-selftest" => selftest = false,
+            "--look" => look = Some(it.next().context("--look needs a file")?),
             "--set" => {
                 let kv = it.next().context("--set needs NAME=VALUE")?;
                 let (k, v) = kv.split_once('=').context("--set needs NAME=VALUE")?;
@@ -45,7 +47,7 @@ fn main() -> Result<()> {
     let (w, h) = img.dimensions();
 
     let mut params = Vec::new();
-    if selftest {
+    if selftest && look.is_none() {
         if let Some(p) = preset_parameters(pos[1].as_ref())?.into_iter().next() {
             let mid = (p.minimum + p.maximum) / 2.0;
             println!("set/get {}: wrote {mid}", p.name);
@@ -56,6 +58,19 @@ fn main() -> Result<()> {
         println!("override {k} = {v}");
         params.retain(|(n, _)| *n != k);
         params.push((k, v));
+    }
+
+    // --look: everything comes from the look (the preset argument is ignored).
+    if let Some(path) = look {
+        let l = ntscrt_engine::Look::parse(&std::fs::read_to_string(&path)?)?;
+        let shaders = ntscrt_engine::find_shaders().context("shaders not found")?;
+        let settings = l.render_settings((w, h), &shaders, frame)?;
+        let mut engine = Engine::new()?;
+        engine.set_source(Image::new(w, h, img.into_raw()));
+        let result = engine.render(&settings, out)?;
+        image::RgbaImage::from_raw(result.width, result.height, result.rgba).context("image")?.save(&pos[2])?;
+        println!("wrote {} from {path} (unported: {:?})", pos[2], l.unported());
+        return Ok(());
     }
 
     let mut engine = Engine::new()?;

@@ -20,7 +20,7 @@ use std::time::Instant;
 use eframe::egui;
 use ntscrt_engine::serde_json::{Map, Value};
 use ntscrt_engine::{
-    app_shader_defaults, find_shaders, ntsc_default_values, ntsc_settings, ntsc_values_json, preset_parameters, DownscaleMethod,
+    app_shader_defaults, find_presets, find_shaders, write_look, Look, LookState, ntsc_default_values, ntsc_settings, ntsc_values_json, preset_parameters, DownscaleMethod,
     DownscaleSpec, Engine, Image, NtscSetting, NtscSettings, Settings, ShaderParam, ShaderSpec, CRT_SHADERS,
 };
 
@@ -87,6 +87,14 @@ struct App {
     /// Each shader's current values; kept when switching between shaders.
     shader_values: HashMap<usize, HashMap<String, f32>>,
 
+    presets: Option<PathBuf>,
+    /// The look last loaded: its name, the file's other sections (written
+    /// back on save), and what it uses that isn't here yet.
+    look_name: Option<String>,
+    look_raw: Option<Map<String, Value>>,
+    look_notes: Vec<&'static str>,
+    downscale_preset: String,
+
     seq: u64,
     sent: Option<(Settings, (u32, u32))>,
     texture: Option<egui::TextureHandle>,
@@ -121,6 +129,11 @@ impl App {
             crt: true,
             shader_params: HashMap::new(),
             shader_values: HashMap::new(),
+            presets: find_presets(),
+            look_name: None,
+            look_raw: None,
+            look_notes: Vec::new(),
+            downscale_preset: "VGA (320px)".into(),
             shader: CRT_SHADERS.iter().position(|s| s.0 == "glow_gauss").unwrap_or(0),
             seq: 0,
             sent: None,
@@ -134,6 +147,9 @@ impl App {
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
         if let Some(p) = start {
             app.open(&p);
+        }
+        if let Some(p) = std::env::var_os("NTSCRT_LOOK") {
+            app.load_look(Path::new(&p));
         }
         app
     }
@@ -151,6 +167,106 @@ impl App {
             }
             Err(e) => self.error = Some(format!("Couldn't open {}: {e}", path.display())),
         }
+    }
+
+    /// Load a look (the Mac app's preset JSON), as the Mac's `loadLook` does.
+    fn load_look(&mut self, path: &Path) {
+        let look = match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|j| Look::parse(&j)) {
+            Ok(l) => l,
+            Err(e) => {
+                self.error = Some(format!("Couldn't load {}: {e:#}", path.display()));
+                return;
+            }
+        };
+        if let Some(v) = look.downscale_enabled { self.downscale = v }
+        if let Some(v) = look.downscale_width { self.downscale_width = v }
+        if let Some(v) = &look.downscale_preset { self.downscale_preset = v.clone() }
+        if let Some(m) = look.downscale_method { self.method = m }
+        if let Some(settings) = &look.ntsc_settings { self.ntsc_values = settings.clone() }
+        if let Some(v) = look.ntsc_enabled { self.ntsc = v }
+        if let Some(id) = &look.shader_preset {
+            if let Some(i) = CRT_SHADERS.iter().position(|s| s.0 == id) {
+                self.shader = i;
+                // The shader's starting values with the look's on top.
+                self.shader_params.remove(&i);
+                self.shader_values.remove(&i);
+                self.ensure_shader();
+                if let Some(values) = self.shader_values.get_mut(&i) {
+                    values.extend(look.shader_params.iter().map(|(k, v)| (k.clone(), *v)));
+                }
+            }
+        }
+        if let Some(v) = look.shader_enabled { self.crt = v }
+        // A look with keyframes opens at its start (the Mac scrubs to 0).
+        if let Some(first) = look.keys.first() {
+            if let Some(values) = self.shader_values.get_mut(&self.shader) {
+                values.extend(first.shader.iter().map(|(k, v)| (k.clone(), *v)));
+            }
+            if !first.ntsc.is_empty() {
+                self.ntsc_values = first.ntsc.clone();
+            }
+        }
+        self.look_notes = look.unported();
+        self.look_name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
+        self.look_raw = Some(look.raw);
+        self.error = None;
+    }
+
+    fn save_look(&mut self, path: &Path) {
+        self.ensure_shader();
+        let empty = HashMap::new();
+        let json = write_look(
+            self.look_raw.as_ref(),
+            &LookState {
+                downscale_enabled: self.downscale,
+                downscale_width: self.downscale_width,
+                downscale_preset: &self.downscale_preset,
+                downscale_method: self.method,
+                ntsc_enabled: self.ntsc,
+                ntsc_settings: &self.ntsc_values,
+                shader_enabled: self.crt,
+                shader_preset: CRT_SHADERS[self.shader].0,
+                shader_params: self.shader_values.get(&self.shader).unwrap_or(&empty),
+            },
+        );
+        match std::fs::write(path, json) {
+            Ok(()) => self.look_name = path.file_stem().map(|n| n.to_string_lossy().into_owned()),
+            Err(e) => self.error = Some(format!("Couldn't save {}: {e}", path.display())),
+        }
+    }
+
+    fn preset_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Preset", |ui| {
+            if ui.button("Load…").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Look", &["json"]).pick_file() {
+                    self.load_look(&p);
+                }
+                ui.close();
+            }
+            if ui.button("Save…").clicked() {
+                let name = format!("{}.json", self.look_name.as_deref().unwrap_or("Look"));
+                if let Some(p) = rfd::FileDialog::new().add_filter("Look", &["json"]).set_file_name(name).save_file() {
+                    self.save_look(&p);
+                }
+                ui.close();
+            }
+            if let Some(dir) = self.presets.clone() {
+                ui.separator();
+                let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
+                    .map(|r| r.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
+                    .unwrap_or_default();
+                names.sort_by_key(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()));
+                egui::ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
+                    for p in names {
+                        let label = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                        if ui.button(label).clicked() {
+                            self.load_look(&p);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
     }
 
     /// The shader's parameters and values, loading them on first use: the
@@ -258,6 +374,9 @@ impl App {
                 ui.selectable_value(&mut self.method, DownscaleMethod::Area, "Smooth")
                     .on_hover_text("The average of the whole block: softer, steady.");
             });
+            if !matches!(self.method, DownscaleMethod::Nearest | DownscaleMethod::Area) {
+                ui.weak(format!("Using {}, from the loaded preset.", self.method.display_name()));
+            }
         });
         ui.separator();
 
@@ -383,6 +502,20 @@ impl eframe::App for App {
             self.open(&p);
         }
 
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                self.preset_menu(ui);
+                if let Some(name) = &self.look_name {
+                    ui.label(name);
+                }
+                if !self.look_notes.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 150, 40),
+                        format!("Not in the Windows version yet: {}", self.look_notes.join(", ")),
+                    );
+                }
+            });
+        });
         egui::Panel::left("sidebar").resizable(false).exact_size(SIDEBAR_WIDTH).show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(13, 13, 15)))
