@@ -50,8 +50,12 @@ fn run(values: &[(&str, f64)]) -> Option<Vec<Image>> {
     Some(out)
 }
 
+/// One GPU test at a time: some drivers (the VM's GL) crash creating devices on two threads at once.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn the_run_up_builds_a_tunnel() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let Some(frames) = run(&[("shake", 0.0), ("center_x", 0.0), ("center_y", 0.0), ("turn", 0.0), ("focus", 0.0)]) else {
         eprintln!("no GPU: skipped");
         return;
@@ -75,6 +79,7 @@ fn the_run_up_builds_a_tunnel() {
 
 #[test]
 fn the_same_settings_give_the_same_frames() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let values = [("shake", 0.6), ("counter", 1.0), ("auto_exposure", 0.5), ("delay", 3.0)];
     let (Some(a), Some(b)) = (run(&values), run(&values)) else { return };
     for (x, y) in a.iter().zip(&b) {

@@ -23,6 +23,9 @@ fn cheap_camcorder() -> Look {
     Look::parse(&std::fs::read_to_string(root).expect("preset")).expect("look")
 }
 
+/// One GPU test at a time: some drivers (the VM's GL) crash creating devices on two threads at once.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_digital_look_sets_up_one_field_and_the_capture() {
     let look = cheap_camcorder();
@@ -41,6 +44,7 @@ fn a_digital_look_sets_up_one_field_and_the_capture() {
 
 #[test]
 fn the_stage_changes_the_picture_and_its_noise_moves() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(mut engine) = Engine::new() else {
         eprintln!("no GPU: skipped");
         return;

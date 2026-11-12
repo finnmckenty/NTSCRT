@@ -281,6 +281,9 @@ pub struct Engine {
     source: Option<(u64, Image)>,
     next_source: u64,
     prepared: Option<Prepared>,
+    /// Milliseconds the last render spent ahead of the GPU (Digital video,
+    /// NTSC, upload), for profiling.
+    pub last_prepare_ms: f64,
     chain: Option<Chain>,
     /// A Screen Loop in progress (exports only).
     howl: Option<howl::feedback::HowlState>,
@@ -356,6 +359,7 @@ impl Engine {
             source: None,
             next_source: 1,
             prepared: None,
+            last_prepare_ms: 0.0,
             chain: None,
             howl: None,
         })
@@ -417,7 +421,9 @@ impl Engine {
     /// `full_render` (zoomed in: the Mac samples the full render, since the
     /// box filter averages scanlines flat at small display multiples).
     pub fn render_preview(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool, earlier: Option<&mut FrameVisitor<'_>>) -> Result<Image> {
+        let t = std::time::Instant::now();
         let input = self.prepare(settings, earlier)?;
+        self.last_prepare_ms = t.elapsed().as_secs_f64() * 1000.0;
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let chain_input = match settings.downscale {
             Some(spec) => self.downscale(&mut enc, &input, spec),
@@ -470,7 +476,9 @@ impl Engine {
     /// Without the CRT, the chain input enlarged with hard edges to the next
     /// whole multiple and filtered down (the Mac's ShaderBypass).
     pub fn render_export(&mut self, settings: &Settings, out: (u32, u32), earlier: Option<&mut FrameVisitor<'_>>) -> Result<Image> {
+        let t = std::time::Instant::now();
         let input = self.prepare(settings, earlier)?;
+        self.last_prepare_ms = t.elapsed().as_secs_f64() * 1000.0;
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let chain_input = match settings.downscale {
             Some(spec) => self.downscale(&mut enc, &input, spec),

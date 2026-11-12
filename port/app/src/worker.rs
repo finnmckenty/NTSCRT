@@ -54,6 +54,8 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
     let a = engine.adapter_info();
     send(Event::Adapter(format!("{} ({:?})", a.name, a.backend)));
 
+    // NTSCRT_PROFILE=1: where each preview frame's time goes, on stderr.
+    let profile = std::env::var_os("NTSCRT_PROFILE").is_some();
     let mut media: Option<Media> = None;
     // The open clip's path, and its earlier frames for the Digital stage
     // (opened when the stage first needs them, per crop).
@@ -91,6 +93,7 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
         let t = Instant::now();
         let result = (|| -> anyhow::Result<Image> {
             let frame = if matches!(media, Some(Media::Video(_))) { frame } else { 0 };
+            let decode_start = Instant::now();
             if picture_key != Some((frame, crop)) {
                 let pic = match media.as_mut() {
                     Some(Media::Still(img)) => img.clone(),
@@ -112,9 +115,18 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                 clip = clip_path.as_deref().and_then(|p| crate::clip_frames::ClipFrames::open(p, crop).ok());
                 clip_crop = Some(crop);
             }
+            let decoded = decode_start.elapsed().as_secs_f64() * 1000.0;
             let mut none = None;
             let visitor = if settings.digital.is_some() { &mut clip } else { &mut none };
-            crate::clip_frames::with_visitor(visitor, |v| engine.render_preview(&settings, plan, full, v))
+            let rendered = crate::clip_frames::with_visitor(visitor, |v| engine.render_preview(&settings, plan, full, v));
+            if profile {
+                eprintln!(
+                    "profile frame {frame}: decode+crop {decoded:.1} ms, CPU stages {:.1} ms, total {:.1} ms",
+                    engine.last_prepare_ms,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            rendered
         })()
         .map_err(|e| format!("{e:#}"));
         let source = (want_source && sent_key != picture_key).then(|| picture.clone()).flatten();
