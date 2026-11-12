@@ -2375,6 +2375,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ntscrt-codec"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
 name = "ntscrt-engine"
 version = "0.1.0"
 dependencies = [

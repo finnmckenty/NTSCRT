@@ -1,6 +1,6 @@
 # NTSCRT for Windows. The Mac app doesn't use anything here.
 [workspace]
-members = ["engine", "media", "spike", "app"]
+members = ["engine", "media", "codec", "spike", "app"]
 # librashader (port/fetch-librashader.sh) is its own workspace.
 exclude = ["vendor"]
 resolver = "2"
