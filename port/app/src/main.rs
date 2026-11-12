@@ -41,6 +41,35 @@ use ntscrt_engine::preview::{self, PreviewPlan};
 
 const SIDEBAR_WIDTH: f32 = 330.0;
 
+/// The sidebar sections' open/closed state, starting as the Mac's do: Crop
+/// closed, Digital video closed until it's turned on, the rest open.
+struct Sections {
+    source: bool,
+    crop: bool,
+    downscale: bool,
+    digital: bool,
+    ntsc: bool,
+    glitch: bool,
+    crt: bool,
+}
+
+impl Default for Sections {
+    fn default() -> Self {
+        Self { source: true, crop: false, downscale: true, digital: false, ntsc: true, glitch: true, crt: true }
+    }
+}
+
+/// The chevron beside a section heading: click to show or hide the section.
+fn twirl(ui: &mut egui::Ui, open: &mut bool) {
+    let size = egui::vec2(ui.spacing().icon_width, ui.spacing().interact_size.y);
+    let (_, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let response = response.on_hover_text(if *open { "Hide this section" } else { "Show this section" });
+    if response.clicked() {
+        *open = !*open;
+    }
+    egui::collapsing_header::paint_default_icon(ui, if *open { 1.0 } else { 0.0 }, &response);
+}
+
 struct Rendered {
     seq: u64,
     result: Result<Image, String>,
@@ -67,6 +96,11 @@ struct App {
     /// the Cheap camcorder look, as on the Mac).
     digital_enabled: bool,
     digital_values: std::collections::BTreeMap<String, f64>,
+    /// Which sidebar sections are open (the chevrons beside the headings).
+    open: Sections,
+    /// The Digital video stage as of the last frame drawn: its section
+    /// opens when the stage comes on, from the checkbox, a preset or a look.
+    digital_was_enabled: bool,
     /// The receiver's clock on a still without a timeline: wall-clock time
     /// while Live noise runs (the Mac's animateClock).
     animate_clock: f64,
@@ -186,6 +220,8 @@ impl App {
             glitch_values: ntscrt_engine::glitch::GlitchSettings::default(),
             digital_enabled: false,
             digital_values: ntscrt_engine::codec::DigitalParam::starting_values(),
+            open: Sections::default(),
+            digital_was_enabled: false,
             animate_clock: 0.0,
             animate_last: None,
             crt: true,
@@ -366,19 +402,30 @@ impl App {
     }
 
     fn crop_panel(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.crop_enabled, egui::RichText::new("Crop").heading())
-            .on_hover_text("Cut the picture to an aspect ratio before anything else sees it. Drag the picture in the preview to move the crop.");
-        if !self.crop_enabled {
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.crop);
+            ui.checkbox(&mut self.crop_enabled, egui::RichText::new("Crop").heading())
+                .on_hover_text("Cut the picture to an aspect ratio before anything else sees it. Drag the picture in the preview to move the crop.");
+        });
+        if !self.open.crop {
             return;
         }
+        // The ratios show while Crop is off too (as on the Mac): picking one
+        // turns it on.
         let mut ratio_button = |ui: &mut egui::Ui, r: Ratio| {
-            if ui.selectable_label(self.crop.ratio == r, r.label()).clicked() {
-                self.crop = Crop::new(r);
+            if ui.selectable_label(self.crop_enabled && self.crop.ratio == r, r.label()).clicked() {
+                if !(self.crop_enabled && self.crop.ratio == r) {
+                    self.crop = Crop::new(r);
+                }
+                self.crop_enabled = true;
             }
         };
         ui.horizontal(|ui| ratio_button(ui, Ratio::SQUARE));
         ui.horizontal(|ui| Ratio::PORTRAIT.into_iter().for_each(|r| ratio_button(ui, r)));
         ui.horizontal(|ui| Ratio::LANDSCAPE.into_iter().for_each(|r| ratio_button(ui, r)));
+        if !self.crop_enabled {
+            return;
+        }
         let Some((w, h)) = self.original_size else { return };
         let (_, _, cw, ch) = self.crop.rect(w, h);
         if cw < w {
@@ -771,7 +818,90 @@ impl App {
         // (the sidebar swallowed the window on Windows).
         ui.spacing_mut().slider_width = SIDEBAR_WIDTH - 120.0;
         ui.add_space(6.0);
-        ui.heading("Source");
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.source);
+            ui.heading("Source");
+        });
+        if self.open.source {
+            self.source_section(ui);
+        }
+        ui.separator();
+        self.crop_panel(ui);
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.downscale);
+            ui.checkbox(&mut self.downscale, egui::RichText::new("Downscale").heading());
+        });
+        if self.open.downscale {
+            self.downscale_section(ui);
+        }
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.digital);
+            ui.checkbox(&mut self.digital_enabled, egui::RichText::new("Digital video").heading())
+                .on_hover_text("Record the picture with a digital camera and codec before it goes out as an analog signal. Ready-made formats — webcam, video call, MiniDV and more — are in the Preset menu, and also set the Downscale resolution.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("Back to the starting values (Cheap camcorder)").clicked() {
+                    self.digital_values = ntscrt_engine::codec::DigitalParam::starting_values();
+                }
+            });
+        });
+        // Turning the stage on (here, from a preset or a look) opens it.
+        if self.digital_enabled && !self.digital_was_enabled {
+            self.open.digital = true;
+        }
+        self.digital_was_enabled = self.digital_enabled;
+        if self.open.digital {
+            ui.add_enabled_ui(self.digital_enabled, |ui| digital_panel::controls(ui, &mut self.digital_values));
+        }
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.ntsc);
+            ui.checkbox(&mut self.ntsc, egui::RichText::new("NTSC (TV)").heading());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("Back to the house look").clicked() {
+                    self.ntsc_values = ntsc_default_values();
+                }
+            });
+        });
+        if self.open.ntsc {
+            ui.add_enabled_ui(self.ntsc, |ui| ntsc_panel::controls(ui, &self.ntsc_settings, &mut self.ntsc_values));
+        }
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.glitch);
+            ui.checkbox(&mut self.glitch_enabled, egui::RichText::new("Glitch").heading())
+                .on_hover_text("A simulated TV and VCR, for dramatic failures: rolling, tearing, bending, snow, tracking noise. With every knob healthy the picture is untouched.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("Every knob back to healthy").clicked() {
+                    self.glitch_values = ntscrt_engine::glitch::GlitchSettings::default();
+                }
+            });
+        });
+        if self.open.glitch {
+            ui.add_enabled_ui(self.glitch_enabled, |ui| glitch_panel::controls(ui, &mut self.glitch_values));
+        }
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.crt);
+            ui.checkbox(&mut self.crt, egui::RichText::new("CRT").heading());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("This shader's parameters back to their starting values").clicked() {
+                    self.reset_shader();
+                }
+            });
+        });
+        if self.open.crt {
+            self.crt_section(ui);
+        }
+    }
+
+    fn source_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Open…").clicked() {
                 if let Some(p) = rfd::FileDialog::new()
@@ -803,11 +933,9 @@ impl App {
                 ui.weak("Open a picture (PNG, JPEG, HEIC) or a video (MP4, MOV), or drop one on the window.");
             }
         }
-        ui.separator();
-        self.crop_panel(ui);
-        ui.separator();
+    }
 
-        ui.checkbox(&mut self.downscale, egui::RichText::new("Downscale").heading());
+    fn downscale_section(&mut self, ui: &mut egui::Ui) {
         ui.add_enabled_ui(self.downscale, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Width");
@@ -831,60 +959,9 @@ impl App {
                 ui.weak(format!("Using {}, from the loaded preset.", self.method.display_name()));
             }
         });
-        ui.separator();
+    }
 
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.digital_enabled, egui::RichText::new("Digital video").heading())
-                .on_hover_text("Record the picture with a digital camera and codec before it goes out as an analog signal. Ready-made formats — webcam, video call, MiniDV and more — are in the Preset menu, and also set the Downscale resolution.");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset").on_hover_text("Back to the starting values (Cheap camcorder)").clicked() {
-                    self.digital_values = ntscrt_engine::codec::DigitalParam::starting_values();
-                }
-            });
-        });
-        // Closed while the stage is off, to save room.
-        if self.digital_enabled {
-            digital_panel::controls(ui, &mut self.digital_values);
-        }
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.ntsc, egui::RichText::new("NTSC (TV)").heading());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset").on_hover_text("Back to the house look").clicked() {
-                    self.ntsc_values = ntsc_default_values();
-                }
-            });
-        });
-        ui.add_enabled_ui(self.ntsc, |ui| {
-            egui::CollapsingHeader::new("Settings").id_salt("ntsc-settings").default_open(true).show(ui, |ui| {
-                ntsc_panel::controls(ui, &self.ntsc_settings, &mut self.ntsc_values);
-            });
-        });
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.glitch_enabled, egui::RichText::new("Glitch").heading())
-                .on_hover_text("A simulated TV and VCR, for dramatic failures: rolling, tearing, bending, snow, tracking noise. With every knob healthy the picture is untouched.");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset").on_hover_text("Every knob back to healthy").clicked() {
-                    self.glitch_values = ntscrt_engine::glitch::GlitchSettings::default();
-                }
-            });
-        });
-        ui.add_enabled_ui(self.glitch_enabled, |ui| {
-            glitch_panel::controls(ui, &mut self.glitch_values);
-        });
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.crt, egui::RichText::new("CRT").heading());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset").on_hover_text("This shader's parameters back to their starting values").clicked() {
-                    self.reset_shader();
-                }
-            });
-        });
+    fn crt_section(&mut self, ui: &mut egui::Ui) {
         if self.shaders.is_none() {
             ui.colored_label(egui::Color32::LIGHT_RED, "Shaders not found (set NTSCRT_SHADERS).");
             return;
