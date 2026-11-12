@@ -2353,6 +2353,7 @@ dependencies = [
  "eframe",
  "image",
  "ntscrt-engine",
+ "ntscrt-media",
  "rfd",
 ]
 
@@ -2366,6 +2367,15 @@ dependencies = [
  "pollster 0.4.0",
  "serde_json",
  "wgpu 28.0.0",
+]
+
+[[package]]
+name = "ntscrt-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "windows",
 ]
 
 [[package]]

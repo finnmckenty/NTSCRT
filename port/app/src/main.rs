@@ -11,27 +11,26 @@
 
 mod ntsc_panel;
 mod shader_panel;
+mod worker;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
+
+use ntscrt_media::VideoInfo;
+use worker::{Event, Request};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ntscrt_engine::serde_json::{Map, Value};
 use ntscrt_engine::{
     app_shader_defaults, find_presets, find_shaders, write_look, Look, LookState, ntsc_default_values, ntsc_settings, ntsc_values_json, preset_parameters, DownscaleMethod,
-    DownscaleSpec, Engine, Image, NtscSetting, NtscSettings, Settings, ShaderParam, ShaderSpec, CRT_SHADERS,
+    DownscaleSpec, Image, NtscSetting, NtscSettings, Settings, ShaderParam, ShaderSpec, CRT_SHADERS,
 };
 use ntscrt_engine::crop::{Crop, Ratio};
 use ntscrt_engine::preview::{self, PreviewPlan};
 
 const SIDEBAR_WIDTH: f32 = 330.0;
-
-enum Request {
-    Source(Image),
-    Render { seq: u64, settings: Settings, plan: PreviewPlan, full: bool },
-}
 
 struct Rendered {
     seq: u64,
@@ -39,39 +38,9 @@ struct Rendered {
     millis: u128,
 }
 
-fn worker(requests: Receiver<Request>, results: Sender<Rendered>, info: Sender<String>, ctx: egui::Context) {
-    let mut engine = match Engine::new() {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = info.send(format!("No graphics device: {e}"));
-            return;
-        }
-    };
-    let a = engine.adapter_info();
-    let _ = info.send(format!("{} ({:?})", a.name, a.backend));
-    ctx.request_repaint();
-    while let Ok(first) = requests.recv() {
-        // Take everything waiting: new pictures in order, only the latest render.
-        let mut render = None;
-        for r in std::iter::once(first).chain(requests.try_iter()) {
-            match r {
-                Request::Source(img) => engine.set_source(img),
-                r @ Request::Render { .. } => render = Some(r),
-            }
-        }
-        if let Some(Request::Render { seq, settings, plan, full }) = render {
-            let t = Instant::now();
-            let result = engine.render_preview(&settings, plan, full).map_err(|e| format!("{e:#}"));
-            let _ = results.send(Rendered { seq, result, millis: t.elapsed().as_millis() });
-            ctx.request_repaint();
-        }
-    }
-}
-
 struct App {
     requests: Sender<Request>,
-    results: Receiver<Rendered>,
-    info: Receiver<String>,
+    events: Receiver<Event>,
     adapter: String,
     shaders: Option<PathBuf>,
 
@@ -113,17 +82,20 @@ struct App {
     source_texture: Option<egui::TextureHandle>,
     /// The picture as the chain sees it (cropped), for Compare.
     source_pixels: Option<Image>,
-    /// The picture as opened.
-    original: Option<Image>,
+    /// The picture's or clip's size as opened (before the crop).
+    original_size: Option<(u32, u32)>,
+    /// The open clip, if it's a video.
+    video: Option<VideoInfo>,
+    /// The clip's frame on screen, and playback (started at, from frame).
+    video_frame: usize,
+    playing: Option<(Instant, usize)>,
     crop_enabled: bool,
     crop: Crop,
-    /// The crop the engine's picture was made with.
-    applied_crop: Option<Option<Crop>>,
     /// Dragging the picture: the crop and pointer where the drag began.
     crop_drag: Option<(Crop, egui::Pos2)>,
 
     seq: u64,
-    sent: Option<(Settings, PreviewPlan, bool)>,
+    sent: Option<(Settings, PreviewPlan, bool, usize, Option<Crop>, bool)>,
     texture: Option<egui::TextureHandle>,
     shown_seq: u64,
     status: String,
@@ -131,19 +103,21 @@ struct App {
 
     snapshot: Option<PathBuf>,
     snapshot_requested: bool,
+    /// NTSCRT_SNAPSHOT_AFTER=seconds: wait this long first.
+    snapshot_after: Option<(Instant, f64)>,
+    /// NTSCRT_PLAY=1: play the clip as soon as it's open.
+    autoplay: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let (req_tx, req_rx) = channel();
-        let (res_tx, res_rx) = channel();
-        let (info_tx, info_rx) = channel();
+        let (ev_tx, ev_rx) = channel();
         let ctx = cc.egui_ctx.clone();
-        std::thread::spawn(move || worker(req_rx, res_tx, info_tx, ctx));
+        std::thread::spawn(move || worker::run(req_rx, ev_tx, ctx));
         let mut app = Self {
             requests: req_tx,
-            results: res_rx,
-            info: info_rx,
+            events: ev_rx,
             adapter: "starting…".into(),
             shaders: find_shaders(),
             source: None,
@@ -173,10 +147,12 @@ impl App {
             last_tick: Instant::now(),
             source_texture: None,
             source_pixels: None,
-            original: None,
+            original_size: None,
+            video: None,
+            video_frame: 0,
+            playing: None,
             crop_enabled: false,
             crop: Crop::new(Ratio::SQUARE),
-            applied_crop: None,
             crop_drag: None,
             seq: 0,
             sent: None,
@@ -186,6 +162,8 @@ impl App {
             error: None,
             snapshot: std::env::var_os("NTSCRT_UI_SNAPSHOT").map(PathBuf::from),
             snapshot_requested: false,
+            snapshot_after: std::env::var("NTSCRT_SNAPSHOT_AFTER").ok().and_then(|v| v.parse().ok()).map(|s| (Instant::now(), s)),
+            autoplay: std::env::var("NTSCRT_PLAY").as_deref() == Ok("1"),
         };
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
         if let Some(p) = start {
@@ -215,41 +193,44 @@ impl App {
     }
 
     fn open(&mut self, path: &Path) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        self.sent = None;
+        self.error = None;
+        self.source_texture = None;
+        self.source_pixels = None;
+        if matches!(ext.as_str(), "mp4" | "mov" | "m4v") {
+            // The worker opens it and reports its size (see Event::Opened).
+            self.source = Some((name, 0, 0));
+            self.original_size = None;
+            self.video = None;
+            self.playing = None;
+            let _ = self.requests.send(Request::Video(path.to_path_buf()));
+            return;
+        }
         match image::open(path) {
             Ok(img) => {
                 let img = img.to_rgba8();
                 let (w, h) = img.dimensions();
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.source = Some((name, w, h));
-                self.original = Some(Image::new(w, h, img.into_raw()));
-                self.applied_crop = None;
-                self.apply_source();
-                self.sent = None;
-                self.error = None;
+                self.original_size = Some((w, h));
+                self.video = None;
+                self.playing = None;
+                let _ = self.requests.send(Request::Still(Image::new(w, h, img.into_raw())));
             }
             Err(e) => self.error = Some(format!("Couldn't open {}: {e}", path.display())),
         }
     }
 
-    /// Hand the engine the picture, cropped (the crop comes before anything
-    /// else, as on the Mac).
-    fn apply_source(&mut self) {
-        let want = self.crop_enabled.then_some(self.crop);
-        if self.applied_crop == Some(want) {
-            return;
-        }
-        let Some(original) = &self.original else { return };
-        let image = match want {
-            Some(c) => c.apply(original),
-            None => original.clone(),
-        };
-        if let Some(src) = &mut self.source {
-            (src.1, src.2) = (image.width, image.height);
-        }
-        self.source_pixels = Some(image.clone());
-        self.source_texture = None;
-        let _ = self.requests.send(Request::Source(image));
-        self.applied_crop = Some(want);
+    /// The picture the chain sees: the opened size, cropped.
+    fn picture_size(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.original_size?;
+        Some(if self.crop_enabled {
+            let (_, _, cw, ch) = self.crop.rect(w, h);
+            (cw, ch)
+        } else {
+            (w, h)
+        })
     }
 
     fn crop_panel(&mut self, ui: &mut egui::Ui) {
@@ -266,8 +247,7 @@ impl App {
         ui.horizontal(|ui| ratio_button(ui, Ratio::SQUARE));
         ui.horizontal(|ui| Ratio::PORTRAIT.into_iter().for_each(|r| ratio_button(ui, r)));
         ui.horizontal(|ui| Ratio::LANDSCAPE.into_iter().for_each(|r| ratio_button(ui, r)));
-        let Some(original) = &self.original else { return };
-        let (w, h) = (original.width, original.height);
+        let Some((w, h)) = self.original_size else { return };
         let (_, _, cw, ch) = self.crop.rect(w, h);
         if cw < w {
             ui.label("Left / right");
@@ -439,7 +419,9 @@ impl App {
             ntsc: self.ntsc.then(|| NtscSettings::Json(ntsc_values_json(&self.ntsc_values))),
             downscale: self.downscale.then(|| DownscaleSpec::for_width(self.downscale_width, source, self.method)),
             shader,
-            frame: self.frame,
+            // A clip's noise is seeded by its frame number + 1, as the Mac's
+            // video export and PNG do; a still's by the Animate counter.
+            frame: if self.video.is_some() { self.video_frame + 1 } else { self.frame },
         }
     }
 
@@ -475,8 +457,13 @@ impl App {
         match &self.source {
             Some((name, _, _)) => {
                 ui.label(name);
-                if let Some(o) = &self.original {
-                    ui.weak(format!("{} × {} px", o.width, o.height));
+                if let Some((w, h)) = self.original_size {
+                    match self.video {
+                        Some(v) => ui.weak(format!("{w} × {h} px · {} frames · {:.2} fps", v.total_frames, v.fps)),
+                        None => ui.weak(format!("{w} × {h} px")),
+                    };
+                } else if self.error.is_none() {
+                    ui.weak("Opening…");
                 }
             }
             None => {
@@ -579,6 +566,22 @@ impl App {
     fn palette(&mut self, ui: &mut egui::Ui) {
         // Its own backing: the preview behind it is near-black in either theme.
         let frame = egui::Frame::new().fill(ui.visuals().panel_fill).corner_radius(6.0).inner_margin(egui::Margin::symmetric(8, 3));
+        if let Some(v) = self.video {
+            frame.show(ui, |ui| ui.horizontal(|ui| {
+                if ui.button(if self.playing.is_some() { "Pause" } else { "Play" }).on_hover_text("Space").clicked() {
+                    self.toggle_play();
+                }
+                let mut f = self.video_frame;
+                let last = v.total_frames.saturating_sub(1);
+                ui.spacing_mut().slider_width = (ui.available_width() - 190.0).max(120.0);
+                if ui.add(egui::Slider::new(&mut f, 0..=last).show_value(false)).changed() {
+                    self.playing = None;
+                    self.video_frame = f;
+                }
+                ui.monospace(format!("{}/{} · {:.2}s", self.video_frame + 1, v.total_frames, self.video_frame as f64 / v.timescale()));
+            }));
+            ui.add_space(4.0);
+        }
         frame.show(ui, |ui| ui.horizontal(|ui| {
             ui.toggle_value(&mut self.compare, "Compare")
                 .on_hover_text("Split the view: the full pipeline on the left, the original on the right. Drag the line to move the split.");
@@ -597,6 +600,13 @@ impl App {
             }
             ui.weak("Alt/Ctrl-scroll to zoom; drag to pan.");
         }));
+    }
+
+    fn toggle_play(&mut self) {
+        self.playing = match self.playing {
+            Some(_) => None,
+            None => Some((Instant::now(), self.video_frame)),
+        };
     }
 
     fn set_zoom(&mut self, z: f32) {
@@ -620,7 +630,7 @@ impl App {
         };
         let ctx = ui.ctx().clone();
         let full = ui.available_rect_before_wrap();
-        let palette_h = 40.0;
+        let palette_h = if self.video.is_some() { 80.0 } else { 40.0 };
         let avail = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, full.max.y - palette_h));
         let mut palette_ui = ui.new_child(
             egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(egui::pos2(full.min.x + 8.0, avail.max.y + 4.0), full.max)),
@@ -654,7 +664,7 @@ impl App {
 
         // Animate: the frame advances once the last one is on screen, at 30
         // frames a second with NTSC on and 60 without (the Mac's draw rates).
-        if self.animate {
+        if self.animate && self.video.is_none() {
             let interval = Duration::from_secs_f64(if self.ntsc { 1.0 / 30.0 } else { 1.0 / 60.0 });
             if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval {
                 self.frame = self.frame.wrapping_add(1);
@@ -663,11 +673,29 @@ impl App {
             ctx.request_repaint_after(interval);
         }
 
+        // Playback: the frame the clock says, dropping what rendering can't keep up with.
+        if let (Some((since, from)), Some(v)) = (self.playing, self.video) {
+            let f = from + (since.elapsed().as_secs_f64() * v.fps) as usize;
+            self.video_frame = f % v.total_frames.max(1);
+            ctx.request_repaint();
+        }
+
         let settings = self.settings((w, h));
-        let want = (settings, plan, zoomed);
-        if self.sent.as_ref() != Some(&want) {
+        let crop = self.crop_enabled.then_some(self.crop);
+        let want = (settings, plan, zoomed, self.video_frame, crop, self.compare);
+        // While playing, ask for the next frame once the last is on screen.
+        let ready = self.playing.is_none() || self.shown_seq == self.seq;
+        if self.sent.as_ref() != Some(&want) && ready {
             self.seq += 1;
-            let _ = self.requests.send(Request::Render { seq: self.seq, settings: want.0.clone(), plan, full: zoomed });
+            let _ = self.requests.send(Request::Render {
+                seq: self.seq,
+                settings: want.0.clone(),
+                plan,
+                full: zoomed,
+                frame: self.video_frame,
+                crop,
+                want_source: self.compare,
+            });
             self.sent = Some(want);
         }
 
@@ -715,8 +743,7 @@ impl App {
                 }
             } else if self.crop_enabled && !zoomed {
                 // Drag the picture to move the crop: the picture follows the hand.
-                if let (Some(original), Some((start, from)), Some(p)) = (&self.original, self.crop_drag, response.interact_pointer_pos()) {
-                    let (ow, oh) = (original.width, original.height);
+                if let (Some((ow, oh)), Some((start, from)), Some(p)) = (self.original_size, self.crop_drag, response.interact_pointer_pos()) {
                     let (x, y, cw, _) = start.rect(ow, oh);
                     // Source pixels per point on screen.
                     let k = cw as f32 / target.width();
@@ -753,10 +780,39 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        for a in self.info.try_iter() {
-            self.adapter = a;
-        }
-        for r in self.results.try_iter() {
+        let events: Vec<Event> = self.events.try_iter().collect();
+        for e in events {
+            let (seq, result, millis) = match e {
+                Event::Adapter(a) => {
+                    self.adapter = a;
+                    continue;
+                }
+                Event::Opened(Ok(info)) => {
+                    self.video = Some(info);
+                    self.original_size = Some((info.width, info.height));
+                    if let Some(src) = &mut self.source {
+                        (src.1, src.2) = (info.width, info.height);
+                    }
+                    self.video_frame = 0;
+                    if self.autoplay {
+                        self.playing = Some((Instant::now(), 0));
+                    }
+                    continue;
+                }
+                Event::Opened(Err(e)) => {
+                    self.error = Some(format!("Couldn't open the video: {e}"));
+                    self.source = None;
+                    continue;
+                }
+                Event::Rendered { seq, result, millis, source } => {
+                    if let Some(src) = source {
+                        self.source_pixels = Some(src);
+                        self.source_texture = None;
+                    }
+                    (seq, result, millis)
+                }
+            };
+            let r = Rendered { seq, result, millis };
             match r.result {
                 Ok(img) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba);
@@ -771,7 +827,15 @@ impl eframe::App for App {
                 Err(e) => self.error = Some(e),
             }
         }
-        self.apply_source();
+        // The picture's size follows the crop.
+        if let Some((w, h)) = self.picture_size() {
+            if let Some(src) = &mut self.source {
+                (src.1, src.2) = (w, h);
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Space)) && self.video.is_some() && !ctx.egui_wants_keyboard_input() {
+            self.toggle_play();
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty()));
         if let Some(p) = dropped {
             self.open(&p);
@@ -798,7 +862,11 @@ impl eframe::App for App {
 
         // NTSCRT_UI_SNAPSHOT: screenshot once the latest request is on screen.
         if let Some(path) = self.snapshot.clone() {
-            if !self.snapshot_requested && self.shown_seq != 0 && self.shown_seq == self.seq {
+            let waited = self.snapshot_after.is_none_or(|(t, s)| t.elapsed().as_secs_f64() >= s);
+            if !waited {
+                ctx.request_repaint();
+            }
+            if waited && !self.snapshot_requested && self.shown_seq != 0 && self.shown_seq == self.seq {
                 self.snapshot_requested = true;
                 let close = ctx.clone();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
