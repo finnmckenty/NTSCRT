@@ -70,6 +70,11 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
         let _ = std::fs::write(p, format!("{:#?}\nsize {:?} png_frame {}", job.settings, job.size, job.png_frame));
     }
     let info = reader.as_ref().map(|r| r.info());
+    // A clip's earlier frames, for the Digital stage's re-runs.
+    let mut clip = match (&job.media, &job.settings.digital) {
+        (Media::Video(p), Some(_)) => Some(crate::clip_frames::ClipFrames::open(p, job.crop)?),
+        _ => None,
+    };
     let evaluator = job.timeline.as_ref().and_then(|(keys, meta, ntsc)| Evaluator::new(keys, meta.clone(), ntsc));
     // The glitch knobs as set (keys interpolate over them).
     let glitch_base = job.settings.glitch.as_ref().map(|g| g.settings.clone());
@@ -102,8 +107,9 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
             }
         }
     };
-    // The picture for a frame (cropped), and the settings with its seed.
-    let mut picture = |engine: &mut Engine, clip_frame: usize, seed: usize| -> Result<Settings> {
+    // The picture for a frame (cropped), and the settings with its seed and
+    // the Digital stage's frame (n at `fps`; None keeps the look's, for PNG).
+    let mut picture = |engine: &mut Engine, clip_frame: usize, seed: usize, digital: Option<(i64, f64)>| -> Result<Settings> {
         let pic = match (&job.media, reader.as_mut()) {
             (Media::Video(_), Some(r)) => {
                 let f = r.frame(clip_frame)?;
@@ -115,7 +121,16 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
         let pic = job.crop.map_or(pic.clone(), |c| c.apply(&pic));
         let mut s = job.settings.clone();
         if let Some(d) = s.downscale {
-            s.downscale = Some(DownscaleSpec::for_width(d.width, (pic.width, pic.height), d.method));
+            let spec = DownscaleSpec::for_width(d.width, (pic.width, pic.height), d.method);
+            s.downscale = Some(if d.line_height > 1 { spec.one_field() } else { spec });
+        }
+        let downscale = s.downscale;
+        if let Some(df) = s.digital.as_mut() {
+            df.capture = ntscrt_engine::DigitalFrame::capture_size((pic.width, pic.height), downscale.map(|d| (d.width, d.picture_height())));
+            if let Some((n, fps)) = digital {
+                df.frame = n;
+                df.source_fps = fps;
+            }
         }
         s.frame = seed;
         engine.set_source(pic);
@@ -132,10 +147,10 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
     match job.format {
         Format::Png => {
             let seed = if info.is_some() { job.png_frame + 1 } else { job.png_frame };
-            let mut s = picture(&mut engine, job.png_frame, seed)?;
+            let mut s = picture(&mut engine, job.png_frame, seed, None)?;
             let seconds = s.glitch.as_ref().map_or(0.0, |g| g.time);
             animate(&mut s, job.png_t, seconds);
-            let img = engine.render_export(&s, job.size)?;
+            let img = crate::clip_frames::with_visitor(&mut clip, |v| engine.render_export(&s, job.size, v))?;
             image::RgbaImage::from_raw(img.width, img.height, img.rgba).context("image")?.save(&job.path)?;
             progress.done.store(1000, Ordering::Relaxed);
             Ok(format!("Saved {} ({} × {})", job.path.display(), job.size.0, job.size.1))
@@ -153,9 +168,12 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
             for i in 0..total {
                 let clip_frame = i % frames;
                 // Each pass renders the same frames again (seeded alike).
-                let mut s = picture(&mut engine, clip_frame, clip_frame + 1)?;
+                // The Digital stage: a clip's frame at its rate (the Mac's
+                // passFrame), a still's at the still's rate.
+                let digital_fps = info.map_or(job.still_fps.max(1) as f64, |v| (v.fps as f32).max(1.0) as f64);
+                let mut s = picture(&mut engine, clip_frame, clip_frame + 1, Some((clip_frame as i64, digital_fps)))?;
                 animate(&mut s, clip_frame as f64 / frames.saturating_sub(1).max(1) as f64, i as f64 * fps.1 as f64 / fps.0 as f64);
-                let img = engine.render_export(&s, job.size)?;
+                let img = crate::clip_frames::with_visitor(&mut clip, |v| engine.render_export(&s, job.size, v))?;
                 writer.write(&img.rgba)?;
                 tick(i, total)?;
             }
@@ -182,13 +200,19 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
             for i in 0..frames {
                 let f = clip_frame(i);
                 let seed = if info.is_some() { f + 1 } else { i + 1 };
-                let mut s = picture(&mut engine, f, seed)?;
+                // A clip's own frame number (GIFs skip frames) at its rate; a
+                // still's GIF frame at the GIF's rate.
+                let digital = match info {
+                    Some(v) => (f as i64, (v.fps as f32).max(1.0) as f64),
+                    None => (i as i64, gif_fps),
+                };
+                let mut s = picture(&mut engine, f, seed, Some(digital))?;
                 let seconds = match info {
                     Some(v) => f as f64 / v.fps.max(1.0),
                     None => i as f64 / gif_fps,
                 };
                 animate(&mut s, i as f64 / frames.saturating_sub(1).max(1) as f64, seconds);
-                let mut img = engine.render_export(&s, job.size)?;
+                let mut img = crate::clip_frames::with_visitor(&mut clip, |v| engine.render_export(&s, job.size, v))?;
                 let mut frame = gif::Frame::from_rgba_speed(w, h, &mut img.rgba, 10);
                 frame.delay = delay;
                 enc.write_frame(&frame)?;

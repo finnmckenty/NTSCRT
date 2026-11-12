@@ -159,10 +159,22 @@ mod tests {
             })
             .collect();
         let shader_start: Vec<_> = shaders.iter().map(|s| s.2.clone()).collect();
+        // Digital video: the starting values and every format (both codecs).
+        let mut digital: Vec<_> = std::iter::once(ntscrt_engine::codec::DigitalParam::starting_values())
+            .chain(ntscrt_engine::codec::DigitalFormat::all().iter().map(|f| {
+                let mut v = ntscrt_engine::codec::DigitalParam::default_values();
+                v.extend(f.values_map());
+                v
+            }))
+            .collect();
+        let digital_start = digital.clone();
         for _ in 0..3 {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     controls(ui, &settings, &mut values);
+                    for d in digital.iter_mut() {
+                        crate::digital_panel::controls(ui, d);
+                    }
                     for (id, params, v) in shaders.iter_mut() {
                         for p in params.iter() {
                             crate::shader_panel::control(ui, id, p, v, Some(240));
@@ -172,6 +184,7 @@ mod tests {
             });
         }
         assert_eq!(values, start, "the NTSC panel rewrote values just by drawing them");
+        assert_eq!(digital, digital_start, "the Digital video panel rewrote values just by drawing them");
         for ((id, _, v), before) in shaders.iter().zip(shader_start) {
             assert_eq!(v, &before, "{id}: the CRT panel rewrote values just by drawing them");
         }

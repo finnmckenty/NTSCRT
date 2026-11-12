@@ -17,7 +17,7 @@ fn main() -> Result<()> {
     }
     let mut engine = Engine::new()?;
     engine.set_source(Image::new(w, h, img.into_raw()));
-    let settings = Settings { ntsc: None, downscale: None, shader: None, frame: 0, glitch: Some(GlitchFrame { settings: s, time, history: None }) };
+    let settings = Settings { ntsc: None, downscale: None, shader: None, frame: 0, glitch: Some(GlitchFrame { settings: s, time, history: None }), digital: None };
     let out = engine.render(&settings, (w, h))?;
     image::RgbaImage::from_raw(out.width, out.height, out.rgba).context("image")?.save(&a[3])?;
     Ok(())

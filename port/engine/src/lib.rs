@@ -15,6 +15,7 @@ pub mod preview;
 pub mod timeline;
 pub use look::{write_look, Look, LookState, TimelineState};
 pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
+pub use ntscrt_codec as codec;
 pub use serde_json;
 
 use std::path::{Path, PathBuf};
@@ -112,8 +113,11 @@ impl DownscaleMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DownscaleSpec {
     pub width: u32,
+    /// Lines: the picture's height, or half of it with One field on.
     pub height: u32,
     pub method: DownscaleMethod,
+    /// Picture rows each line stands for (2 for One field, else 1).
+    pub line_height: u32,
 }
 
 impl DownscaleSpec {
@@ -122,7 +126,18 @@ impl DownscaleSpec {
     pub fn for_width(width: u32, source: (u32, u32), method: DownscaleMethod) -> Self {
         let aspect = (source.0 as f64 / source.1.max(1) as f64).max(0.05);
         let height = (2.0 * (width as f64 / aspect / 2.0).round()).max(16.0) as u32;
-        Self { width, height, method }
+        Self { width, height, method, line_height: 1 }
+    }
+
+    /// One field (the Digital video stage's "fields" control): half the
+    /// lines, each two picture rows tall (the Mac's `downscaleSpec`).
+    pub fn one_field(self) -> Self {
+        Self { height: (self.height / 2).max(8), line_height: 2, ..self }
+    }
+
+    /// The picture's height (what previews and exports are sized by).
+    pub fn picture_height(&self) -> u32 {
+        self.height * self.line_height.max(1)
     }
 }
 
@@ -142,7 +157,52 @@ pub struct Settings {
     pub frame: usize,
     /// The Glitch stage (between the downscale and the CRT), when on.
     pub glitch: Option<glitch::GlitchFrame>,
+    /// The Digital video stage (a camera and codec ahead of NTSC), when on.
+    pub digital: Option<DigitalFrame>,
 }
+
+/// The Digital video stage for one frame (the Mac's DigitalFrameInput).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DigitalFrame {
+    pub settings: codec::DigitalSettings,
+    /// The clip's frame, the timeline's on a still, or the Live noise counter.
+    pub frame: i64,
+    /// The clip's frame rate, or the timeline's for a still.
+    pub source_fps: f64,
+    /// The camera's resolution: the Downscale's (picture height, so One
+    /// field captures the whole frame), else the picture's capped at 1280 wide.
+    pub capture: (usize, usize),
+    pub history: Option<DigitalHistoryRef>,
+}
+
+impl DigitalFrame {
+    /// The capture size for a picture, as the Mac's DigitalFrameInput.captureSize.
+    pub fn capture_size(picture: (u32, u32), downscale: Option<(u32, u32)>) -> (usize, usize) {
+        match downscale {
+            Some((w, h)) => (w as usize, h as usize),
+            None => codec::DigitalVideoRenderer::capture_size(picture.0 as usize, picture.1 as usize, (picture.0 as usize).min(1280)),
+        }
+    }
+}
+
+/// Keyframed Digital settings, compared by id.
+#[derive(Clone)]
+pub struct DigitalHistoryRef(pub Arc<codec::DigitalHistory>);
+
+impl std::fmt::Debug for DigitalHistoryRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DigitalHistory({})", self.0.id)
+    }
+}
+
+impl PartialEq for DigitalHistoryRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+
+/// Earlier frames of the clip (cropped), for re-running the codec from a keyframe.
+pub type FrameVisitor<'a> = codec::FrameVisitor<'a>;
 
 /// A shader parameter as the preset declares it.
 #[derive(Clone, Debug)]
@@ -201,7 +261,7 @@ struct Chain {
 }
 
 struct Prepared {
-    key: (u64, Option<NtscSettings>, usize),
+    key: (u64, Option<NtscSettings>, usize, Option<DigitalFrame>),
     texture: wgpu::Texture,
 }
 
@@ -214,6 +274,7 @@ pub struct Engine {
     separable: wgpu::ComputePipeline,
     glitch_gpu: glitch::stage::Gpu,
     glitch: glitch::stage::Renderer,
+    digital: codec::DigitalVideoRenderer,
     source: Option<(u64, Image)>,
     next_source: u64,
     prepared: Option<Prepared>,
@@ -286,6 +347,7 @@ impl Engine {
             separable,
             glitch_gpu,
             glitch: glitch::stage::Renderer::default(),
+            digital: codec::DigitalVideoRenderer::new(),
             source: None,
             next_source: 1,
             prepared: None,
@@ -311,7 +373,7 @@ impl Engine {
     /// screen (the viewport the chain draws into); without one, the result
     /// is the shader's input (the downscaled picture) at its own size.
     pub fn render(&mut self, settings: &Settings, output: (u32, u32)) -> Result<Image> {
-        let input = self.prepare(settings)?;
+        let input = self.prepare(settings, None)?;
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let chain_input = match settings.downscale {
             Some(spec) => self.downscale(&mut enc, &input, spec),
@@ -348,8 +410,8 @@ impl Engine {
     /// ShaderBypass does), then box-filtered to the display size — unless
     /// `full_render` (zoomed in: the Mac samples the full render, since the
     /// box filter averages scanlines flat at small display multiples).
-    pub fn render_preview(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool) -> Result<Image> {
-        let input = self.prepare(settings)?;
+    pub fn render_preview(&mut self, settings: &Settings, plan: preview::PreviewPlan, full_render: bool, earlier: Option<&mut FrameVisitor<'_>>) -> Result<Image> {
+        let input = self.prepare(settings, earlier)?;
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let chain_input = match settings.downscale {
             Some(spec) => self.downscale(&mut enc, &input, spec),
@@ -401,8 +463,8 @@ impl Engine {
     /// of the chain input, box-filtered down (the Mac's SupersampledPass).
     /// Without the CRT, the chain input enlarged with hard edges to the next
     /// whole multiple and filtered down (the Mac's ShaderBypass).
-    pub fn render_export(&mut self, settings: &Settings, out: (u32, u32)) -> Result<Image> {
-        let input = self.prepare(settings)?;
+    pub fn render_export(&mut self, settings: &Settings, out: (u32, u32), earlier: Option<&mut FrameVisitor<'_>>) -> Result<Image> {
+        let input = self.prepare(settings, earlier)?;
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let chain_input = match settings.downscale {
             Some(spec) => self.downscale(&mut enc, &input, spec),
@@ -459,17 +521,33 @@ impl Engine {
 
     /// The source after the NTSC stage, on the GPU (cached until the source,
     /// NTSC settings or frame change).
-    fn prepare(&mut self, settings: &Settings) -> Result<wgpu::Texture> {
+    fn prepare(&mut self, settings: &Settings, earlier: Option<&mut FrameVisitor<'_>>) -> Result<wgpu::Texture> {
         let (id, source) = self.source.as_ref().context("no picture loaded")?;
         // Without NTSC the frame doesn't change the picture (only the
         // shader's frame count), so it isn't part of the key.
-        let key = (*id, settings.ntsc.clone(), if settings.ntsc.is_some() { settings.frame } else { 0 });
+        let key = (*id, settings.ntsc.clone(), if settings.ntsc.is_some() { settings.frame } else { 0 }, settings.digital.clone());
         if let Some(p) = &self.prepared {
             if p.key == key {
                 return Ok(p.texture.clone());
             }
         }
         let mut pixels = source.clone();
+        // Digital video first: a camera and codec ahead of the analog signal.
+        if let Some(d) = &settings.digital {
+            let (w, h) = (pixels.width as usize, pixels.height as usize);
+            self.digital.process(
+                d.frame,
+                &mut pixels.rgba,
+                w,
+                h,
+                w * 4,
+                d.capture,
+                d.source_fps,
+                &d.settings,
+                d.history.as_ref().map(|h| h.0.as_ref()),
+                earlier,
+            );
+        }
         if let Some(ntsc) = &settings.ntsc {
             apply_ntsc(&mut pixels, ntsc, settings.frame)?;
         }

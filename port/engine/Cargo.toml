@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 ntsc-rs.workspace = true
+ntscrt-codec = { path = "../codec" }
 librashader.workspace = true
 pollster = "0.4"
 serde_json = { version = "1", features = ["float_roundtrip"] }

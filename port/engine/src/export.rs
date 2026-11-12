@@ -48,7 +48,8 @@ pub fn snapped_size(input: (u32, u32), target_height: u32, line_height: u32) -> 
 
 /// The video (and PNG) export size: the long edge, the other side following
 /// the picture's shape, both even; snapped onto the grid when asked.
-pub fn video_size(long_edge: u32, aspect: f64, snap: Option<(u32, u32)>) -> (u32, u32) {
+/// `snap` is the chain input (width, lines) and its line height.
+pub fn video_size(long_edge: u32, aspect: f64, snap: Option<((u32, u32), u32)>) -> (u32, u32) {
     let (w, h) = if aspect >= 1.0 {
         (long_edge, ((long_edge as f64 / aspect).round() as u32).max(64))
     } else {
@@ -58,15 +59,18 @@ pub fn video_size(long_edge: u32, aspect: f64, snap: Option<(u32, u32)>) -> (u32
 }
 
 /// The GIF size: its own width, the height following the picture's shape.
-pub fn gif_size(width: u32, aspect: f64, snap: Option<(u32, u32)>) -> (u32, u32) {
+pub fn gif_size(width: u32, aspect: f64, snap: Option<((u32, u32), u32)>) -> (u32, u32) {
     let w = width.max(64);
     let h = ((w as f64 / aspect).round() as u32).max(64);
     snap_even((w & !1, h & !1), snap)
 }
 
-fn snap_even(size: (u32, u32), snap: Option<(u32, u32)>) -> (u32, u32) {
+fn snap_even(size: (u32, u32), snap: Option<((u32, u32), u32)>) -> (u32, u32) {
     match snap {
-        Some(input) if input.0 > 0 && input.1 > 0 => snapped_size(input, size.1, 1),
+        Some((input, line_height)) if input.0 > 0 && input.1 > 0 => {
+            let (w, h) = snapped_size(input, size.1, line_height);
+            (w & !1, h & !1)
+        }
         _ => size,
     }
 }
@@ -107,7 +111,10 @@ mod tests {
     fn export_sizes_follow_the_mac() {
         assert_eq!(video_size(1920, 4.0 / 3.0, None), (1920, 1440));
         assert_eq!(video_size(1920, 9.0 / 16.0, None), (1080, 1920));
-        assert_eq!(video_size(1920, 4.0 / 3.0, Some((320, 240))), (1920, 1440), "6× is already on the grid");
+        assert_eq!(video_size(1920, 4.0 / 3.0, Some(((320, 240), 1))), (1920, 1440), "6× is already on the grid");
+        // One field: 120 lines, each two rows; the width follows the picture.
+        assert_eq!(video_size(1920, 4.0 / 3.0, Some(((320, 120), 2))), (1920, 1440));
+        assert_eq!(video_size(174, 4.0 / 3.0, Some(((320, 121), 1))), (320, 120), "1× of an odd input, made even");
         assert_eq!(gif_size(480, 16.0 / 9.0, None), (480, 270 & !1));
         assert_eq!(bitrate((1920, 1440), 30.0, 0.25), 20_736_000);
         assert_eq!(bitrate((320, 240), 12.0, 0.12), 2_000_000);

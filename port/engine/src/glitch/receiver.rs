@@ -149,7 +149,7 @@ fn mix(z0: u64) -> u64 {
 }
 
 #[inline(always)]
-fn uniform(seed: u64, purpose: u64, a: i64, b: i64) -> f64 {
+pub(crate) fn uniform(seed: u64, purpose: u64, a: i64, b: i64) -> f64 {
     let h = mix(seed ^ mix(purpose ^ mix(a as u64 ^ mix(b as u64))));
     (h >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
 }

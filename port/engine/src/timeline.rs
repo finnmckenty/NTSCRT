@@ -61,8 +61,8 @@ pub struct Keyframe {
     pub easing: Easing,
     pub shader: HashMap<String, f32>,
     pub ntsc: Map<String, Value>,
-    /// Glitch and Digital video knobs, kept as stored until those stages are
-    /// ported (empty in keyframes from before the stages existed).
+    /// Glitch and Digital video knobs (empty in keyframes from before the
+    /// stages existed).
     pub glitch: Map<String, Value>,
     pub digital: Map<String, Value>,
 }
@@ -201,8 +201,25 @@ impl Evaluator {
             .collect()
     }
 
-    /// The keys' stored Digital video values at `t` (held, not yet
-    /// interpolated: that stage isn't ported).
+    /// Digital video knobs at `t`: sliders interpolate, choices hold until
+    /// the next key, and the structure controls (frame rate, keyframe
+    /// interval, color layout…) are left out: they hold for a whole render.
+    pub fn digital(&self, t: f64) -> Map<String, Value> {
+        let (a, b, u) = self.segment(t);
+        a.digital
+            .iter()
+            .filter(|(id, _)| !ntscrt_codec::STRUCTURE_IDS.contains(&id.as_str()))
+            .map(|(id, va)| {
+                let choice = ntscrt_codec::DigitalParam::by_id(id).is_some_and(|p| p.is_choice());
+                let v = match (va.as_f64(), b.digital.get(id).and_then(Value::as_f64)) {
+                    (Some(x), Some(y)) if u != 0.0 && !choice => Value::from(x + (y - x) * u),
+                    _ => va.clone(),
+                };
+                (id.clone(), v)
+            })
+            .collect()
+    }
+
     pub fn first_key(&self) -> &Keyframe {
         &self.keys[0]
     }

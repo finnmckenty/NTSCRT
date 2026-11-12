@@ -55,6 +55,11 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
     send(Event::Adapter(format!("{} ({:?})", a.name, a.backend)));
 
     let mut media: Option<Media> = None;
+    // The open clip's path, and its earlier frames for the Digital stage
+    // (opened when the stage first needs them, per crop).
+    let mut clip_path: Option<PathBuf> = None;
+    let mut clip: Option<crate::clip_frames::ClipFrames> = None;
+    let mut clip_crop: Option<Option<Crop>> = None;
     // What the engine's picture is: (frame, crop), and what was last sent back.
     let mut picture_key: Option<(usize, Option<Crop>)> = None;
     let mut picture: Option<Image> = None;
@@ -67,12 +72,14 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
             match r {
                 Request::Still(img) => {
                     media = Some(Media::Still(img));
+                    (clip_path, clip, clip_crop) = (None, None, None);
                     (picture_key, sent_key) = (None, None);
                 }
                 Request::Video(path) => match VideoReader::open(&path) {
                     Ok(reader) => {
                         send(Event::Opened(Ok(reader.info())));
                         media = Some(Media::Video(reader));
+                        (clip_path, clip, clip_crop) = (Some(path.clone()), None, None);
                         (picture_key, sent_key) = (None, None);
                     }
                     Err(e) => send(Event::Opened(Err(format!("{e:#}")))),
@@ -101,7 +108,13 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                 picture = Some(pic);
                 picture_key = Some((frame, crop));
             }
-            engine.render_preview(&settings, plan, full)
+            if settings.digital.is_some() && clip_path.is_some() && clip_crop != Some(crop) {
+                clip = clip_path.as_deref().and_then(|p| crate::clip_frames::ClipFrames::open(p, crop).ok());
+                clip_crop = Some(crop);
+            }
+            let mut none = None;
+            let visitor = if settings.digital.is_some() { &mut clip } else { &mut none };
+            crate::clip_frames::with_visitor(visitor, |v| engine.render_preview(&settings, plan, full, v))
         })()
         .map_err(|e| format!("{e:#}"));
         let source = (want_source && sent_key != picture_key).then(|| picture.clone()).flatten();

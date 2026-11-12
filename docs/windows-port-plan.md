@@ -96,13 +96,15 @@ Done and checked against the Mac (each step committed; CI re-checks on every pus
 | Export: PNG, MP4 (H.264/HEVC + sound, loops), GIF | PNG within 0.001/255 of the Mac's render; MP4/GIF frame counts, timing, sound |
 | Timeline (keyframes, easings, auto-key) | the Mac's TimelineEvaluator ported with tests |
 | Glitch (receiver simulation + GPU) | simulation bit-identical to the Mac's (plans, CI test); GPU output byte-identical on 12/13 cases (CI) |
+| Digital video (camera, DCT codec, Video 1, keyframed history, One field, formats) | codec bit-identical to the Mac's on 25 cases (resizing within 1–2 code values); all of DigitalVideoTests and Video1Tests ported; pipeline tests (One field, capture size, determinism); drawing the panel changes no value (test) |
 | Package (NTSCRT-windows-x64 artifact) | every CRT preset loads from the packaged shaders (CI) |
 
-Still to do: Digital video (in progress), Screen Loop, render-ahead caching for smoother playback, real-hardware testing, signing and an installer.
+Still to do: Screen Loop, render-ahead caching for smoother playback, real-hardware testing, signing and an installer.
 
 Found along the way:
 - The Mac release bundles `crt/` and `include/` but not `blurs/shaders/royale`, so CRT Royale can't load in the released Mac app (the Desktop dev build reads the repo's folder, which hides it). The Windows package includes the folder.
 - The Mac's `CRT_EXPORT_MP4` hook doesn't apply keyframes, so it can't be a reference for animated looks.
+- On the Mac, the first time Digital video is switched on (`setDigitalEnabled`), the starting values (Cheap camcorder) are replaced by the Webcam format unless they match a format, so the Cheap camcorder start never shows. The Windows version keeps the starting values when switched on.
 
 ## Phase 2 — The engine, a piece at a time, checked against the Mac
 

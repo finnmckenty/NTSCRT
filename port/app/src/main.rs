@@ -9,6 +9,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clip_frames;
+mod digital_panel;
 mod export;
 mod glitch_panel;
 mod ntsc_panel;
@@ -58,6 +60,10 @@ struct App {
     /// The Glitch stage (on by default, healthy: no effect until a knob turns).
     glitch_enabled: bool,
     glitch_values: ntscrt_engine::glitch::GlitchSettings,
+    /// The Digital video stage (off by default; its controls start from
+    /// the Cheap camcorder look, as on the Mac).
+    digital_enabled: bool,
+    digital_values: std::collections::BTreeMap<String, f64>,
     /// The receiver's clock on a still without a timeline: wall-clock time
     /// while Live noise runs (the Mac's animateClock).
     animate_clock: f64,
@@ -167,6 +173,8 @@ impl App {
             ntsc_values: ntsc_default_values(),
             glitch_enabled: true,
             glitch_values: ntscrt_engine::glitch::GlitchSettings::default(),
+            digital_enabled: false,
+            digital_values: ntscrt_engine::codec::DigitalParam::starting_values(),
             animate_clock: 0.0,
             animate_last: None,
             crt: true,
@@ -386,6 +394,16 @@ impl App {
         if let Some(v) = look.shader_enabled { self.crt = v }
         self.glitch_enabled = look.glitch_enabled;
         self.glitch_values = look.glitch_values.clone();
+        // Looks from before the Digital video stage leave it off.
+        match &look.digital {
+            Some((enabled, values)) => {
+                let mut v = ntscrt_engine::codec::DigitalParam::default_values();
+                v.extend(values.iter().map(|(k, x)| (k.clone(), *x)));
+                self.digital_values = v;
+                self.digital_enabled = *enabled;
+            }
+            None => self.digital_enabled = false,
+        }
         if let Some(d) = look.timeline_duration { self.timeline_seconds = d }
         if let Some(f) = look.timeline_fps { self.timeline_fps = f }
         if look.raw.contains_key("timeline") {
@@ -423,6 +441,7 @@ impl App {
                 shader_params: self.shader_values.get(&self.shader).unwrap_or(&empty),
                 crop: self.crop_enabled.then_some(self.crop),
                 glitch: Some((self.glitch_enabled, &self.glitch_values)),
+                digital: Some((self.digital_enabled, &self.digital_values)),
                 timeline: Some(ntscrt_engine::TimelineState {
                     enabled: self.timeline_open,
                     duration: self.timeline_seconds,
@@ -468,7 +487,114 @@ impl App {
                     }
                 });
             }
+            // Starting points for the Digital video stage alone: they switch
+            // it on and set its controls and the Downscale width, leaving the
+            // rest of the look as it is.
+            ui.separator();
+            ui.weak("Digital video");
+            for f in ntscrt_engine::codec::DigitalFormat::all() {
+                if ui.button(f.name).on_hover_text(f.blurb).clicked() {
+                    self.apply_digital_format(f);
+                    ui.close();
+                }
+            }
         });
+    }
+
+    /// A format's settings, and its resolution as the Downscale's (the
+    /// Mac's applyDigitalFormat), with the stage switched on.
+    fn apply_digital_format(&mut self, f: &ntscrt_engine::codec::DigitalFormat) {
+        let mut v = ntscrt_engine::codec::DigitalParam::default_values();
+        v.extend(f.values_map());
+        self.digital_values = v;
+        self.digital_enabled = true;
+        self.downscale = true;
+        self.downscale_width = f.width as u32;
+        self.downscale_preset = format!("{} ({}px)", f.name, f.width);
+        self.auto_key();
+    }
+
+    fn digital_settings(&self) -> ntscrt_engine::codec::DigitalSettings {
+        ntscrt_engine::codec::DigitalSettings::new(self.digital_values.iter().map(|(k, v)| (k.clone(), *v)))
+    }
+
+    /// The Downscale for a picture: half the lines with the Digital video
+    /// stage's One field on (the Mac's downscaleSpec).
+    fn downscale_spec(&self, picture: (u32, u32)) -> Option<DownscaleSpec> {
+        if !self.downscale {
+            return None;
+        }
+        let d = DownscaleSpec::for_width(self.downscale_width, picture, self.method);
+        Some(if self.digital_enabled && self.digital_settings().get("fields") >= 0.5 { d.one_field() } else { d })
+    }
+
+    /// The frame number the Digital stage gets: a clip's own, the
+    /// timeline's on a still, else the Live noise counter.
+    fn digital_frame_index(&self) -> i64 {
+        if self.video.is_some() {
+            return self.video_frame as i64;
+        }
+        if self.timeline_open {
+            return (self.playhead * self.timeline_frames().saturating_sub(1).max(1) as f64).round() as i64;
+        }
+        self.frame as i64
+    }
+
+    /// How the Digital knobs vary over the timeline, by frame (a still's
+    /// export wraps around it pass after pass). None without keyframes.
+    fn digital_history(&self) -> Option<ntscrt_engine::DigitalHistoryRef> {
+        if !self.timeline_open || self.keys.is_empty() {
+            return None;
+        }
+        let ev = ntscrt_engine::timeline::Evaluator::new(&self.keys, HashMap::new(), &self.ntsc_settings)?;
+        let total = self.timeline_frames() as i64;
+        let base = self.digital_values.clone();
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for k in &self.keys {
+            k.t.to_bits().hash(&mut hasher);
+            for (n, v) in &k.digital {
+                n.hash(&mut hasher);
+                v.to_string().hash(&mut hasher);
+            }
+        }
+        total.hash(&mut hasher);
+        // The base only matters for keys saved without the stage's values;
+        // hashing it otherwise would restart the stream every time the
+        // playhead applies keyed values.
+        if self.keys.iter().any(|k| k.digital.is_empty()) {
+            for (n, v) in &base {
+                n.hash(&mut hasher);
+                v.to_bits().hash(&mut hasher);
+            }
+        }
+        let history = ntscrt_engine::codec::DigitalHistory::new(hasher.finish() as i64, move |n| {
+            let i = n.rem_euclid(total.max(1));
+            let t = if total > 1 { i as f64 / (total - 1) as f64 } else { 0.0 };
+            let mut v = base.clone();
+            for (k, x) in ev.digital(t) {
+                if let Some(f) = x.as_f64() {
+                    v.insert(k, f);
+                }
+            }
+            ntscrt_engine::codec::DigitalSettings::new(v)
+        });
+        Some(ntscrt_engine::DigitalHistoryRef(Arc::new(history)))
+    }
+
+    /// The Digital stage's input for a picture, None when it's off.
+    fn digital_frame(&self, picture: (u32, u32)) -> Option<ntscrt_engine::DigitalFrame> {
+        if !self.digital_enabled {
+            return None;
+        }
+        let spec = self.downscale_spec(picture);
+        Some(ntscrt_engine::DigitalFrame {
+            settings: self.digital_settings(),
+            frame: self.digital_frame_index(),
+            source_fps: self.video.map_or(self.timeline_fps.max(1) as f64, |v| (v.fps as f32).max(1.0) as f64),
+            capture: ntscrt_engine::DigitalFrame::capture_size(picture, spec.map(|d| (d.width, d.picture_height()))),
+            history: self.digital_history(),
+        })
     }
 
     /// The shader's parameters and values, loading them on first use: the
@@ -497,7 +623,7 @@ impl App {
 
     fn input_height(&self) -> Option<u32> {
         let (_, w, h) = self.source.as_ref()?;
-        Some(if self.downscale { DownscaleSpec::for_width(self.downscale_width, (*w, *h), self.method).height } else { *h })
+        Some(self.downscale_spec((*w, *h)).map_or(*h, |d| d.height))
     }
 
     /// The receiver's clock for the frame on screen: a clip's own time, the
@@ -568,7 +694,7 @@ impl App {
         };
         Settings {
             ntsc: self.ntsc.then(|| NtscSettings::Json(ntsc_values_json(&self.ntsc_values))),
-            downscale: self.downscale.then(|| DownscaleSpec::for_width(self.downscale_width, source, self.method)),
+            downscale: self.downscale_spec(source),
             shader,
             // A clip's noise is seeded by its frame number + 1, as the Mac's
             // video export and PNG do; a still's by the Animate counter.
@@ -578,6 +704,7 @@ impl App {
                 time: self.glitch_time(),
                 history: self.glitch_history(),
             }),
+            digital: self.digital_frame(source),
         }
     }
 
@@ -636,9 +763,12 @@ impl App {
                 ui.label("Width");
                 ui.add(egui::DragValue::new(&mut self.downscale_width).range(64..=1920).suffix(" px"));
             });
-            if let Some((_, w, h)) = self.source {
-                let spec = DownscaleSpec::for_width(self.downscale_width, (w, h), self.method);
-                ui.weak(format!("Resolution: {} × {}", spec.width, spec.height));
+            if let Some(spec) = self.picture_size().and_then(|p| self.downscale_spec(p)) {
+                if spec.line_height > 1 {
+                    ui.weak(format!("Resolution: {} × {} (one field: {} lines)", spec.width, spec.picture_height(), spec.height));
+                } else {
+                    ui.weak(format!("Resolution: {} × {}", spec.width, spec.height));
+                }
             }
             ui.horizontal(|ui| {
                 ui.label("Sampling");
@@ -651,6 +781,21 @@ impl App {
                 ui.weak(format!("Using {}, from the loaded preset.", self.method.display_name()));
             }
         });
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.digital_enabled, egui::RichText::new("Digital video").heading())
+                .on_hover_text("Record the picture with a digital camera and codec before it goes out as an analog signal. Ready-made formats — webcam, video call, MiniDV and more — are in the Preset menu, and also set the Downscale resolution.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("Back to the starting values (Cheap camcorder)").clicked() {
+                    self.digital_values = ntscrt_engine::codec::DigitalParam::starting_values();
+                }
+            });
+        });
+        // Closed while the stage is off, to save room.
+        if self.digital_enabled {
+            digital_panel::controls(ui, &mut self.digital_values);
+        }
         ui.separator();
 
         ui.horizontal(|ui| {
@@ -774,13 +919,12 @@ impl App {
     }
 
     /// The chain input's size (for snapping exports onto the scanline grid).
-    fn chain_input(&self) -> Option<(u32, u32)> {
+    /// (width, lines) and the line height.
+    fn chain_input(&self) -> Option<((u32, u32), u32)> {
         let (w, h) = self.picture_size()?;
-        Some(if self.downscale {
-            let d = DownscaleSpec::for_width(self.downscale_width, (w, h), self.method);
-            (d.width, d.height)
-        } else {
-            (w, h)
+        Some(match self.downscale_spec((w, h)) {
+            Some(d) => ((d.width, d.height), d.line_height),
+            None => ((w, h), 1),
         })
     }
 
@@ -974,12 +1118,12 @@ impl App {
         );
         self.palette(&mut palette_ui);
 
-        // The chain input's size: the Downscale's, else the picture's.
-        let input = if self.downscale {
-            let d = DownscaleSpec::for_width(self.downscale_width, (w, h), self.method);
-            (d.width, d.height)
-        } else {
-            (w, h)
+        // The chain input's size: the Downscale's, else the picture's. Sized
+        // as the picture, so one field (lines twice as tall as wide) shows at
+        // its true shape.
+        let input = match self.downscale_spec((w, h)) {
+            Some(d) => (d.width, d.picture_height()),
+            None => (w, h),
         };
         let ppp = ctx.pixels_per_point();
         let aspect = input.0 as f32 / input.1 as f32;
@@ -1003,7 +1147,9 @@ impl App {
         // frames a second with NTSC on and 60 without (the Mac's draw rates).
         if self.animate && self.video.is_none() {
             let interval = Duration::from_secs_f64(if self.ntsc { 1.0 / 30.0 } else { 1.0 / 60.0 });
-            if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval {
+            // A snapshot due holds the frame still, so the one it waits for arrives.
+            let snapshot_due = self.snapshot.is_some() && self.snapshot_after.is_none_or(|(t, s)| t.elapsed().as_secs_f64() >= s);
+            if self.shown_seq == self.seq && self.last_tick.elapsed() >= interval && !snapshot_due {
                 self.frame = self.frame.wrapping_add(1);
                 self.last_tick = Instant::now();
             }
@@ -1237,9 +1383,9 @@ impl eframe::App for App {
         });
         // Editing while parked on a keyframe updates it: compare the values
         // before and after the panels are drawn.
-        let before = (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone());
+        let before = (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone(), self.digital_values.clone());
         egui::Panel::left("sidebar").resizable(false).exact_size(SIDEBAR_WIDTH).show(ui, |ui| self.sidebar(ui));
-        if (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone()) != before {
+        if (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone(), self.digital_values.clone()) != before {
             self.auto_key();
         }
         if self.timeline_open {

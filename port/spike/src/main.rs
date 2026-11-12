@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     let out = (num(3, 1920)?, num(4, 1080)?);
     let downscale = if pos.len() > 7 {
         let Some(method) = DownscaleMethod::from_raw(&pos[7]) else { bail!("unknown downscale method {}", pos[7]) };
-        Some(DownscaleSpec { width: num(5, 0)?, height: num(6, 0)?, method })
+        Some(DownscaleSpec { width: num(5, 0)?, height: num(6, 0)?, method, line_height: 1 })
     } else {
         None
     };
@@ -83,6 +83,7 @@ fn main() -> Result<()> {
         shader: Some(ShaderSpec { preset: pos[1].clone().into(), params }),
         frame,
         glitch: None,
+        digital: None,
     };
     let mut result = engine.render(&settings, out)?;
 

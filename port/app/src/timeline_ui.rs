@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use eframe::egui;
-use ntscrt_engine::serde_json::{Map, Value};
+use ntscrt_engine::serde_json::Value;
 use ntscrt_engine::timeline::{Easing, Evaluator, Keyframe, ShaderMeta};
 
 use crate::App;
@@ -81,6 +81,11 @@ impl App {
                 self.glitch_values.values.insert(k, f);
             }
         }
+        for (k, v) in ev.digital(self.playhead) {
+            if let Some(f) = v.as_f64() {
+                self.digital_values.insert(k, f);
+            }
+        }
     }
 
     /// Keep the playhead on the clip's frame (playback, the scrubber).
@@ -96,17 +101,13 @@ impl App {
     }
 
     fn snapshot(&self, t: f64) -> Keyframe {
-        // Glitch and Digital video aren't ported yet: carry what the look had.
-        let section = |k: &str| -> Map<String, Value> {
-            self.look_raw.as_ref().and_then(|r| r.get(k)).and_then(|s| s.get("values")).and_then(Value::as_object).cloned().unwrap_or_default()
-        };
         Keyframe {
             t,
             easing: Easing::Linear,
             shader: self.shader_values.get(&self.shader).cloned().unwrap_or_default(),
             ntsc: self.ntsc_values.clone(),
             glitch: self.glitch_values.values.iter().map(|(k, v)| (k.clone(), Value::from(*v))).collect(),
-            digital: section("digital"),
+            digital: self.digital_values.iter().map(|(k, v)| (k.clone(), Value::from(*v))).collect(),
         }
     }
 

@@ -1,8 +1,8 @@
 //! Looks: the Mac app's preset JSON (`AppState.lookDictionary` / `loadLook`),
 //! read and written in the same format so a look moves between the two apps.
-//! Sections the Windows version doesn't have yet (Glitch, Digital video,
-//! crop, the timeline's motion) are kept as they were, so saving a look here
-//! never drops them.
+//! Anything the Windows version doesn't know (Screen Loop's settings, keys
+//! from later versions) is kept as it was, so saving a look here never
+//! drops it.
 
 use std::collections::HashMap;
 
@@ -34,6 +34,9 @@ pub struct Look {
     /// exactly as they always looked.
     pub glitch_enabled: bool,
     pub glitch_values: crate::glitch::GlitchSettings,
+    /// The Digital video stage (looks from before it existed leave it off;
+    /// version-1 values are migrated as on the Mac).
+    pub digital: Option<(bool, std::collections::BTreeMap<String, f64>)>,
     pub timeline_enabled: Option<bool>,
     /// A still's animation length and frame rate.
     pub timeline_duration: Option<f64>,
@@ -81,6 +84,14 @@ impl Look {
             look.glitch_values = crate::glitch::GlitchSettings::from_values(values.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k, f))));
             look.glitch_enabled = g.get("enabled").and_then(Value::as_bool).unwrap_or(true);
         }
+        if let Some(d) = raw.get("digital").and_then(Value::as_object) {
+            let values: std::collections::BTreeMap<String, f64> =
+                object(d.get("values")).iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
+            look.digital = Some((
+                d.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+                ntscrt_codec::DigitalSettings::migrated(&values, look.version),
+            ));
+        }
         if let Some(t) = raw.get("timeline").and_then(Value::as_object) {
             look.timeline_enabled = t.get("enabled").and_then(Value::as_bool);
             look.timeline_duration = t.get("duration").and_then(Value::as_f64);
@@ -96,7 +107,11 @@ impl Look {
                         shader: floats(k.get("shader")),
                         ntsc: object(k.get("ntsc")),
                         glitch: object(k.get("glitch")),
-                        digital: object(k.get("digital")),
+                        digital: {
+                            let d = object(k.get("digital"));
+                            let floats: std::collections::BTreeMap<String, f64> = d.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
+                            ntscrt_codec::DigitalSettings::migrated(&floats, look.version).into_iter().map(|(k, v)| (k, Value::from(v))).collect()
+                        },
                     })
                 })
                 .collect();
@@ -122,10 +137,6 @@ impl Look {
     /// What this look uses that the Windows version can't show yet.
     pub fn unported(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
-        let section = |k: &str| self.raw.get(k).and_then(Value::as_object);
-        if section("digital").is_some_and(|d| d.get("enabled").and_then(Value::as_bool).unwrap_or(false)) {
-            out.push("Digital video");
-        }
         if self.raw.get("downscale").and_then(|d| d.get("method")).is_some() && self.downscale_method.is_none() {
             out.push("its downscale method");
         }
@@ -139,8 +150,12 @@ impl Look {
     /// shader's starting values (preset plus the Mac's tweaks) under the
     /// look's, and with keyframes, the first key's values on top.
     pub fn render_settings(&self, source: (u32, u32), shaders: &std::path::Path, frame: usize) -> Result<crate::Settings> {
+        let digital = self.digital.as_ref().filter(|d| d.0).map(|d| ntscrt_codec::DigitalSettings::new(d.1.clone()));
         let downscale = match (self.downscale_enabled.unwrap_or(true), self.downscale_width) {
-            (true, Some(w)) => Some(crate::DownscaleSpec::for_width(w, source, self.downscale_method.unwrap_or(DownscaleMethod::Nearest))),
+            (true, Some(w)) => {
+                let d = crate::DownscaleSpec::for_width(w, source, self.downscale_method.unwrap_or(DownscaleMethod::Nearest));
+                Some(if digital.as_ref().is_some_and(|s| s.get("fields") >= 0.5) { d.one_field() } else { d })
+            }
             _ => None,
         };
         let mut ntsc = self.ntsc_settings.clone().unwrap_or_else(crate::ntsc_default_values);
@@ -171,6 +186,14 @@ impl Look {
             frame,
             // The receiver at time zero (a look's first moment).
             glitch: self.glitch_enabled.then(|| crate::glitch::GlitchFrame { settings: self.glitch_values.clone(), time: 0.0, history: None }),
+            // Frame 0 of a still at the timeline's rate.
+            digital: digital.map(|settings| crate::DigitalFrame {
+                settings,
+                frame: frame as i64,
+                source_fps: self.timeline_fps.unwrap_or(30).max(1) as f64,
+                capture: crate::DigitalFrame::capture_size(source, downscale.map(|d| (d.width, d.picture_height()))),
+                history: None,
+            }),
         })
     }
 }
@@ -189,6 +212,7 @@ pub struct LookState<'a> {
     pub crop: Option<Crop>,
     pub timeline: Option<TimelineState<'a>>,
     pub glitch: Option<(bool, &'a crate::glitch::GlitchSettings)>,
+    pub digital: Option<(bool, &'a std::collections::BTreeMap<String, f64>)>,
 }
 
 pub struct TimelineState<'a> {
@@ -217,6 +241,9 @@ pub fn write_look(base: Option<&Map<String, Value>>, s: &LookState) -> String {
     look.insert("ntsc".into(), serde_json::json!({ "enabled": s.ntsc_enabled, "settings": s.ntsc_settings }));
     let params: Map<String, Value> = s.shader_params.iter().map(|(k, v)| (k.clone(), Value::from(*v as f64))).collect();
     look.insert("shader".into(), serde_json::json!({ "enabled": s.shader_enabled, "preset": s.shader_preset, "params": params }));
+    if let Some((enabled, d)) = s.digital {
+        look.insert("digital".into(), serde_json::json!({ "enabled": enabled, "values": d }));
+    }
     if let Some((enabled, g)) = s.glitch {
         look.insert("glitch".into(), serde_json::json!({ "enabled": enabled, "values": g.values }));
     }
@@ -269,7 +296,8 @@ mod tests {
             "downscale":{"enabled":true,"width":256,"method":"lanczos"},"ntsc":{"enabled":false,"settings":{"luma_smear":0.5}},
             "shader":{"enabled":true,"preset":"royale","params":{"x":1}}}"#;
         let look = Look::parse(json).unwrap();
-        assert_eq!(look.unported(), vec!["Digital video"]);
+        assert!(look.unported().is_empty());
+        assert_eq!(look.digital.as_ref().map(|d| d.0), Some(true));
         assert_eq!(look.crop, Some(Crop::new(Ratio::SQUARE)));
         assert_eq!(look.downscale_method, Some(DownscaleMethod::Lanczos));
         let ntsc = look.ntsc_settings.clone().unwrap();
@@ -289,6 +317,7 @@ mod tests {
                 crop: Some(Crop { x: 0.25, ..Crop::new(Ratio::new(9, 16)) }),
                 timeline: None,
                 glitch: None,
+                digital: None,
             },
         );
         let back = Look::parse(&out).unwrap();
@@ -328,6 +357,7 @@ mod timeline_tests {
                 crop: None,
                 timeline: Some(TimelineState { enabled: true, duration: 5.0, fps: 30, keys: &look.keys }),
                 glitch: None,
+                digital: None,
             },
         );
         let back = Look::parse(&out).unwrap();

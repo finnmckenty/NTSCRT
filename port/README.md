@@ -4,8 +4,9 @@ The Windows version, in Rust on wgpu. Nothing here is used by the Mac app, which
 
 ## What's here
 
-- `engine/` — the pipeline: ntsc-rs → downscale (Chunky/Smooth, WGSL ports of the Mac's kernels) → librashader on wgpu.
-- `app/` — `ntscrt`, the Windows app (egui): pictures and video, crop, Downscale (all six methods), the NTSC and CRT panels, looks and presets (the Mac's JSON), the Mac's preview (integer scale, Animate, zoom, Compare), and Export: PNG, MP4 (H.264/HEVC with the clip's sound, looped) and GIF.
+- `engine/` — the pipeline: Digital video → ntsc-rs → downscale (WGSL ports of the Mac's kernels; One field) → Glitch → librashader on wgpu.
+- `codec/` — `ntscrt-codec`, the Digital video stage (camera, DCT codec, Video 1), a port of `Sources/CrtCodec` with its tests; `codec/ref` runs the Swift original for parity.
+- `app/` — `ntscrt`, the Windows app (egui): pictures and video, crop, Downscale (all six methods), the Digital video, NTSC, Glitch and CRT panels, looks and presets (the Mac's JSON) with the Digital video formats, the timeline, the Mac's preview (integer scale, Live noise, zoom, Compare), and Export: PNG, MP4 (H.264/HEVC with the clip's sound, looped) and GIF.
 - `media/` — video in and out through Media Foundation (Windows only): decoding with frames numbered the Mac's way; MP4 writing with the source's sound re-encoded as AAC. `media-probe` decodes chosen frames to PNGs.
 - `spike/` — `ntscrt-spike`: a still through the engine from the command line, mirroring the Mac's `crt-smoke`. Plus `compare`, which measures how far two PNGs differ.
 - `spike/ref-mac/` — `crt-smoke` renders of all seven CRT shaders, with and without NTSC, as references.

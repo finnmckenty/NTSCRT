@@ -2391,6 +2391,7 @@ dependencies = [
  "libm",
  "librashader",
  "ntsc-rs",
+ "ntscrt-codec",
  "pollster 0.4.0",
  "serde_json",
  "wgpu 28.0.0",
