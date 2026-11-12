@@ -1,7 +1,9 @@
-NTSCRT for Windows (development build)
-======================================
+NTSCRT for Windows (preview)
+============================
 
-Run ntscrt.exe. Keep the folders next to it: shaders\ (the RetroArch CRT
+Unzip the folder anywhere and run ntscrt.exe. It isn't code-signed yet, so
+Windows may say it protected your PC: click More info, then Run anyway.
+Keep the folders next to it: shaders\ (the RetroArch CRT
 shaders), presets\ (the bundled looks) and licenses\.
 
 Open a picture (PNG, JPEG, HEIC) or a video (MP4/MOV) with Open... or by
