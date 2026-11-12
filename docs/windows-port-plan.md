@@ -92,7 +92,7 @@ Done and checked against the Mac (each step committed; CI re-checks on every pus
 | Looks and presets (Mac JSON, round trip) | 9 bundled presets match crt-smoke renders (CI); keyframes round-trip exactly |
 | Preview: sizing, integer scale, Live noise, zoom, Compare | the Mac's PreviewScaler ported with its tests |
 | Crop | the Mac's SourceCrop ported with its tests |
-| Video in (Media Foundation) | every frame matches ffmpeg's frame n within 1/255 |
+| Video in (Media Foundation) | decoded with the advanced video processor: within a mean of 0.6–1.1/255 of the Mac's AVFoundation decode (closer than the basic processor's 2.0, which matched ffmpeg's frame n within 1/255 but sheared clips whose width isn't a multiple of 16, such as 1112 × 834); a 1112 × 834 clip round-trips through export at its own size |
 | Export: PNG, MP4 (H.264/HEVC + sound, loops), GIF | PNG within 0.001/255 of the Mac's render; MP4/GIF frame counts, timing, sound |
 | Timeline (keyframes, easings, auto-key) | the Mac's TimelineEvaluator ported with tests |
 | Glitch (receiver simulation + GPU) | simulation bit-identical to the Mac's (plans, CI test); GPU output byte-identical on 12/13 cases (CI); a 5 s export with rolling, tearing and snow lines up with the Mac's frame for frame (mean 6–10 with snow, 4 without the stage, both H.264) |
