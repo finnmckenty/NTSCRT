@@ -20,6 +20,7 @@ mod producer;
 mod screen_loop;
 mod shader_panel;
 mod timeline_ui;
+mod update;
 mod worker;
 
 use std::collections::HashMap;
@@ -205,6 +206,8 @@ struct App {
     autoplay_at: Option<Instant>,
     /// NTSCRT_SCREEN_LOOP=1 (or a render hook): open it once a picture is up.
     auto_screen_loop: bool,
+    /// Checking GitHub for a newer release (update.rs).
+    updates: update::Updates,
 }
 
 impl App {
@@ -297,6 +300,10 @@ impl App {
             cached_frames: 0,
             autoplay_at: None,
             auto_screen_loop: std::env::var("NTSCRT_SCREEN_LOOP").as_deref() == Ok("1") || std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").is_some(),
+            updates: update::Updates::new(
+                &cc.egui_ctx,
+                ["NTSCRT_UI_SNAPSHOT", "NTSCRT_EXPORT", "NTSCRT_SCREEN_LOOP_RENDER"].iter().any(|k| std::env::var_os(k).is_some()),
+            ),
         };
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
         if let Some(p) = start {
@@ -1589,6 +1596,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         self.export_window(&ctx);
+        self.updates.show(&ctx);
         if self.auto_screen_loop && self.original_size.is_some() && self.shown_seq != 0 {
             self.auto_screen_loop = false;
             // For the UI snapshot: the window inside the main one, where the
@@ -1628,6 +1636,9 @@ impl eframe::App for App {
                         format!("Not in the Windows version yet: {}", self.look_notes.join(", ")),
                     );
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button("Help", |ui| self.updates.menu(ui));
+                });
             });
         });
         // Editing while parked on a keyframe updates it: compare the values
@@ -1677,8 +1688,15 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // `ntscrt --check-update`: the update check without the window, its
+    // answer on stdout (for CI; redirect it, as release builds have no console).
+    if std::env::args().nth(1).as_deref() == Some("--check-update") {
+        let current = update::current_version();
+        println!("version {current}: {:?}", update::check(&current));
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("NTSCRT (Windows preview)").with_inner_size([1200.0, 780.0]),
+        viewport: egui::ViewportBuilder::default().with_title(format!("NTSCRT {} (Windows preview)", update::current_version())).with_inner_size([1200.0, 780.0]),
         ..Default::default()
     };
     eframe::run_native("NTSCRT", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))

@@ -22,6 +22,8 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 - Every feature of the Mac app except ProRes export. Looks and presets are the same files on both.
 - It's a preview: please open an issue if something misbehaves.
 
+**Updates:** NTSCRT checks GitHub for a newer version once a day and offers to open its download page. Check for Updates… is in the NTSCRT menu on the Mac and the Help menu on Windows, where the daily check can be turned off. The check only asks GitHub for the latest version number.
+
 > **Intel note:** I build and test NTSCRT on Apple Silicon and haven't personally tested the Intel build. Intel support exists thanks to a contributed fix ([#1](../../pull/1)) verified by its author on an Intel iMac Pro — if something misbehaves on your Intel Mac, please open an issue.
 
 ## Using the app

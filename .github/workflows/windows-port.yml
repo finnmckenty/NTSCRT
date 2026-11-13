@@ -5,7 +5,11 @@ name: Windows port
 
 on:
   push:
+    branches: ["**"]
     paths: ["port/**", "Vendor/**", "presets/**", ".github/workflows/windows-port.yml"]
+    # A release tag always builds (path filters don't apply to tags): that
+    # build is the release's Windows download, stamped with its version.
+    tags: ["v*"]
   pull_request:
     paths: ["port/**", "Vendor/**", "presets/**", ".github/workflows/windows-port.yml"]
   workflow_dispatch:
@@ -17,6 +21,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # The tags, for the version below.
+          fetch-depth: 0
       - name: Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: librashader (pinned and patched)
@@ -29,12 +35,29 @@ jobs:
             ~/.cargo/git
             port/target
           key: windows-port-${{ hashFiles('port/Cargo.lock', 'port/librashader-wgpu-push-constants.patch') }}
+      - name: Version (from the release tag, as the Mac's wrap-app.sh)
+        shell: bash
+        run: |
+          v=$(git describe --tags --match 'v[0-9]*' --always | sed 's/^v//')
+          echo "NTSCRT_VERSION=$v" >> "$GITHUB_ENV"
+          echo "version $v"
       - name: Build (engine, spike, app)
         working-directory: port
         run: cargo build --release
       - name: Tests (Mac parity of defaults, panel rules)
         working-directory: port
         run: cargo test --release
+      - name: Update check against GitHub (Windows TLS)
+        shell: bash
+        # GitHub's unauthenticated API allows 60 requests an hour per address,
+        # and runners share addresses: a refusal here isn't the app's fault.
+        continue-on-error: true
+        env:
+          NTSCRT_UPDATE_VERSION: "0.0.1"
+        run: |
+          port/target/release/ntscrt.exe --check-update > update-check.txt 2>&1 || true
+          cat update-check.txt
+          grep -q "Newer" update-check.txt
       - name: Compare with the Mac references
         shell: bash
         env:

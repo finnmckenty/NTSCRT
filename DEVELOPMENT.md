@@ -119,6 +119,7 @@ For iteration and headless/screenshot verification:
 - `CRT_PRESET=<id>` — start on a shader preset (ids in `Presets.swift`, e.g. `royale`, `hyllian`)
 - `CRT_NTSC=1` — start with the VHS stage enabled
 - `CRT_NTSCRS` / `CRT_LIBRASHADER` / `CRT_PRESETS` — override dylib/shader locations
+- `CRT_UPDATE_URL=<url or release JSON file>`, `CRT_UPDATE_VERSION=<version>`, `CRT_UPDATE_CHECK=0` — the update check (`UpdateChecker.swift`, rules in CrtCore's `UpdateCheck`): another feed, a pretend version, or no check at launch. Other `CRT_*` hooks skip the launch check unless `CRT_UPDATE_URL` is set
 - `CRT_PERF_LOG=1` — log chain-render vs composite-only draws, plus fps / ms-per-draw / main-thread duty cycle every 60 frames
 - `CRT_DUMP_CONTROLS=1` — print the param→control classification for every preset, then exit
 - `CRT_FORCE_MANAGED=1` — use `.managed` CPU-readback textures (the discrete-GPU path) even on unified memory
@@ -203,12 +204,18 @@ One-time setup (requires an Apple Developer Program membership):
    xcrun notarytool store-credentials ntscrt-notary --apple-id YOU@EXAMPLE.COM --team-id YOURTEAMID
    ```
 
-Then every release is:
+Then every release is (0.23.0 as the example):
 
 ```sh
-./scripts/make-release.sh 0.1.0
-gh release create v0.1.0 dist/NTSCRT-0.1.0.dmg --title "NTSCRT 0.1.0"
+./scripts/make-release.sh 0.23.0
+git tag v0.23.0 && git push origin v0.23.0
+# The tag's Windows CI run builds the package stamped 0.23.0; once it passes:
+gh run download <run id> -n NTSCRT-windows-x64 -D build/ci-0.23.0
+(cd build/ci-0.23.0 && zip -qr -X ../../dist/NTSCRT-0.23.0-windows-x64.zip NTSCRT)
+gh release create v0.23.0 dist/NTSCRT-0.23.0.dmg dist/NTSCRT-0.23.0-windows-x64.zip --title "NTSCRT 0.23.0" --notes-file notes.md
 ```
+
+Tag first: the Windows build takes its version from the tag (`git describe`), and both apps' update check compares their version with the latest release's tag. A Windows package built before the tag would call itself 0.22.1-n-g… and keep offering 0.23.0 to people who already have it.
 
 The script builds everything, assembles a fully self-contained bundle (shaders in Resources/, both dylibs in Frameworks/), signs with hardened runtime, notarizes, staples, and produces a drag-to-Applications DMG. `--adhoc` skips signing/notarization for local testing.
 

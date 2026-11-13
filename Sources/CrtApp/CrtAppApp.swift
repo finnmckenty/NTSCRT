@@ -16,6 +16,8 @@ struct CrtAppApp: App {
 
     @State private var bootstrapError: String?
     @State private var appState: AppState?
+    /// The NTSCRT menu's "Check for Updates Automatically" (UpdateChecker).
+    @AppStorage(UpdateChecker.automaticKey) private var checkForUpdatesAutomatically = true
 
     /// The window title carries the build version so a stale local bundle
     /// is visible at a glance: releases show "NTSCRT 0.10.1", dev bundles
@@ -41,6 +43,12 @@ struct CrtAppApp: App {
             }
         }
         .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { UpdateChecker.shared.checkNow() }
+                Toggle("Check for Updates Automatically", isOn: $checkForUpdatesAutomatically)
+            }
+        }
     }
 
     private func bootstrap() async {
@@ -70,6 +78,7 @@ struct CrtAppApp: App {
                 state.ntscEnabled = true
             }
             appState = state
+            UpdateChecker.shared.checkAtLaunch()
         } catch {
             bootstrapError = "\(error.localizedDescription)\n\nlibrashader dylib + slang-shaders submodule must be discoverable. See README."
         }
