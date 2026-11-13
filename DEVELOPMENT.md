@@ -217,6 +217,9 @@ gh release create v0.23.0 dist/NTSCRT-0.23.0.dmg dist/NTSCRT-0.23.0-windows-x64.
 
 Tag first: the Windows build takes its version from the tag (`git describe`), and both apps' update check compares their version with the latest release's tag. A Windows package built before the tag would call itself 0.22.1-n-g… and keep offering 0.23.0 to people who already have it.
 
+- `make-release.sh` empties `dist/` first, so zip the Windows package after it.
+- Notarization failing with "HTTP status code: 403. A required agreement is missing or has expired" means Apple has a new Developer Program agreement to accept at developer.apple.com (the account holder has to do it). It can take a few minutes to take effect; `xcrun notarytool history --keychain-profile ntscrt-notary` works once it has.
+
 The script builds everything, assembles a fully self-contained bundle (shaders in Resources/, both dylibs in Frameworks/), signs with hardened runtime, notarizes, staples, and produces a drag-to-Applications DMG. `--adhoc` skips signing/notarization for local testing.
 
 ## Run the SwiftUI app
