@@ -53,10 +53,11 @@ extension AppState {
     var exportFrameParams: FrameParams? {
         guard timelineEnabled, !timelineKeys.isEmpty, let ev = makeTimelineEvaluator() else { return nil }
         let glitchBase = glitchValues
+        let receptionOn = glitchEnabled
         return { i, total in
             let t = total > 1 ? Double(i) / Double(total - 1) : 0
             return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                    glitch: ev.glitchSettings(at: t, base: glitchBase))
+                    glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
         }
     }
 }

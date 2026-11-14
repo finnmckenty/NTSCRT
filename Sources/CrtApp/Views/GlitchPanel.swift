@@ -1,9 +1,9 @@
 import SwiftUI
 import CrtCore
 
-/// The glitch stage: a simulated TV receiver and VCR transport between the
-/// NTSC stage and the CRT. Every control is a knob a real set or deck had
-/// (or a condition of the signal); the glitches are how the simulated
+/// The glitch stage's TV: a simulated receiver between the NTSC stage (or
+/// the VCR) and the CRT. Every control is a knob a real set had, or a
+/// condition of the signal reaching it; the glitches are how the simulated
 /// circuits respond, so they combine and interact the way real ones did.
 struct GlitchPanel: View {
     @Environment(AppState.self) private var state
@@ -19,19 +19,19 @@ struct GlitchPanel: View {
                 Toggle("", isOn: $state.glitchEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .help("Simulate the TV's sync circuits and reception, and the VCR's transport. Every knob starts at a healthy set on a clean signal — turn one to break it. Turn on Animate in the palette to see it move.")
+                    .help("Simulate the TV's sync circuits and the signal reaching it. Every knob starts at a healthy set on a clean signal — turn one to break it. Turn on Animate in the palette to see it move.")
             }
             if panelExpanded {
                 Group {
                     HStack {
-                        Text("A real TV and VCR, failing")
+                        Text("A real TV, failing")
                             .font(.subheadline).foregroundStyle(.secondary)
                         Spacer()
                         Button("Reset") { state.resetGlitch() }
                             .buttonStyle(.borderless)
                     }
-                    ForEach(GlitchParam.Group.allCases, id: \.self) { group in
-                        GlitchGroup(group: group)
+                    ForEach(GlitchParam.controls(in: .reception)) { param in
+                        GlitchControl(param: param)
                     }
                 }
                 .opacity(state.glitchEnabled ? 1 : 0.4)
@@ -42,35 +42,8 @@ struct GlitchPanel: View {
     }
 }
 
-private struct GlitchGroup: View {
-    @Environment(AppState.self) private var state
-    let group: GlitchParam.Group
-    @State private var expanded = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Twirl(expanded: $expanded)
-                Text(group.rawValue).font(.callout).bold().lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { expanded.toggle() }
-            }
-            if expanded {
-                ForEach(GlitchParam.all.filter { $0.group == group }) { param in
-                    GlitchControl(param: param)
-                }
-            }
-        }
-        .padding(.leading, 12)
-    }
-}
-
-private struct GlitchControl: View {
+/// One glitch-stage knob (the Glitch and VCR panels share these).
+struct GlitchControl: View {
     @Environment(AppState.self) private var state
     let param: GlitchParam
 
@@ -82,18 +55,25 @@ private struct GlitchControl: View {
     var body: some View {
         switch param.kind {
         case .toggle:
-            // Dropout compensation only has something to do once there are
-            // dropouts; grayed out until then, like the CRT panel's gates.
-            let idle = param.id == "dropout_compensation" && state.glitchSettings["dropouts"] == 0
             Toggle(isOn: Binding(get: { value.wrappedValue >= 0.5 },
                                  set: { value.wrappedValue = $0 ? 1 : 0 })) {
                 Text(param.label).font(.callout).lineLimit(1)
             }
             .toggleStyle(.switch)
-            .disabled(idle)
-            .opacity(idle ? 0.45 : 1)
             .padding(.leading, 12)
-            .help(idle ? "Turn up Dropouts first — this decides how they're concealed." : param.help)
+            .help(param.help)
+
+        case .seed:
+            HStack {
+                Text(param.label).font(.callout).lineLimit(1)
+                Text("#\(Int(value.wrappedValue))").font(.callout).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Another") { value.wrappedValue = value.wrappedValue.rounded() + 1 }
+                    .buttonStyle(.borderless)
+            }
+            .padding(.leading, 12)
+            .help(param.help)
 
         case .slider(let min, let max, let percent, let unit):
             VStack(alignment: .leading, spacing: 2) {

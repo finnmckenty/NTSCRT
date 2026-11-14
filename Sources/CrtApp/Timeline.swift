@@ -139,15 +139,17 @@ struct TimelineEvaluator: @unchecked Sendable {
         var out: [String: Double] = [:]
         for (id, va) in a.glitchValues {
             let vb = b.glitchValues[id] ?? va
-            out[id] = (GlitchParam.byID[id]?.isToggle ?? false) ? va : va + (vb - va) * u
+            out[id] = (GlitchParam.byID[id]?.isDiscrete ?? false) ? va : va + (vb - va) * u
         }
         return out
     }
 
     /// The glitch settings at `t`, starting from `base` for knobs the
-    /// keyframes don't carry.
-    func glitchSettings(at t: Double, base: [String: Double]) -> GlitchSettings {
-        GlitchSettings(values: base.merging(glitchValues(at: t)) { _, new in new })
+    /// keyframes don't carry. With the Glitch panel off (`receptionOn`
+    /// false) its knobs stay healthy — the VCR may still be playing.
+    func glitchSettings(at t: Double, base: [String: Double], receptionOn: Bool = true) -> GlitchSettings {
+        let s = GlitchSettings(values: base.merging(glitchValues(at: t)) { _, new in new })
+        return receptionOn ? s : s.receptionHealthy
     }
 
     /// Sliders interpolate; choices hold until the next keyframe. The

@@ -40,19 +40,42 @@ struct NtscPanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var shown: [NtscSetting] {
+        state.ntscDescriptors.filter { !NtscSetting.retiredVHS.contains($0.name) }
+    }
+
+    /// The retired VHS emulation groups this look still has switched on.
+    private var retiredInUse: [NtscSetting] {
+        state.ntscDescriptors.filter { NtscSetting.retiredVHS.contains($0.name) && state.ntscBool($0.name) }
+    }
+
     @ViewBuilder
     private var settingsBody: some View {
         HStack {
-            Text("Settings (\(state.ntscDescriptors.count) top-level)")
+            Text("Settings (\(shown.count) top-level)")
                 .font(.subheadline).foregroundStyle(.secondary)
             Spacer()
             Button("Reset") { state.resetNtsc() }
                 .buttonStyle(.borderless)
         }
-        // Lazy: the full VHS list is ~80 AppKit-backed controls; building
-        // only the visible rows keeps expand latency to a single beat.
+        if !retiredInUse.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("This look uses ntsc-rs's old VHS emulation (\(retiredInUse.map(\.label).joined(separator: ", "))). The VCR panel replaces it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Turn it off") {
+                    for s in retiredInUse { state.setNtscValue(s.name, false) }
+                }
+                .controlSize(.small)
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
+        }
+        // Lazy: the full list is ~60 AppKit-backed controls; building only
+        // the visible rows keeps expand latency to a single beat.
         LazyVStack(alignment: .leading, spacing: 8) {
-            ForEach(state.ntscDescriptors) { setting in
+            ForEach(shown) { setting in
                 NtscControl(setting: setting, depth: 0)
             }
         }

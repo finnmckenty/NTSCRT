@@ -181,38 +181,6 @@ final class GlitchStageTests: XCTestCase {
         XCTAssertLessThan(saturation(A - 1), 0.01, "...then the killer switches it off")
     }
 
-    func testDropoutCompensationReplaysTheLineBefore() throws {
-        let input = texture { x, y in (Float(y % 7) / 7, Float(x % 5) / 5, 0.5) }
-        let raster = ReceiverRaster(width: W, activeLines: A)
-        var plan = healthyPlan()
-        plan.dropouts = [GlitchDropout(fieldLine: Int32(raster.vbiLines + 50), uStart: 20, uLength: 10)]
-        let px = try render(input, plan: plan)
-        let src = readback(input)
-        let x = Int((25 - NTSCTiming.activeStart) / (NTSCTiming.activeLength / Double(W)))
-        for c in 0..<3 {
-            XCTAssertEqual(px[(50 * W + x) * 4 + c], src[(49 * W + x) * 4 + c], "replayed from line 49")
-        }
-
-        // The compensator reacts ~0.7 µs late: the start still flashes white.
-        let tickX = Int((20.3 - NTSCTiming.activeStart) / (NTSCTiming.activeLength / Double(W)))
-        XCTAssertGreaterThan(yiq(px, tickX, 50).0, 0.95, "detector latency leaves a white tick")
-
-        // A flaw two lines tall replays the line above both — one line
-        // repeated down the flaw.
-        var tall = plan
-        tall.dropouts.append(GlitchDropout(fieldLine: Int32(raster.vbiLines + 49), uStart: 20, uLength: 10))
-        let smear = try render(input, plan: tall)
-        for c in 0..<3 {
-            XCTAssertEqual(smear[(50 * W + x) * 4 + c], src[(48 * W + x) * 4 + c], "line 48 repeated")
-            XCTAssertEqual(smear[(49 * W + x) * 4 + c], src[(48 * W + x) * 4 + c], "on both lines")
-        }
-
-        var off = plan
-        off.settings = GlitchSettings(values: ["dropout_compensation": 0])
-        let streak = try render(input, plan: off)
-        XCTAssertGreaterThan(yiq(streak, x, 50).0, 0.95, "uncompensated: white streak")
-    }
-
     func testCaptionDataOnLine21() throws {
         let input = texture { _, _ in (0.6, 0.6, 0.6) }
         let raster = ReceiverRaster(width: W, activeLines: A)
@@ -263,13 +231,14 @@ final class GlitchCheckpointTests: XCTestCase {
 
     func testSeekingBackMatchesAFullRerunWithConstantSettings() throws {
         let s = GlitchSettings(values: ["vertical_hold": 0.5, "horizontal_hold": 0.65,
-                                        "signal_strength": 0.3, "crinkle": 0.7, "head_switch": 3])
+                                        "signal_strength": 0.3, "vcr": 1, "tape_creases": 0.7,
+                                        "tape_mold": 0.5, "dirt_buildup": 0.9, "head_switch": 3])
         let seeker = try GlitchRenderer(context: context)
         _ = try plan(seeker, 9.0, s)                      // records checkpoints
         let viaCheckpoint = try plan(seeker, 4.37, s)     // jumps back
         let fresh = try plan(try GlitchRenderer(context: context), 4.37, s)
         XCTAssertEqual(viaCheckpoint.rows, fresh.rows)
-        XCTAssertEqual(viaCheckpoint.dropouts, fresh.dropouts)
+        XCTAssertEqual(viaCheckpoint.vcr?.lines, fresh.vcr?.lines)
         XCTAssertEqual(viaCheckpoint.chromaPhase, fresh.chromaPhase)
     }
 

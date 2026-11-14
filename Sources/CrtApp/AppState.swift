@@ -691,6 +691,26 @@ final class AppState {
     private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
+    /// The VCR panel's switch (kept with the glitch knobs, so it is saved
+    /// and keyframed with them).
+    var vcrEnabled: Bool {
+        get { glitchSettings.vcr }
+        set { setGlitchValue(GlitchParam.vcrID, newValue ? 1 : 0) }
+    }
+
+    /// The glitch stage runs when either of its panels is on: the Glitch
+    /// panel (the TV) or the VCR — keyframed on anywhere counts.
+    var glitchStageActive: Bool {
+        glitchEnabled || glitchSettings.vcr
+            || (timelineEnabled && timelineKeys.contains { ($0.glitchValues[GlitchParam.vcrID] ?? 0) >= 0.5 })
+    }
+
+    /// What the stage runs with: the Glitch panel's knobs only while it is
+    /// on (off, the TV is healthy and only the VCR acts).
+    var stageGlitchSettings: GlitchSettings {
+        glitchEnabled ? glitchSettings : glitchSettings.receptionHealthy
+    }
+
     // MARK: - Digital video (a camera and codec ahead of NTSC — CrtCodec)
 
     /// Off by default: unlike Glitch, a codec changes the picture as soon as
@@ -758,8 +778,26 @@ final class AppState {
         markChainDirty()
     }
 
+    /// The Glitch panel's Reset: the TV's knobs back to healthy (the VCR's
+    /// are left alone).
     func resetGlitch() {
-        glitchValues = GlitchParam.defaultValues
+        for p in GlitchParam.controls(in: .reception) { glitchValues[p.id] = p.defaultValue }
+        autoKeyIfParked()
+        markChainDirty()
+    }
+
+    /// The VCR panel's Reset: a new tape in a clean deck (switch left as is).
+    func resetVcr() {
+        for g in [GlitchParam.Group.tape, .deck] {
+            for p in GlitchParam.controls(in: g) where p.kind != .seed { glitchValues[p.id] = p.defaultValue }
+        }
+        autoKeyIfParked()
+        markChainDirty()
+    }
+
+    /// A Tape or Deck picker choice: its condition's values for `keys`.
+    func applyVcrCondition(_ c: VcrCondition, keys: [String]) {
+        glitchValues = c.applied(to: glitchValues, keys: keys)
         autoKeyIfParked()
         markChainDirty()
     }
@@ -930,16 +968,18 @@ final class AppState {
         let fps = glitchFrameRate
         let total = timelineTotalFrames
         let base = glitchValues
+        let receptionOn = glitchEnabled
         // ntscGeneration moves with every timeline edit; the base values
         // matter for keyframes saved without glitch values.
         var hasher = Hasher()
         hasher.combine(ntscGeneration)
         hasher.combine(total)
         for k in base.keys.sorted() { hasher.combine(k); hasher.combine(base[k]) }
+        hasher.combine(receptionOn)
         return GlitchHistory(frameDuration: 1 / fps, id: hasher.finalize()) { t in
             let frame = (t * fps).rounded()
             let nt = total > 1 ? min(1, max(0, frame / Double(total - 1))) : 0
-            return ev.glitchSettings(at: nt, base: base)
+            return ev.glitchSettings(at: nt, base: base, receptionOn: receptionOn)
         }
     }
 
@@ -1478,7 +1518,7 @@ final class AppState {
             downscale: downscaleSpec,
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
             shaderEnabled: shaderEnabled,
-            glitch: glitchEnabled ? glitchSettings : nil,
+            glitch: glitchStageActive ? stageGlitchSettings : nil,
             digital: digitalExport,
             codec: codec,
             averageBitrate: bitrate,
@@ -1496,7 +1536,7 @@ final class AppState {
             downscale: downscaleSpec,
             presetPath: presetsRoot.appendingPathComponent(selectedPreset.relativePath).path,
             shaderEnabled: shaderEnabled,
-            glitch: glitchEnabled ? glitchSettings : nil,
+            glitch: glitchStageActive ? stageGlitchSettings : nil,
             digital: digitalExport,
             crop: activeCrop)
     }
@@ -1579,8 +1619,8 @@ final class AppState {
             let supersample = exportChain == nil ? nil
                 : SupersampledPass.make(device: device, chainInput: chainInputSize,
                                         target: (size.width, size.height))
-            let glitchFrame = (glitchEnabled ? glitchRenderer : nil).map {
-                GlitchFrame(renderer: $0, time: glitchTime, settings: glitchSettings,
+            let glitchFrame = (glitchStageActive ? glitchRenderer : nil).map {
+                GlitchFrame(renderer: $0, time: glitchTime, settings: stageGlitchSettings,
                             history: glitchHistory)
             }
             try ExportFrame.encode(into: cb, pipeline: pipeline,
@@ -1988,10 +2028,23 @@ final class AppState {
         // Presets saved before the glitch stage existed load it in its
         // default state: on, every knob healthy — which renders exactly as
         // those presets always looked.
+        // Looks from before the VCR panel: their Tape knobs become the
+        // physical conditions behind them (GlitchSettings.migrated), with
+        // the VCR on for the whole look if the base or any keyframe used
+        // one — and only if the Glitch stage was on to play them.
+        var vcrFromLegacy: Double? = nil
         if let g = dict["glitch"] as? [String: Any] {
             let values = (g["values"] as? [String: Double]) ?? [:]
-            glitchValues = GlitchParam.defaultValues.merging(values) { _, new in new }
             glitchEnabled = (g["enabled"] as? Bool) ?? true
+            if values[GlitchParam.vcrID] == nil {
+                let rawKeys = ((dict["timeline"] as? [String: Any])?["keys"] as? [[String: Any]]) ?? []
+                let keyed = rawKeys.compactMap { $0["glitch"] as? [String: Double] }
+                let used = ([values] + keyed).contains { GlitchSettings.migrated($0)[GlitchParam.vcrID] == 1 }
+                vcrFromLegacy = used && glitchEnabled ? 1 : 0
+            }
+            var migrated = GlitchSettings.migrated(values)
+            if let v = vcrFromLegacy { migrated[GlitchParam.vcrID] = v }
+            glitchValues = GlitchParam.defaultValues.merging(migrated) { _, new in new }
         } else {
             glitchValues = GlitchParam.defaultValues
             glitchEnabled = true
@@ -2022,7 +2075,11 @@ final class AppState {
                     let easing = (k["easing"] as? String).flatMap(KeyEasing.init(rawValue:)) ?? .linear
                     let shader = (k["shader"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
                     let ntsc = k["ntsc"] as? [String: Any] ?? [:]
-                    let glitch = k["glitch"] as? [String: Double] ?? [:]
+                    var glitch = k["glitch"] as? [String: Double] ?? [:]
+                    if let v = vcrFromLegacy, !glitch.isEmpty {
+                        glitch = GlitchSettings.migrated(glitch)
+                        glitch[GlitchParam.vcrID] = v
+                    }
                     let digital = DigitalSettings.migrated(k["digital"] as? [String: Double] ?? [:],
                                                            lookVersion: lookVersion)
                     return Keyframe(t: kt, easing: easing, shaderParams: shader, ntscValues: ntsc,

@@ -136,10 +136,11 @@ struct ExportPopover: View {
     private var videoFrameParams: FrameParams? {
         guard hasKeyframes, let ev = state.makeTimelineEvaluator() else { return nil }
         let glitchBase = state.glitchValues
+        let receptionOn = state.glitchEnabled
         return { i, total in
             let t = total > 1 ? Double(i) / Double(total - 1) : 0
             return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                    glitch: ev.glitchSettings(at: t, base: glitchBase))
+                    glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
         }
     }
 
@@ -224,12 +225,13 @@ struct ExportPopover: View {
         let totalFrames = gifFrameCount
         let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
         let glitchBase = state.glitchValues
+        let receptionOn = state.glitchEnabled
         let frameParams: FrameParams? =
             evaluator.map { ev in
                 { i, total in
                     let t = total > 1 ? Double(i) / Double(total - 1) : 0
                     return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                            glitch: ev.glitchSettings(at: t, base: glitchBase))
+                            glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
                 }
             }
         let state = state
@@ -307,6 +309,7 @@ struct ExportPopover: View {
         // and only the frame-seeded VHS noise animates.
         let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
         let glitchBase = state.glitchValues
+        let receptionOn = state.glitchEnabled
         let frameParams: FrameParams? =
             evaluator.map { ev in
                 { i, _ in
@@ -315,7 +318,7 @@ struct ExportPopover: View {
                     let within = i % baseFrames
                     let t = baseFrames > 1 ? Double(within) / Double(baseFrames - 1) : 0
                     return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                            glitch: ev.glitchSettings(at: t, base: glitchBase))
+                            glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
                 }
             }
         let state = state

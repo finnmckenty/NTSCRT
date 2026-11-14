@@ -11,8 +11,11 @@ import Metal
 ///    recurrence `ChromaReference` runs on the CPU.
 /// 3. `glitch_compose` (one thread per pixel): reads the signal each screen
 ///    pixel was scanned from — picture, blanking, sync pulses, line-21
-///    caption data — then adds the ghost, dropouts, hum and snow, and
-///    decodes color against the row's reference.
+///    caption data — then adds the ghost, hum and snow, and decodes color
+///    against the row's reference.
+///
+/// With the VCR playing, `VcrStage` first plays the picture back from tape;
+/// that is the picture the TV then receives.
 ///
 /// Linear signal effects (ghost, hum, snow) are added after ntsc-rs has
 /// decoded the picture. For a linear decoder that is exact, not an
@@ -29,6 +32,8 @@ public final class GlitchStage {
     private let gatePipeline: MTLComputePipelineState
     private let chromaPipeline: MTLComputePipelineState
     private let composePipeline: MTLComputePipelineState
+    private let vcr: VcrStage
+    private var vcrOutput: MTLTexture?
 
     public init(device: MTLDevice) throws {
         self.device = device
@@ -43,6 +48,7 @@ public final class GlitchStage {
         gatePipeline = try pipe("glitch_gate")
         chromaPipeline = try pipe("glitch_chroma")
         composePipeline = try pipe("glitch_compose")
+        vcr = try VcrStage(device: device)
     }
 
     /// Mirrors `GlitchU` in the shader: 4-byte scalars only, so the Swift
@@ -50,8 +56,8 @@ public final class GlitchStage {
     private struct Uniforms {
         var width: UInt32, activeLines: UInt32, vbiLines: UInt32, totalLines: UInt32
         var preEqEnd: UInt32, vsyncEnd: UInt32, postEqEnd: UInt32, ccEnabled: UInt32
-        var ccBits: UInt32, fieldIndex: UInt32, seed: UInt32, dropoutCount: UInt32
-        var docEnabled: UInt32, tapsI: UInt32, tapsQ: UInt32, colorOnInit: UInt32
+        var ccBits: UInt32, fieldIndex: UInt32, seed: UInt32, pad0: UInt32
+        var pad1: UInt32, tapsI: UInt32, tapsQ: UInt32, colorOnInit: UInt32
         var usPerPixel: Float, lineUS: Float, ghostLevel: Float, ghostDelay: Float
         var ghostCos: Float, ghostSin: Float, brightness: Float, pictureGain: Float
         var burstAmp: Float, chromaAlpha: Float, accGamma: Float, killerKappa: Float
@@ -80,8 +86,7 @@ public final class GlitchStage {
             preEqEnd: UInt32(raster.preEqEnd), vsyncEnd: UInt32(raster.vsyncEnd),
             postEqEnd: UInt32(raster.postEqEnd), ccEnabled: s.flag("closed_captions") ? 1 : 0,
             ccBits: plan.ccBits, fieldIndex: plan.fieldIndex, seed: 0x9E3779B9,
-            dropoutCount: UInt32(min(plan.dropouts.count, 64)),
-            docEnabled: s.flag("dropout_compensation") ? 1 : 0,
+            pad0: 0, pad1: 0,
             // Decoder chroma bandwidths: I ≈ 1.3 MHz, Q ≈ 0.6 MHz.
             tapsI: UInt32(max(1, Int((0.38 / usPerPixel).rounded()))),
             tapsQ: UInt32(max(1, Int((0.83 / usPerPixel).rounded()))),
@@ -103,8 +108,13 @@ public final class GlitchStage {
               let gateBuf = device.makeBuffer(length: rows.count * 8, options: .storageModePrivate),
               let colorBuf = device.makeBuffer(length: rows.count * 16, options: .storageModePrivate)
         else { return }
-        var dropouts = Array(plan.dropouts.prefix(64))
-        if dropouts.isEmpty { dropouts = [GlitchDropout(fieldLine: -1, uStart: 0, uLength: 0)] }
+        // The VCR plays the picture from tape first; the TV receives that.
+        var picture = input
+        if let vcrPlan = plan.vcr, let tex = vcrTexture(like: input) {
+            vcr.encode(into: cb, input: input, output: tex, plan: vcrPlan, settings: s,
+                       raster: raster, fieldIndex: plan.fieldIndex)
+            picture = tex
+        }
 
         guard let enc = cb.makeComputeCommandEncoder() else { return }
 
@@ -112,7 +122,7 @@ public final class GlitchStage {
         enc.setBuffer(rowBuf, offset: 0, index: 0)
         enc.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         enc.setBuffer(gateBuf, offset: 0, index: 2)
-        enc.setTexture(input, index: 0)
+        enc.setTexture(picture, index: 0)
         let rowThreads = MTLSize(width: rows.count, height: 1, depth: 1)
         let rowGroup = MTLSize(width: min(64, gatePipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
         enc.dispatchThreads(rowThreads, threadsPerThreadgroup: rowGroup)
@@ -128,14 +138,23 @@ public final class GlitchStage {
         enc.setBuffer(rowBuf, offset: 0, index: 0)
         enc.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         enc.setBuffer(colorBuf, offset: 0, index: 2)
-        dropouts.withUnsafeBytes { enc.setBytes($0.baseAddress!, length: $0.count, index: 3) }
-        enc.setTexture(input, index: 0)
+        enc.setTexture(picture, index: 0)
         enc.setTexture(output, index: 1)
         let w = composePipeline.threadExecutionWidth
         let h = max(1, composePipeline.maxTotalThreadsPerThreadgroup / w)
         enc.dispatchThreads(MTLSize(width: input.width, height: input.height, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
         enc.endEncoding()
+    }
+
+    private func vcrTexture(like input: MTLTexture) -> MTLTexture? {
+        if let t = vcrOutput, t.width == input.width, t.height == input.height { return t }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: input.width,
+                                                         height: input.height, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .private
+        vcrOutput = device.makeTexture(descriptor: d)
+        return vcrOutput
     }
 
     static let metalSource = """
@@ -145,8 +164,8 @@ public final class GlitchStage {
     struct GlitchU {
         uint width, activeLines, vbiLines, totalLines;
         uint preEqEnd, vsyncEnd, postEqEnd, ccEnabled;
-        uint ccBits, fieldIndex, seed, dropoutCount;
-        uint docEnabled, tapsI, tapsQ, colorOnInit;
+        uint ccBits, fieldIndex, seed, pad0;
+        uint pad1, tapsI, tapsQ, colorOnInit;
         float usPerPixel, lineUS, ghostLevel, ghostDelay;
         float ghostCos, ghostSin, brightness, pictureGain;
         float burstAmp, chromaAlpha, accGamma, killerKappa;
@@ -155,9 +174,8 @@ public final class GlitchStage {
     struct Row {
         float u0; int fieldLine; float lenPrev; float lenCur; float lenNext;
         float noiseIRE; float humIRE; float burstScale;
-        float tapeLoss; float gateShift; float pad1; float pad2;
+        float pad0; float gateShift; float pad1; float pad2;
     };
-    struct Dropout { int fieldLine; float uStart; float uLength; float pad; };
 
     constant float SYNC_END = 4.7;
     constant float BURST_S = 5.3;
@@ -210,18 +228,6 @@ public final class GlitchStage {
         int iL = int(L);
         line = ((line % iL) + iL) % iL;
         return { line, u };
-    }
-
-    // Is (line, u) inside a dropout? Reports where that dropout starts.
-    inline bool inDropout(constant Dropout* drops, uint count, int line, float u, thread float& start) {
-        for (uint i = 0; i < count; i++) {
-            Dropout d = drops[i];
-            if (d.fieldLine == line && u >= d.uStart && u < d.uStart + d.uLength) {
-                start = d.uStart;
-                return true;
-            }
-        }
-        return false;
     }
 
     // Line 21: 7 cycles of clock run-in at 503.5 kHz, then 19 bits.
@@ -348,7 +354,6 @@ public final class GlitchStage {
     kernel void glitch_compose(device const Row* rows [[buffer(0)]],
                                constant GlitchU& U [[buffer(1)]],
                                device const float4* color [[buffer(2)]],
-                               constant Dropout* drops [[buffer(3)]],
                                texture2d<float, access::read> src [[texture(0)]],
                                texture2d<float, access::write> dst [[texture(1)]],
                                uint2 gid [[thread_position_in_grid]])
@@ -359,46 +364,14 @@ public final class GlitchStage {
         float u = rw.u0 + ACT_S + (float(gid.x) + 0.5) * U.usPerPixel;
         Loc l = locate(rw, u, U.totalLines);
 
-        // Oxide dropout. Without compensation the FM demodulator throws a
-        // white streak with a dark tail. With it, the deck replays the
-        // stretch from its one-line delay — which, when the line above was
-        // a dropout too, is that line's own replacement, so a tall flaw
-        // repeats one line down several (a frozen smear). The detector and
-        // switch react ~0.7 µs late, so each dropout still flashes a tick.
-        int sigLine = l.line;
-        bool streak = false;
-        float tail = 0.0;
-        float dStart = 0.0;
-        if (inDropout(drops, U.dropoutCount, l.line, l.u, dStart)) {
-            if (U.docEnabled != 0u && l.u - dStart >= 0.7) {
-                int src = l.line - 1;
-                float s2 = 0.0;
-                for (int k = 0; k < 6 && src > int(U.vbiLines)
-                     && inDropout(drops, U.dropoutCount, src, l.u, s2); k++) src -= 1;
-                sigLine = max(int(U.vbiLines), src);
-            } else {
-                streak = true;
-            }
-        } else if (U.docEnabled == 0u) {
-            for (uint i = 0; i < U.dropoutCount; i++) {
-                Dropout d = drops[i];
-                if (d.fieldLine == l.line && l.u >= d.uStart + d.uLength
-                    && l.u < d.uStart + d.uLength + 1.5) {
-                    tail = max(tail, 1.0 - (l.u - d.uStart - d.uLength) / 1.5);
-                }
-            }
-        }
-
-        Sig s = signalAt(src, U, sigLine, l.u);
-        bool plain = s.picture && s.exact && sigLine == l.line && !streak && tail == 0.0
-            && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0 && rw.tapeLoss == 0.0
+        Sig s = signalAt(src, U, l.line, l.u);
+        bool plain = s.picture && s.exact
+            && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0
             && U.pictureGain == 1.0 && U.brightness == 0.0
             && rc.x == 1.0 && rc.y == 0.0 && rc.z == 1.0;
         if (plain) { dst.write(float4(s.rgb, 1.0), gid); return; }
 
         float3 yiq = s.yiq;
-        if (streak) yiq = float3(1.0, 0.0, 0.0);
-        if (tail > 0.0) yiq.x = mix(yiq.x, -0.08, tail * 0.6);
 
         // Multipath: the same signal again, later, possibly inverted.
         if (U.ghostLevel != 0.0) {
@@ -411,21 +384,6 @@ public final class GlitchStage {
             // The ghost adds the signal's variation about blanking.
             yiq.x += U.ghostLevel * (g.yiq.x - ire2y(0.0));
             yiq.yz += U.ghostLevel * iq;
-        }
-
-        // Tape signal loss: past the FM threshold the deck's demodulator
-        // outputs streaks instead of picture — black and white dashes a
-        // fraction of a microsecond to a couple long — and its color
-        // killer drops chroma with the signal.
-        if (rw.tapeLoss > 0.0) {
-            float seg = 0.5 + 1.6 * uni(U.seed, U.fieldIndex, gid.y, 201u);
-            float pos = l.u + uni(U.seed, U.fieldIndex, gid.y, 202u) * seg;
-            uint run = uint(max(0.0, pos) / seg);
-            float g = gauss(U.seed ^ 0xF00Du, U.fieldIndex, run, gid.y);
-            float sparkle = uni(U.seed ^ 0xBEEFu, U.fieldIndex, run, gid.y) > 0.93 ? 0.6 : 0.0;
-            float streak = clamp(0.35 + 0.32 * g + sparkle, -0.08, 1.05);
-            yiq.x = mix(yiq.x, streak, rw.tapeLoss);
-            yiq.yz *= 1.0 - rw.tapeLoss;
         }
 
         // AGC running out of gain: everything shrinks toward blanking.

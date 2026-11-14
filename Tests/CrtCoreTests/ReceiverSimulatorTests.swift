@@ -51,7 +51,7 @@ final class ReceiverSimulatorTests: XCTestCase {
             XCTAssertEqual(p.chromaGain, 1, accuracy: 1e-9)
             XCTAssertTrue(p.colorOn)
             XCTAssertEqual(p.pictureGain, 1)
-            XCTAssertTrue(p.dropouts.isEmpty)
+            XCTAssertNil(p.vcr)
         }
     }
 
@@ -171,9 +171,9 @@ final class ReceiverSimulatorTests: XCTestCase {
 
     func testHeadSwitchJumpBendsTheTopOfThePicture() {
         // Slow AFC: still chasing the head-switch jump at the top (flagging).
-        let slow = plans(["head_switch": 4, "afc_speed": 0], count: 6)
+        let slow = plans(["vcr": 1, "head_switch": 4, "afc_speed": 0], count: 6)
         // Fast AFC: caught up before the picture starts.
-        let fast = plans(["head_switch": 4, "afc_speed": 1], count: 6)
+        let fast = plans(["vcr": 1, "head_switch": 4, "afc_speed": 1], count: 6)
         func topBend(_ ps: [GlitchFieldPlan]) -> Double {
             ps.map { p -> Double in
                 let base = offset(p.rows[raster.activeLines / 2])
@@ -229,27 +229,36 @@ final class ReceiverSimulatorTests: XCTestCase {
                              "a small turn already shifts the picture")
     }
 
-    func testHeadClogDropsFieldsAtAnyFrameRate() {
-        // A strict every-other-field pattern would alias at 30 fps (frames
-        // land on the same head forever); debris drops fields at random.
-        for fps in [24.0, 30.0, 60.0] {
-            let sim = ReceiverSimulator(raster: raster)
-            let s = GlitchSettings(values: ["head_clog": 0.7])
-            let losses = (0..<24).map { i -> Float in
-                sim.advance(to: 1 + Double(i) / fps, settings: s)
-                return sim.plan().rows[raster.activeLines / 2].tapeLoss
-            }
-            XCTAssertTrue(losses.contains { $0 > 0.7 }, "\(fps) fps: some fields lost \(losses)")
-            XCTAssertTrue(losses.contains { $0 < 0.3 }, "\(fps) fps: others play \(losses)")
+    func testTheTwoHeadsCarryTheirOwnDirt() {
+        // Dirty heads: each carries its own baked-on dirt, so fields played
+        // by one head read through more spacing than the other's — and at
+        // 60 fps both heads show.
+        let sim = ReceiverSimulator(raster: raster)
+        let s = GlitchSettings(values: ["vcr": 1, "head_dirt": 0.8, "head_mismatch": 0.5])
+        var spacing: [UInt32: Float] = [:]
+        for i in 0..<6 {
+            sim.advance(to: 1 + Double(i) / 59.94, settings: s)
+            let line = sim.plan().vcr!.lines[raster.activeLines / 2]
+            spacing[line.head] = line.spacing
         }
+        XCTAssertEqual(spacing.count, 2, "both heads play")
+        XCTAssertGreaterThan(abs(spacing[0]! - spacing[1]!), 0.05, "with different dirt \(spacing)")
+    }
+
+    func testTapeFaultsNeedTheVCR() {
+        // The deck and tape knobs do nothing until the VCR is playing.
+        let off = plans(["tape_creases": 1, "head_dirt": 1, "head_switch": 4])[0]
+        XCTAssertNil(off.vcr)
+        XCTAssertTrue(off.rows.allSatisfy { $0.u0 == 0 && $0.burstScale == 1 })
     }
 
     // MARK: - determinism
 
     func testSameMomentAlwaysLooksTheSame() {
         let values: [String: Double] = ["vertical_hold": 0.5, "horizontal_hold": 0.7,
-                                        "signal_strength": 0.3, "crinkle": 0.8,
-                                        "head_switch": 3, "timebase_jitter": 1, "dropouts": 0.5]
+                                        "signal_strength": 0.3, "vcr": 1, "tape_creases": 0.8,
+                                        "tape_mold": 0.6, "head_dirt": 0.4, "dirt_buildup": 0.8,
+                                        "head_switch": 3, "timebase_jitter": 1, "tape_dropouts": 0.5]
         let s = GlitchSettings(values: values)
         // Frame by frame...
         let a = ReceiverSimulator(raster: raster)
@@ -264,7 +273,8 @@ final class ReceiverSimulatorTests: XCTestCase {
         let pa = a.plan(), pb = b.plan(), pc = c.plan()
         XCTAssertEqual(pa.rows, pb.rows)
         XCTAssertEqual(pa.rows, pc.rows)
-        XCTAssertEqual(pa.dropouts, pb.dropouts)
+        XCTAssertEqual(pa.vcr?.lines, pb.vcr?.lines)
+        XCTAssertEqual(pa.vcr?.lines, pc.vcr?.lines)
         XCTAssertEqual(pa.ccBits, pc.ccBits)
     }
 }
@@ -274,8 +284,8 @@ extension ReceiverSimulatorTests {
         let raster = ReceiverRaster(width: 320, activeLines: 240)
         for speed in [3.0, 5.0] {
             let sim = ReceiverSimulator(raster: raster)
-            sim.advance(to: 1.0, settings: GlitchSettings(values: ["search_speed": speed]))
-            let noisy = sim.plan().rows.map { $0.tapeLoss > 0.5 }
+            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "search_speed": speed]))
+            let noisy = sim.plan().vcr!.lines.map { $0.gain < 0.5 }
             // Count noise bands down the screen (a band split by the top or
             // bottom edge counts once at each edge).
             var bands = 0
@@ -284,8 +294,8 @@ extension ReceiverSimulatorTests {
             XCTAssertEqual(Double(bands), speed - 1, accuracy: 1, "\(speed)× search")
         }
         let normal = ReceiverSimulator(raster: raster)
-        normal.advance(to: 1.0, settings: GlitchSettings(values: ["search_speed": 1]))
-        XCTAssertTrue(normal.plan().rows.allSatisfy { $0.tapeLoss == 0 }, "1× is normal play")
+        normal.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "search_speed": 1]))
+        XCTAssertTrue(normal.plan().vcr!.lines.allSatisfy { $0.gain == 1 }, "1× is normal play")
     }
 }
 
@@ -294,8 +304,8 @@ extension ReceiverSimulatorTests {
         let raster = ReceiverRaster(width: 320, activeLines: 240)
         func noisyRows(_ e: Double) -> [Int] {
             let sim = ReceiverSimulator(raster: raster)
-            sim.advance(to: 1.0, settings: GlitchSettings(values: ["tracking": e]))
-            return sim.plan().rows.enumerated().filter { $0.element.tapeLoss > 0.5 }.map { $0.offset }
+            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "tracking": e]))
+            return sim.plan().vcr!.lines.enumerated().filter { $0.element.gain < 0.5 }.map { $0.offset }
         }
         XCTAssertTrue(noisyRows(0).isEmpty, "tracked: nothing visible")
         let mild = noisyRows(0.3), bad = noisyRows(0.9)

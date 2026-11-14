@@ -103,12 +103,10 @@ public struct GlitchRow: Equatable {
     public var noiseIRE: Float
     /// Mains hum on this line, IRE.
     public var humIRE: Float
-    /// Fraction of the burst surviving tape signal loss.
+    /// Fraction of the burst reaching the TV (the VCR's color killer can
+    /// stop it).
     public var burstScale: Float
-    /// Tape signal loss (0–1): past the FM threshold the picture gives way
-    /// to the demodulator's streaks, and the deck's color killer drops
-    /// chroma — unlike antenna snow, which adds to the picture.
-    public var tapeLoss: Float = 0
+    var pad0: Float = 0
     /// Where the burst gate sits relative to the scan line start (µs). The
     /// gate is keyed from a fast phase loop that follows the incoming sync,
     /// so it stays on the burst through a slow or standing phase error (a
@@ -118,19 +116,12 @@ public struct GlitchRow: Equatable {
     var pad1: Float = 0, pad2: Float = 0
 }
 
-/// Lost stretch of a signal line (oxide dropout). Mirrors the GPU struct.
-public struct GlitchDropout: Equatable {
-    public var fieldLine: Int32
-    public var uStart: Float
-    public var uLength: Float
-    public var pad: Float = 0
-}
-
 /// Everything the GPU stage needs for one displayed field.
 public struct GlitchFieldPlan {
     public var raster: ReceiverRaster
     public var rows: [GlitchRow]
-    public var dropouts: [GlitchDropout]
+    /// The VCR's view of the field's active lines, when it is playing.
+    public var vcr: VcrFieldPlan?
     /// Color reference state entering the first visible row: the phase
     /// error of the TV's 3.58 MHz oscillator (rad), the ACC gain, the
     /// color killer's integrator and its on/off state.
@@ -235,6 +226,10 @@ public final class ReceiverSimulator {
     private let logCap: Int
 
     private var knobs: Knobs
+    /// The deck's heads, as the tape plays (only while the VCR is on).
+    private let deck = DeckSimulator(settings: GlitchSettings())
+    /// Creases each recent field's track crosses.
+    private var foldCache: [(field: Int64, folds: [TapeSurface.Fold])] = []
     /// Within-field line where a healthy, locked set's vertical oscillator
     /// fires; the picture's vertical framing is relative to it.
     public let nominalTrigger: Int
@@ -266,6 +261,8 @@ public final class ReceiverSimulator {
         gateErr = 0
         triggers.removeAll()
         for i in thetaLog.indices { thetaLog[i] = 0; gateLog[i] = 0 }
+        deck.reset(atField: 0)
+        foldCache = []
     }
 
     /// Complete simulation state at a moment — small enough to keep one per
@@ -283,24 +280,30 @@ public final class ReceiverSimulator {
         fileprivate let gateLog: [Double]
         fileprivate let triggers: [Int64]
         fileprivate let thetaLog: [Double]
+        fileprivate let deck: DeckSimulator.Snapshot
     }
 
     public func snapshot() -> Snapshot {
         Snapshot(time: time, r: r, theta: theta, integ: integ, vPhase: vPhase, vInteg: vInteg,
                  vAbove: vAbove, gateErr: gateErr, gateLog: gateLog,
-                 triggers: triggers, thetaLog: thetaLog)
+                 triggers: triggers, thetaLog: thetaLog, deck: deck.snapshot())
     }
 
     public func restore(_ s: Snapshot) {
         r = s.r; theta = s.theta; integ = s.integ; vPhase = s.vPhase; vInteg = s.vInteg
         vAbove = s.vAbove; gateErr = s.gateErr; gateLog = s.gateLog
         triggers = s.triggers; thetaLog = s.thetaLog
+        deck.restore(s.deck)
+        foldCache = []
     }
 
     /// Run the set forward to `time` with `settings` in force since the
     /// previous call.
     public func advance(to time: Double, settings: GlitchSettings) {
-        knobs = Knobs(settings, raster: raster)
+        let k = Knobs(settings, raster: raster)
+        if k.tape != knobs.tape { foldCache = [] }
+        knobs = k
+        deck.update(settings)
         let target = (time + Self.warmup) * usPerSecond
         while Double(r) * H + theta <= target { step() }
     }
@@ -351,6 +354,7 @@ public final class ReceiverSimulator {
         if tau - edge > H / 2 { j += 1; e = timebaseError(j); edge = Double(j) * H + e }
         else if edge - tau > H / 2 { j -= 1; e = timebaseError(j); edge = Double(j) * H + e }
         let jf = Int(posmod(j, Int64(L)))
+        if k.vcr { deck.advance(toField: floordiv(j, Int64(L)) + 1) }
         let loss = signalLoss(j)
         let sigma = noiseSigma(loss: loss)
         // The separator slices halfway down the 40 IRE sync pulse, after
@@ -464,7 +468,6 @@ public final class ReceiverSimulator {
             let tvLine = first + Int64(y)
             let tau = Double(tvLine) * H + loggedTheta(tvLine)
             let (j, u0) = signalLine(at: tau)
-            let loss = signalLoss(j)
             rows.append(GlitchRow(
                 u0: Float(u0),
                 fieldLine: Int32(posmod(j, Int64(L))),
@@ -473,8 +476,7 @@ public final class ReceiverSimulator {
                 lenNext: Float(H + timebaseError(j + 2) - timebaseError(j + 1)),
                 noiseIRE: Float(k.sigma),
                 humIRE: Float(hum(atSignalTime: tau)),
-                burstScale: Float(max(0, 1 - loss)),
-                tapeLoss: Float(min(1, max(0, loss))),
+                burstScale: Float(burstSurviving(j)),
                 gateShift: Float(loggedGate(tvLine))))
         }
 
@@ -499,7 +501,7 @@ public final class ReceiverSimulator {
                 let lo = max(g0 + NTSCTiming.gateStart, NTSCTiming.burstStart)
                 let hi = min(g0 + NTSCTiming.gateEnd, NTSCTiming.burstEnd)
                 let overlap = max(0, hi - lo) / (NTSCTiming.burstEnd - NTSCTiming.burstStart)
-                let amp = NTSCTiming.burstAmplitude * overlap * k.agc * max(0, 1 - signalLoss(j))
+                let amp = NTSCTiming.burstAmplitude * overlap * k.agc * burstSurviving(j)
                 gi = amp * NTSCTiming.burstI
                 gq = amp * NTSCTiming.burstQ
             }
@@ -516,7 +518,7 @@ public final class ReceiverSimulator {
         return GlitchFieldPlan(
             raster: raster,
             rows: rows,
-            dropouts: dropouts(inField: signalField),
+            vcr: k.vcr ? vcrPlan(field: signalField) : nil,
             chromaPhase: Float(chroma.phase),
             chromaGain: Float(chroma.gain),
             killer: Float(chroma.killer),
@@ -566,10 +568,11 @@ public final class ReceiverSimulator {
         return Int(posmod(f + (jf >= switchLine ? 1 : 0), 2))
     }
 
-    /// Time-base error of signal line j (µs): head switching, flutter,
-    /// crinkle. Zero for a clean signal.
+    /// Time-base error of signal line j (µs): the deck's head switching,
+    /// flutter and search, and the tape's creases. Zero without the VCR.
     func timebaseError(_ j: Int64) -> Double {
         let k = knobs
+        guard k.vcr else { return 0 }
         var e = 0.0
         if k.headSwitch > 0 {
             // Each head has its own timing offset; the jump at each switch
@@ -589,34 +592,106 @@ public final class ReceiverSimulator {
             let f = floordiv(j, Int64(L))
             e += 1.2 * GlitchRandom.gauss(seed, 36, f, crossing)
         }
-        if k.crinkle > 0 {
-            let c = crinkleAt(j)
-            if c.intensity > 0 {
-                let lineScale = 1 / raster.scale
-                e += c.intensity * 4.0 * GlitchRandom.value(seed, 34, Double(j) * lineScale / 3)
-                e += c.envelope * 1.5 * GlitchRandom.value(seed, 35, Double(j) * lineScale / 60)
+        if k.tape.creases > 0 {
+            // A fold shortens the track: everything after it arrives early.
+            let read = trackPlace(j, u: 0)
+            for fold in folds(field: read.field) where fold.shortening > 0 {
+                let x = (read.along - fold.along) / max(0.05, fold.width)
+                let passed = x <= -1 ? 0 : x >= 1 ? 1 : 0.5 + 0.5 * sin(x * .pi / 2)
+                e -= fold.shortening / TapeGeometry.writingSpeed * passed
             }
         }
         return e
     }
 
-    /// Fraction of the RF signal lost on line j (tape faults).
-    func signalLoss(_ j: Int64) -> Double {
+    /// Where line j's start is read: which field's track, how far along it.
+    /// The lines after the head switch are read by the other head from the
+    /// start of the next track (each track is recorded a little longer than
+    /// its field, so the heads overlap there).
+    private func trackPlace(_ j: Int64, u: Double) -> (field: Int64, along: Double) {
+        let f = floordiv(j, Int64(L))
+        let jf = posmod(j, Int64(L))
+        let switched = jf >= switchLine
+        let lineInTrack = Double(switched ? jf - Int64(L) : jf)
+        return (f + (switched ? 1 : 0),
+                TapeGeometry.alongTrack(fieldLine: lineInTrack, u: u, linesPerField: L))
+    }
+
+    private var switchLine: Int64 { Int64(L) - Int64((3.5 * raster.scale).rounded()) }
+
+    private func folds(field f: Int64) -> [TapeSurface.Fold] {
+        if let c = foldCache.first(where: { $0.field == f }) { return c.folds }
+        let list = TapeSurface.folds(field: f, knobs.tape)
+        foldCache.append((f, list))
+        if foldCache.count > 8 { foldCache.removeFirst() }
+        return list
+    }
+
+    /// How much of its own track the head reads on line j (tracking error,
+    /// picture search): 1 on track, falling toward 0 between tracks.
+    private func onTrack(_ j: Int64) -> Double {
         let k = knobs
         var loss = 0.0
-        if k.clog > 0 {
-            // Debris on the heads comes and goes: each field is lost with a
-            // probability that grows with the clog, and the rest of the
-            // fields are dulled.
-            let f = floordiv(j, Int64(L))
-            let dropped = GlitchRandom.uniform(seed, 41, f) < k.clog * 0.8
-            let level = dropped ? 0.85 + 0.15 * GlitchRandom.uniform(seed, 42, f) : 0.35 * k.clog * k.clog
-            loss = max(loss, min(1, level))
-        }
-        if k.crinkle > 0 { loss = max(loss, crinkleAt(j).intensity) }
         if k.search > 1.05 { loss = max(loss, searchAt(j).loss) }
         if k.tracking > 0 { loss = max(loss, trackingAt(j)) }
-        return loss
+        return 1 - min(1, loss)
+    }
+
+    /// What the playing head sees at line j, u µs in: the tape there, its
+    /// own condition, and the carrier amplitude that leaves at `mhz`.
+    private func carrier(_ j: Int64, u: Double, mhz: Double) -> Double {
+        let read = trackPlace(j, u: u)
+        let h = head(j)
+        let heads = deck.heads(forField: read.field)
+        let dk = knobs.deck
+        let p = TapeSurface.at(TapeGeometry.point(field: read.field, along: read.along),
+                               knobs.tape, detail: false)
+        let d = Double(p.lift + dk.wearSpacing(h) + dk.baselineDirt(h, seed: knobs.tape.seed)
+                       + heads[h].debris + max(p.film, heads[h].grease))
+        let a = Double(p.output * dk.efficiency(h)) * onTrack(j)
+        return a * VcrChannel.channelGain(mhz: mhz, spacing: d, gap: Double(dk.gap(h)))
+    }
+
+    /// Fraction of line j's sync lost to the tape: the FM carrier at the
+    /// sync tip against the deck's noise. Past the FM threshold (~10 dB) the
+    /// demodulated sync drowns in clicks.
+    func signalLoss(_ j: Int64) -> Double {
+        guard knobs.vcr else { return 0 }
+        let a = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz)
+        let cnr = 20 * log10(max(1e-6, a)) + VcrChannel.carrierToNoiseDB
+        return min(1, max(0, (18 - cnr) / 14))
+    }
+
+    /// The share of line j's color burst the deck passes on: its color
+    /// killer cuts out when the color-under carrier is lost (about 30 dB
+    /// down), and keeps the burst up (ACC) until then.
+    private func burstSurviving(_ j: Int64) -> Double {
+        guard knobs.vcr else { return 1 }
+        let a = carrier(j, u: 6.5, mhz: VcrChannel.colorUnderMHz)
+        let db = 20 * log10(max(1e-6, a))
+        let t = min(1, max(0, (db + 34) / 8))
+        return t * t * (3 - 2 * t)
+    }
+
+    /// The displayed field's active lines as the VCR reads them.
+    private func vcrPlan(field f: Int64) -> VcrFieldPlan {
+        let k = knobs
+        var lines: [VcrLine] = []
+        lines.reserveCapacity(raster.activeLines)
+        for y in 0..<raster.activeLines {
+            let j = f * Int64(L) + Int64(raster.vbiLines + y)
+            let read = trackPlace(j, u: 0)
+            let h = head(j)
+            let heads = deck.heads(forField: read.field)
+            let origin = TapePosition(x: TapeGeometry.trackOrigin(field: read.field), y: 0)
+            lines.append(VcrLine(
+                originBase: origin.base, originOffset: origin.offset, along0: Float(read.along),
+                spacing: k.deck.wearSpacing(h) + k.deck.baselineDirt(h, seed: k.tape.seed) + heads[h].debris,
+                grease: heads[h].grease,
+                gain: k.deck.efficiency(h) * Float(onTrack(j)),
+                head: UInt32(h)))
+        }
+        return VcrFieldPlan(lines: lines, tape: k.tape, deck: k.deck)
     }
 
     /// Mistracking: the head drifts off its track, and the stretch where it
@@ -663,67 +738,6 @@ public final class ReceiverSimulator {
         let t = tau / usPerSecond
         return knobs.humIRE * (0.8 * sin(2 * .pi * 60 * t)
                                + 0.3 * sin(2 * .pi * 120 * t + 0.7))
-    }
-
-    /// Crinkle events: creased stretches of tape crossing the heads, as a
-    /// moving band of signal loss plus a disturbance to the transport.
-    private func crinkleAt(_ j: Int64) -> (intensity: Double, envelope: Double) {
-        let t = fieldTime(j)
-        let slot = 0.5
-        let p = knobs.crinkle * 0.6
-        let s = Int64((t / slot).rounded(.down))
-        var best = (intensity: 0.0, envelope: 0.0)
-        for k in (s - 1)...s {
-            guard GlitchRandom.uniform(seed, 51, k) < p else { continue }
-            let start = Double(k) * slot + GlitchRandom.uniform(seed, 52, k) * slot
-            let duration = 0.12 + 0.35 * GlitchRandom.uniform(seed, 53, k)
-            guard t >= start, t < start + duration else { continue }
-            let severity = 0.55 + 0.45 * GlitchRandom.uniform(seed, 54, k)
-            let progress = (t - start) / duration
-            let envelope = sin(.pi * progress)
-            let pos = Double(posmod(j, Int64(L))) / Double(L)
-            let speed = 0.8 + 1.6 * GlitchRandom.uniform(seed, 55, k)
-            let center = (GlitchRandom.uniform(seed, 56, k) + progress * speed)
-                .truncatingRemainder(dividingBy: 1)
-            var d = abs(pos - center)
-            d = min(d, 1 - d)
-            let width = 0.05 + 0.08 * severity
-            let band = max(0, 1 - d / width)
-            let intensity = min(1, severity * envelope * band * 1.4)
-            if intensity > best.intensity { best = (intensity, envelope) }
-            else if envelope > best.envelope { best.envelope = envelope }
-        }
-        return best
-    }
-
-    private func dropouts(inField f: Int64) -> [GlitchDropout] {
-        let rate = knobs.dropouts
-        guard rate > 0 else { return [] }
-        let mean = rate * rate * 14
-        let n = max(0, min(64, Int((mean + mean.squareRoot()
-                                    * GlitchRandom.gauss(seed, 61, f)).rounded())))
-        var out: [GlitchDropout] = []
-        out.reserveCapacity(n)
-        for i in 0..<n {
-            let line = raster.vbiLines
-                + Int(GlitchRandom.uniform(seed, 62, f, Int64(i)) * Double(raster.activeLines))
-            let start = NTSCTiming.activeStart
-                + GlitchRandom.uniform(seed, 63, f, Int64(i)) * NTSCTiming.activeLength * 0.95
-            let length = min(30, max(0.4, -log(max(1e-6, GlitchRandom.uniform(seed, 64, f, Int64(i))))
-                                     * (1.5 + 5 * rate)))
-            // An oxide flaw is usually taller than one track pitch, so it
-            // hits a few consecutive lines, shifted a little each time.
-            let span = 1 + Int(pow(GlitchRandom.uniform(seed, 65, f, Int64(i)), 2) * 4)
-            for k in 0..<span where out.count < 64 {
-                let l = line + k
-                guard l < raster.totalLines else { break }
-                let drift = GlitchRandom.gauss(seed, 66, f, Int64(i * 8 + k)) * 0.8
-                let scale = 0.7 + 0.6 * GlitchRandom.uniform(seed, 67, f, Int64(i * 8 + k))
-                out.append(GlitchDropout(fieldLine: Int32(l), uStart: Float(start + drift),
-                                         uLength: Float(length * scale)))
-            }
-        }
-        return out
     }
 
     /// Line 21: clock run-in start bits (0, 0, 1) then two 7-bit characters
@@ -786,14 +800,15 @@ struct Knobs {
     let ki: Double
     let uMax: Double
     let humIRE: Double
+    /// The VCR is playing; the deck and tape knobs below only matter then.
+    let vcr: Bool
+    let tape: TapeParams
+    let deck: DeckParams
     let headSwitch: Double
     let jitter: Double
-    let crinkle: Double
-    let clog: Double
     /// Picture search multiple (1 = normal play).
     let search: Double
     let tracking: Double
-    let dropouts: Double
     let captions: Bool
     /// Burst-key loop rate per raster line (~6 NTSC lines).
     let gateAlpha: Double
@@ -841,13 +856,13 @@ struct Knobs {
         ki = pow(kpN / 1.4, 2) / (s * s)
         uMax = 0
         humIRE = settings["hum"] * 60
+        vcr = settings.vcr
+        tape = TapeParams(settings)
+        deck = DeckParams(settings)
         headSwitch = settings["head_switch"]
         jitter = settings["timebase_jitter"]
-        crinkle = settings["crinkle"]
-        clog = settings["head_clog"]
         search = max(1, settings["search_speed"])
         tracking = min(1, max(0, settings["tracking"]))
-        dropouts = settings["dropouts"]
         captions = settings.flag("closed_captions")
         gateAlpha = 1 - exp(-1 / (6 * s))
         chromaAlpha = 1 - exp(-1 / (4 * s))

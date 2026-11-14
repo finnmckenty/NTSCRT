@@ -2667,6 +2667,8 @@ private struct Sidebar: View {
                 Divider()
                 NtscPanel()
                 Divider()
+                VcrPanel()
+                Divider()
                 GlitchPanel()
                 Divider()
                 ShaderPanel()

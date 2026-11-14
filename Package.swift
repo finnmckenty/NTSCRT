@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "crt-sweep",       targets: ["CrtSweep"]),
         .executable(name: "crt-video-smoke", targets: ["CrtVideoSmoke"]),
         .executable(name: "crt-app",         targets: ["CrtApp"]),
+        .executable(name: "crt-vcr-probe",   targets: ["CrtVcrProbe"]),
     ],
     targets: [
         .target(
@@ -75,6 +76,15 @@ let package = Package(
                 .linkedFramework("Metal"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreVideo"),
+            ]
+        ),
+        .executableTarget(
+            name: "CrtVcrProbe",
+            dependencies: ["CrtCore"],
+            path: "Sources/CrtVcrProbe",
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("CoreGraphics"),
             ]
         ),
         .testTarget(

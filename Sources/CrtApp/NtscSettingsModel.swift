@@ -24,6 +24,12 @@ struct NtscSetting: Identifiable {
 
     var id: String { name }
 
+    /// ntsc-rs's own VHS emulation (head switching, tracking noise, tape
+    /// speed and friends) — filters standing in for a tape, replaced by the
+    /// VCR panel's simulation. Not shown in the panel, but still applied
+    /// when a look carries them, so older looks render as they always did.
+    static let retiredVHS: Set<String> = ["head_switching", "tracking_noise", "vhs_settings"]
+
     static func parse(descriptorsJSON: String) -> [NtscSetting] {
         guard let data = descriptorsJSON.data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
