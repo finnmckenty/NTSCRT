@@ -23,6 +23,7 @@ let input = URL(fileURLWithPath: args.removeFirst())
 let output = URL(fileURLWithPath: args.removeFirst())
 var W = 640, H = 480, frames = 1, fps = 29.97, start = 1.0, cols = 1, scale = 1
 var crop: (x: Int, y: Int, w: Int, h: Int)? = nil
+var sweep: (key: String, values: [Double])? = nil
 var values: [String: Double] = [:]
 while !args.isEmpty {
     let a = args.removeFirst()
@@ -33,6 +34,13 @@ while !args.isEmpty {
     case "--start": start = Double(args.removeFirst())!
     case "--cols": cols = Int(args.removeFirst())!
     case "--scale": scale = Int(args.removeFirst())!
+    case "--pickers":
+        // Every Tape picker condition (rows) in every Deck picker condition
+        // (columns).
+        sweep = ("__pickers", [])
+    case "--sweep":
+        let k = args.removeFirst()
+        sweep = (k, args.removeFirst().split(separator: ",").map { Double($0)! })
     case "--crop": crop = (Int(args.removeFirst())!, Int(args.removeFirst())!, Int(args.removeFirst())!, Int(args.removeFirst())!)
     default:
         let kv = a.split(separator: "=", maxSplits: 1).map(String.init)
@@ -44,19 +52,33 @@ while !args.isEmpty {
 let context = try MetalContext()
 let device = context.device
 let source = try loadTexture(url: input, device: device)
-let renderer = try GlitchRenderer(context: context)
+var renderer = try GlitchRenderer(context: context)
 let spec = DownscaleSpec(width: W, height: H, method: .area)
 
+if let sw = sweep {
+    frames = sw.key == "__pickers" ? VcrCondition.tapes.count * VcrCondition.decks.count : sw.values.count
+    if sw.key == "__pickers" { cols = VcrCondition.decks.count }
+}
 let rows = (frames + cols - 1) / cols
 let cw = crop?.w ?? W, ch = crop?.h ?? H, cx = crop?.x ?? 0, cy = crop?.y ?? 0
 let sheetW = cw * scale * cols, sheetH = ch * scale * rows
 var sheet = [UInt8](repeating: 0, count: sheetW * sheetH * 4)
 let staging = makeStagingTexture(device: device, width: W, height: H)!
-let settings = GlitchSettings(values: values)
+var settings = GlitchSettings(values: values)
 var gpuTimes: [Double] = []
 var cpuTimes: [Double] = []
 for f in 0..<frames {
-    let t = start + Double(f) / fps
+    var t = start + Double(f) / fps
+    if let sw = sweep {
+        var v = values
+        if sw.key == "__pickers" {
+            let tape = VcrCondition.tapes[f / VcrCondition.decks.count], deck = VcrCondition.decks[f % VcrCondition.decks.count]
+            v = deck.applied(to: tape.applied(to: v, keys: VcrCondition.tapeKeys), keys: VcrCondition.deckKeys)
+        } else { v[sw.key] = sw.values[f] }
+        settings = GlitchSettings(values: v)
+        renderer = try GlitchRenderer(context: context)
+        t = start
+    }
     let cb = context.queue.makeCommandBuffer()!
     let down = try renderer.downscaled(source, spec: spec, commandBuffer: cb)
     let c0 = Date()
@@ -110,4 +132,17 @@ if ProcessInfo.processInfo.environment["CRT_VCR_ROWS"] == "1", let plan = render
         s += String(format: "%d:%.1f/%d/%.2f ", y, r.u0, r.fieldLine, r.burstScale)
     }
     print(s)
+}
+// CRT_VCR_MEASURE=1: luma noise (IRE RMS) over the middle of the last frame.
+if ProcessInfo.processInfo.environment["CRT_VCR_MEASURE"] == "1" {
+    var ys: [Double] = []
+    let ox = (frames - 1) % cols * cw * scale, oy = (frames - 1) / cols * ch * scale
+    for y in (ch * scale / 4)..<(ch * scale * 3 / 4) { for x in (cw * scale / 4)..<(cw * scale * 3 / 4) {
+        let i = ((oy + y) * sheetW + ox + x) * 4
+        ys.append(0.299 * Double(sheet[i + 2]) + 0.587 * Double(sheet[i + 1]) + 0.114 * Double(sheet[i]))
+    } }
+    let m = ys.reduce(0, +) / Double(ys.count)
+    let sd = (ys.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(ys.count)).squareRoot()
+    print(String(format: "luma mean %.1f/255  noise %.2f IRE RMS  (S/N %.1f dB re 100 IRE)", m, sd / 255 * 92.5,
+                 20 * log10(100 / max(1e-6, sd / 255 * 92.5))))
 }

@@ -1679,10 +1679,15 @@ struct ContentView: View {
             print(failures == 0 ? "SLIDER-E2E-PASS" : "SLIDER-E2E-FAIL \(failures)")
             exit(failures == 0 ? 0 : 1)
         }
-        // CRT_GLITCH_PANEL_SNAPSHOT=<out.png>: render the Glitch panel on its
-        // own (it sits below the long NTSC list, out of a window capture).
+        // CRT_GLITCH_PANEL_SNAPSHOT=<out.png>: render the VCR and Glitch
+        // panels on their own (they sit below the long NTSC list, out of a
+        // window capture).
         if let out = env["CRT_GLITCH_PANEL_SNAPSHOT"] {
-            let panel = GlitchPanel()
+            let panel = VStack(alignment: .leading, spacing: 18) {
+                VcrPanel()
+                Divider()
+                GlitchPanel()
+            }
                 .environment(state)
                 .frame(width: 290)
                 .padding(16)

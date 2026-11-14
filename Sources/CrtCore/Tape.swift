@@ -93,14 +93,14 @@ public struct TapeParams: Equatable {
         vaseline = u("tape_vaseline")
     }
 
-    /// Remanent magnetization relative to a new tape: wear loses up to 7 dB.
-    public var remanence: Float { powf(10, -wear * 7 / 20) }
+    /// Remanent magnetization relative to a new tape: wear loses up to 10 dB.
+    public var remanence: Float { powf(10, -wear * 10 / 20) }
     /// Surface roughness as head-to-tape spacing, µm.
-    public var roughness: Float { 0.015 + 0.06 * wear }
+    public var roughness: Float { 0.015 + 0.1 * wear }
     /// Chance that a 0.1 mm square holds a pinhole.
     public var pinholeChance: Float { (0.05 + 6 * dropouts + 2 * wear) * 0.01 }
     /// Chance that a 1 mm square holds a flake of missing coating.
-    public var flakeChance: Float { 0.001 + 0.12 * dropouts + 0.04 * wear + 0.06 * mold }
+    public var flakeChance: Float { 0.001 + 0.6 * dropouts * dropouts + 0.06 * wear + 0.06 * mold }
 }
 
 /// What the head finds at one point of the tape.
@@ -231,20 +231,25 @@ public enum TapeSurface {
             }
         }
 
-        // Lengthwise scratches from guides: 6–50 µm wide, along a stretch.
+        // Lengthwise scratches from guides: 20–220 µm wide (the widest more
+        // than a track), along a stretch, the oxide gouged out and thrown up
+        // as debris either side.
         if detail && t.scratches > 0 {
-            let lane = Int32((y * 20).rounded(.down))
+            let lane = Int32((y * 4).rounded(.down))
             let (sx, fx) = cell(p, 3000)
-            for l in -1...1 {
+            for l in -2...2 {
                 let li = lane &+ Int32(l)
-                guard uni(s, 31, li, sx) < t.scratches * 0.06 else { continue }
+                guard uni(s, 31, li, sx) < t.scratches * 0.3 else { continue }
                 let a = uni(s, 32, li, sx), b = uni(s, 33, li, sx)
                 guard fx >= min(a, b) * 0.6, fx <= 0.4 + max(a, b) * 0.6 else { continue }
-                let yc = (Float(li) + 0.2 + 0.6 * uni(s, 34, li, sx)) * 0.05
-                let w = 0.006 + 0.045 * powf(uni(s, 35, li, sx), 2)
-                if abs(y - yc) < w * 0.5 {
-                    out *= 0.25 + 0.5 * uni(s, 36, li, sx)
-                    lift += 0.04
+                let yc = (Float(li) + 0.1 + 0.8 * uni(s, 34, li, sx)) * 0.25
+                let w = 0.02 + 0.2 * powf(uni(s, 35, li, sx), 2) * (0.5 + 0.5 * t.scratches)
+                let dy = abs(y - yc)
+                if dy < w * 0.5 {
+                    out *= 0.2 * uni(s, 36, li, sx)
+                    lift += 0.4 * t.scratches
+                } else if dy < w * 1.5 {
+                    lift += 1.0 * t.scratches * (1 - (dy - w * 0.5) / w)
                 }
             }
         }
@@ -262,7 +267,7 @@ public enum TapeSurface {
                 let yy = fromBottom ? y : Float(TapeGeometry.width) - y
                 guard yy < extent else { continue }
                 let reach = smoothstep(extent, extent * 0.8, yy)
-                let w = 0.12 + 0.9 * uni(s, 46, ci, 0)
+                let w = 0.3 + 2.7 * powf(uni(s, 46, ci, 0), 1.5)
                 let peak = (0.5 + 3.5 * powf(uni(s, 47, ci, 0), 1.5)) * (0.4 + 0.6 * t.creases)
                 // The crease runs along x = anchor + yy·slant.
                 let dd = (off + yy * slant) / w
@@ -337,7 +342,7 @@ public enum TapeSurface {
                     let yy = y * 5
                     let cy = Int32(yy.rounded(.down))
                     let streak = powf(noise2(s, 74, c8, f8, cy, yy - Float(cy)), 1.5)
-                    film = t.vaseline * 1.5 * (0.3 + 0.7 * streak) * taper
+                    film = t.vaseline * 1.8 * (0.25 + 0.75 * streak) * taper
                 }
             }
         }
@@ -370,7 +375,7 @@ public enum TapeSurface {
             let slant = Double(tanf((uni(s, 43, ci, 0) - 0.5) * 0.7))
             let fromBottom = uni(s, 44, ci, 0) < 0.5
             let extent = TapeGeometry.width * (0.25 + 0.75 * Double(uni(s, 45, ci, 0)))
-            let w = 0.12 + 0.9 * Double(uni(s, 46, ci, 0))
+            let w = 0.3 + 2.7 * pow(Double(uni(s, 46, ci, 0)), 1.5)
             let peak = (0.5 + 3.5 * pow(Double(uni(s, 47, ci, 0)), 1.5)) * (0.4 + 0.6 * Double(t.creases))
             // The crease is the line x = xc + yy·slant (yy from its edge);
             // the track is x = start + a·cos, y = trackStart + a·sin.

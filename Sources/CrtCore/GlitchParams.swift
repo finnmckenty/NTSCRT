@@ -209,13 +209,13 @@ public struct VcrCondition: Identifiable, Sendable {
         VcrCondition(name: "Clean heads", help: "Freshly cleaned with a head-cleaning tape.",
                      values: [:]),
         VcrCondition(name: "Dirty heads", help: "Never cleaned: carries some debris, and picks up more.",
-                     values: ["head_wear": 0.2, "head_dirt": 0.45, "dirt_buildup": 0.6,
+                     values: ["head_wear": 0.15, "head_dirt": 0.4, "dirt_buildup": 0.55,
                               "head_mismatch": 0.3]),
         VcrCondition(name: "Worn heads", help: "Thousands of hours on the drum.",
                      values: ["head_wear": 0.7, "head_dirt": 0.05, "dirt_buildup": 0.2,
                               "head_mismatch": 0.35]),
         VcrCondition(name: "Neglected", help: "Worn, filthy, and still in use.",
-                     values: ["head_wear": 0.6, "head_dirt": 0.7, "dirt_buildup": 0.9,
+                     values: ["head_wear": 0.5, "head_dirt": 0.55, "dirt_buildup": 0.8,
                               "head_mismatch": 0.5]),
     ]
 

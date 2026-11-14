@@ -232,7 +232,7 @@ final class VcrPlaybackTests: XCTestCase {
         var noise: [Double] = []
         for i in 0..<4 {
             noise.append(patch(try render(input, time: 1 + Double(i) / 59.94,
-                                          ["vcr": 1, "head_dirt": 0.75, "head_mismatch": 0.8])).noise)
+                                          ["vcr": 1, "head_wear": 0.5, "head_dirt": 0.4, "head_mismatch": 1])).noise)
         }
         let hi = noise.max()!, lo = noise.min()!
         XCTAssertGreaterThan(hi, lo * 1.5, "alternate fields differ: \(noise)")

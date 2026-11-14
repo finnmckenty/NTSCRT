@@ -22,11 +22,11 @@ public struct DeckParams: Equatable {
     }
 
     /// Spacing a worn head's lost tip penetration adds, µm.
-    public func wearSpacing(_ h: Int) -> Float { 0.22 * wear(h) }
+    public func wearSpacing(_ h: Int) -> Float { 0.3 * wear(h) }
 
     /// Read efficiency (a worn core, and the weaker of a mismatched pair).
     public func efficiency(_ h: Int) -> Float {
-        powf(10, -(wear(h) * 6 + (h == 1 ? mismatch * 3 : 0)) / 20)
+        powf(10, -(wear(h) * 10 + (h == 1 ? mismatch * 3 : 0)) / 20)
     }
 
     /// The head's gap length, µm: 0.3 new, eroding longer with wear.
@@ -37,11 +37,11 @@ public struct DeckParams: Equatable {
     /// amounts.
     public func baselineDirt(_ h: Int, seed: UInt32) -> Float {
         let share: Float = h == 0 ? 1.2 : 0.5 + 0.8 * TapeSurface.uni(seed, 90, 1, 0)
-        return dirt * 0.9 * share
+        return dirt * 0.5 * share
     }
 
     /// µm of debris a head collects per second per unit of shedding.
-    var pickup: Float { 0.02 + 2.5 * buildup * buildup }
+    var pickup: Float { 0.02 + 1.2 * buildup * buildup }
 }
 
 /// What one head carries at a moment, beyond its baked-on dirt.
@@ -138,11 +138,13 @@ public final class DeckSimulator {
         var s = heads[h]
         let seed = tape.seed
         let field = Int32(truncatingIfNeeded: f), era = Int32(truncatingIfNeeded: f >> 31)
-        // Steady pickup, and slow wiping by the tape itself.
-        s.debris += deck.pickup * shed * dt - s.debris * 0.04 * dt
-        // A chunk lodges in the gap.
+        // Steady pickup, wiped off again by the tape over a couple of
+        // seconds of contact — so a shedding tape keeps the heads at a level
+        // that rises and falls with what is passing.
+        s.debris += deck.pickup * shed * dt - s.debris * 0.5 * dt
+        // A chunk lodges in the gap: a clog that takes a while to wipe off.
         if TapeSurface.uni(seed, 81, field, era) < min(0.25, deck.pickup * shed * 0.03) {
-            s.debris += 0.25 + 1.2 * TapeSurface.uni(seed, 82, field, era)
+            s.debris += 0.15 + 0.65 * TapeSurface.uni(seed, 82, field, era)
         }
         // Debris knocks loose, likelier the more there is.
         if TapeSurface.uni(seed, 83, field, era) < 0.0005 + 0.004 * s.debris * s.debris {

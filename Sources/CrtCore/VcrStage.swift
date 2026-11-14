@@ -21,9 +21,11 @@ public enum VcrChannel {
     /// Color-under amplitude per unit of chroma (decoder scale), the FM
     /// carrier being 1: it is recorded well below the FM, which biases it.
     public static let chromaLevel: Float = 0.55
-    /// Head and preamp noise per sample, against a carrier of 1: about 46 dB
-    /// carrier-to-noise across the FM band, a good new tape's.
-    public static let noise: Float = 0.006
+    /// Head and preamp noise per sample, against a carrier of 1: about 34 dB
+    /// carrier-to-noise across the FM band, which demodulates to the 44 dB
+    /// luma signal-to-noise of a good new tape in SP (measured: crt-vcr-probe
+    /// with CRT_VCR_MEASURE on flat gray).
+    public static let noise: Float = 0.022
     /// Main emphasis (IEC 774-1): a shelf with a 1.3 µs time constant and a
     /// gain of 5 (14 dB) — zero at 122 kHz, pole at 612 kHz.
     static let emphasisZeroMHz = 1 / (2 * Double.pi * 1.3)
@@ -258,7 +260,7 @@ public final class VcrStage {
             deB0: de[0], deB1: de[1], deA1: de[2], darkClip: VcrChannel.darkClipIRE,
             lb0: lp[0], lb1: lp[1], lb2: lp[2], la1: lp[3], la2: lp[4],
             cb0: cp[0], cb1: cp[1], cb2: cp[2], ca1: cp[3], ca2: cp[4],
-            docOn: 0.1, docOff: 0.16,
+            docOn: 0.16, docOff: 0.25,
             wear: t.wear, dropouts: t.dropouts, scratches: t.scratches, creases: t.creases,
             edge: t.edge, mold: t.mold, vaseline: t.vaseline, remanence: t.remanence,
             roughness: t.roughness, pinhole: t.pinholeChance, flake: t.flakeChance,
@@ -506,18 +508,21 @@ public final class VcrStage {
             }
         }
         if (U.scratches > 0.0) {
-            int lane = int(floor(y * 20.0));
+            int lane = int(floor(y * 4.0));
             Cell sx = tcell(p, 3000);
-            for (int l = -1; l <= 1; l++) {
+            for (int l = -2; l <= 2; l++) {
                 int li = lane + l;
-                if (tuni(s, 31u, li, sx.c) >= U.scratches * 0.06) continue;
+                if (tuni(s, 31u, li, sx.c) >= U.scratches * 0.3) continue;
                 float a = tuni(s, 32u, li, sx.c), b = tuni(s, 33u, li, sx.c);
                 if (sx.f < min(a, b) * 0.6 || sx.f > 0.4 + max(a, b) * 0.6) continue;
-                float yc = (float(li) + 0.2 + 0.6 * tuni(s, 34u, li, sx.c)) * 0.05;
-                float w = 0.006 + 0.045 * pow(tuni(s, 35u, li, sx.c), 2.0);
-                if (fabs(y - yc) < w * 0.5) {
-                    out *= 0.25 + 0.5 * tuni(s, 36u, li, sx.c);
-                    lift += 0.04;
+                float yc = (float(li) + 0.1 + 0.8 * tuni(s, 34u, li, sx.c)) * 0.25;
+                float w = 0.02 + 0.2 * pow(tuni(s, 35u, li, sx.c), 2.0) * (0.5 + 0.5 * U.scratches);
+                float dy = fabs(y - yc);
+                if (dy < w * 0.5) {
+                    out *= 0.2 * tuni(s, 36u, li, sx.c);
+                    lift += 0.4 * U.scratches;
+                } else if (dy < w * 1.5) {
+                    lift += 1.0 * U.scratches * (1.0 - (dy - w * 0.5) / w);
                 }
             }
         }
@@ -533,7 +538,7 @@ public final class VcrStage {
                 float yy = fromBottom ? y : TAPE_W - y;
                 if (yy >= extent) continue;
                 float reach = sstep(extent, extent * 0.8, yy);
-                float w = 0.12 + 0.9 * tuni(s, 46u, ci, 0);
+                float w = 0.3 + 2.7 * pow(tuni(s, 46u, ci, 0), 1.5);
                 float peak = (0.5 + 3.5 * pow(tuni(s, 47u, ci, 0), 1.5)) * (0.4 + 0.6 * U.creases);
                 float dd = (off + yy * slant) / w;
                 if (fabs(dd) >= 4.0) continue;
@@ -597,7 +602,7 @@ public final class VcrStage {
                     float yy = y * 5.0;
                     int cy = int(floor(yy));
                     float streak = pow(noise2(s, 74u, c8.c, c8.f, cy, yy - float(cy)), 1.5);
-                    film = U.vaseline * 1.5 * (0.3 + 0.7 * streak) * taper;
+                    film = U.vaseline * 1.8 * (0.25 + 0.75 * streak) * taper;
                 }
             }
         }
@@ -657,8 +662,8 @@ public final class VcrStage {
         float u = (float(gid.x) + 0.5) * 16.0 * U.dt;
         float along = L.along0 + u / U.lineUS * U.lineLength;
         float lift = 0.0, film = 0.0, out = 0.0;
-        for (int k = 0; k < 2; k++) {
-            float across = (k == 0 ? -0.25 : 0.25) * U.pitch;
+        for (int k = 0; k < 4; k++) {
+            float across = (float(k) - 1.5) * 0.25 * U.pitch;
             TPos p;
             p.base = L.originBase;
             p.off = L.originOffset + (along * U.cosA - across * U.sinA) * 10.0;
@@ -666,7 +671,7 @@ public final class VcrStage {
             TPt t = tapeAt(p, U);
             lift += t.lift; film += t.film; out += t.out;
         }
-        lift *= 0.5; film *= 0.5; out *= 0.5;
+        lift *= 0.25; film *= 0.25; out *= 0.25;
         float d = lift + L.spacing + max(film, L.grease);
         seg[gid.y * U.segs + gid.x] = float2(d, out * L.gain);
     }
@@ -763,8 +768,14 @@ public final class VcrStage {
         uint N = U.n;
         // Instantaneous frequency → IRE; the dropout detector on the
         // envelope (sign bit of luma marks a flagged sample later).
+        // The detector compares the envelope with its own recent level (a
+        // peak follower that decays over ~30 µs), so it reacts to sudden
+        // drops — a flaw, a clog — not to a uniformly weak signal, which
+        // plays as noise.
         float2 prev = z[row];
         float env = length(prev);
+        float ref = env;
+        for (uint i = 0; i < min(N, 120u); i++) ref = max(ref, length(z[row + i]));
         bool flagged = false;
         int hold = 0;
         for (uint i = 0; i < N; i++) {
@@ -774,10 +785,12 @@ public final class VcrStage {
             float mhz = clamp(dphi / (6.2831853 * U.dt), 1.0, 7.5);
             luma[row + i] = (mhz - 3.4) * 140.0 - 40.0;
             env += 0.12 * (length(c) - env);
+            ref = env > ref ? ref + 0.05 * (env - ref) : ref * 0.99885;
+            float on = max(0.02, U.docOn * ref), off = max(0.03, U.docOff * ref);
             if (flagged) {
-                if (env > U.docOff) { hold -= 1; if (hold <= 0) flagged = false; }
+                if (env > off) { hold -= 1; if (hold <= 0) flagged = false; }
                 else hold = 14;
-            } else if (env < U.docOn) { flagged = true; hold = 14; }
+            } else if (env < on) { flagged = true; hold = 14; }
             chroma[row + i] = float2(flagged ? 1.0 : 0.0, 0.0);
         }
         // Luma: zero-phase low-pass (forward, then backward), de-emphasis.
@@ -841,12 +854,13 @@ public final class VcrStage {
             float mag = length(b);
             // Phase error against the reference burst direction.
             float err = atan2(ref.x * b.y - ref.y * b.x, ref.x * b.x + ref.y * b.y);
-            if (mag > 0.15 * nominal) phase += 0.35 * (err - phase);
-            gain += 0.3 * (nominal / max(mag, 0.12 * nominal) - gain);
-            gain = clamp(gain, 0.3, 8.0);
+            if (mag > 0.08 * nominal) phase += 0.35 * (err - phase);
+            gain += 0.3 * (nominal / max(mag, 0.05 * nominal) - gain);
+            gain = clamp(gain, 0.3, 20.0);
+            // The killer cuts chroma once the burst is ~26 dB down.
             killer += 0.2 * (clamp(mag / nominal, 0.0, 1.0) - killer);
-            if (on && killer < 0.15) on = false;
-            else if (!on && killer > 0.3) on = true;
+            if (on && killer < 0.05) on = false;
+            else if (!on && killer > 0.08) on = true;
             color[y] = float4(cos(-phase), sin(-phase), on ? gain : 0.0, 0.0);
         }
     }
@@ -874,7 +888,7 @@ public final class VcrStage {
                 // before from its one-line delay — that line's own output,
                 // so a tall flaw repeats one line down several.
                 if (U.doc != 0u) {
-                    for (int k = 1; k <= 8 && int(gid.y) - k >= 0; k++) {
+                    for (int k = 1; k <= 64 && int(gid.y) - k >= 0; k++) {
                         float w = luma[uint(int(gid.y) - k) * U.n + uint(i)];
                         if (w < 5000.0) { v = w; break; }
                         v = w - 10000.0;

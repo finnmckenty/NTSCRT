@@ -653,13 +653,14 @@ public final class ReceiverSimulator {
     }
 
     /// Fraction of line j's sync lost to the tape: the FM carrier at the
-    /// sync tip against the deck's noise. Past the FM threshold (~10 dB) the
-    /// demodulated sync drowns in clicks.
+    /// sync tip against the deck's noise. Above the FM threshold (~11 dB)
+    /// demodulated sync stays clean; below it, it drowns in clicks.
     func signalLoss(_ j: Int64) -> Double {
         guard knobs.vcr else { return 0 }
         let a = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz)
         let cnr = 20 * log10(max(1e-6, a)) + VcrChannel.carrierToNoiseDB
-        return min(1, max(0, (18 - cnr) / 14))
+        let x = min(1, max(0, (11 - cnr) / 9))
+        return x * x
     }
 
     /// The share of line j's color burst the deck passes on: its color
