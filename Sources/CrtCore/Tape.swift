@@ -231,25 +231,37 @@ public enum TapeSurface {
             }
         }
 
-        // Lengthwise scratches from guides: 20–220 µm wide (the widest more
-        // than a track), along a stretch, the oxide gouged out and thrown up
-        // as debris either side.
+        // Lengthwise scratches from worn guides, along a stretch of tape.
+        // Most are narrower than a track (6–80 µm), so they only weaken the
+        // signal on the line that crosses them; the debris thrown up either
+        // side holds the head off a little. A scratch isn't uniform: the
+        // tape weaved sideways in the guide that made it (tens of µm, about
+        // a picture line), and its depth and width vary, with skips.
         if detail && t.scratches > 0 {
             let lane = Int32((y * 4).rounded(.down))
             let (sx, fx) = cell(p, 3000)
-            for l in -2...2 {
+            let (c80, f80) = cell(p, 80), (c15, f15) = cell(p, 15)
+            let (c200, f200) = cell(p, 200), (c120, f120) = cell(p, 120)
+            for l in -1...1 {
                 let li = lane &+ Int32(l)
                 guard uni(s, 31, li, sx) < t.scratches * 0.3 else { continue }
                 let a = uni(s, 32, li, sx), b = uni(s, 33, li, sx)
                 guard fx >= min(a, b) * 0.6, fx <= 0.4 + max(a, b) * 0.6 else { continue }
-                let yc = (Float(li) + 0.1 + 0.8 * uni(s, 34, li, sx)) * 0.25
-                let w = 0.02 + 0.2 * powf(uni(s, 35, li, sx), 2) * (0.5 + 0.5 * t.scratches)
+                // This scratch's own variation along the tape.
+                let ss = s ^ (UInt32(bitPattern: li) &* 0x9E37_79B9) ^ (UInt32(bitPattern: sx) &* 0x85EB_CA6B)
+                let weave = 0.03 * (2 * noise1(ss, 37, c80, f80) - 1) + 0.012 * (2 * noise1(ss, 38, c15, f15) - 1)
+                let yc = (Float(li) + 0.15 + 0.7 * uni(s, 34, li, sx)) * 0.25 + weave
+                let u = uni(s, 35, li, sx)
+                let w = (0.006 + 0.074 * u * u * u) * (0.6 + 0.4 * t.scratches)
+                    * (0.5 + noise1(ss, 39, c200, f200))
+                let depth = smoothstep(0.3, 0.55, noise1(ss, 40, c120, f120))
+                guard depth > 0 else { continue }
                 let dy = abs(y - yc)
                 if dy < w * 0.5 {
-                    out *= 0.2 * uni(s, 36, li, sx)
-                    lift += 0.4 * t.scratches
+                    out *= 1 - 0.95 * depth
+                    lift += 0.15 * depth * t.scratches
                 } else if dy < w * 1.5 {
-                    lift += 1.0 * t.scratches * (1 - (dy - w * 0.5) / w)
+                    lift += 0.35 * depth * t.scratches * (1 - (dy - w * 0.5) / w)
                 }
             }
         }

@@ -510,19 +510,25 @@ public final class VcrStage {
         if (U.scratches > 0.0) {
             int lane = int(floor(y * 4.0));
             Cell sx = tcell(p, 3000);
-            for (int l = -2; l <= 2; l++) {
+            Cell c80 = tcell(p, 80), c15 = tcell(p, 15), c200 = tcell(p, 200), c120 = tcell(p, 120);
+            for (int l = -1; l <= 1; l++) {
                 int li = lane + l;
                 if (tuni(s, 31u, li, sx.c) >= U.scratches * 0.3) continue;
                 float a = tuni(s, 32u, li, sx.c), b = tuni(s, 33u, li, sx.c);
                 if (sx.f < min(a, b) * 0.6 || sx.f > 0.4 + max(a, b) * 0.6) continue;
-                float yc = (float(li) + 0.1 + 0.8 * tuni(s, 34u, li, sx.c)) * 0.25;
-                float w = 0.02 + 0.2 * pow(tuni(s, 35u, li, sx.c), 2.0) * (0.5 + 0.5 * U.scratches);
+                uint ss = s ^ (as_type<uint>(li) * 0x9E3779B9u) ^ (as_type<uint>(sx.c) * 0x85EBCA6Bu);
+                float weave = 0.03 * (2.0 * noise1(ss, 37u, c80.c, c80.f) - 1.0) + 0.012 * (2.0 * noise1(ss, 38u, c15.c, c15.f) - 1.0);
+                float yc = (float(li) + 0.15 + 0.7 * tuni(s, 34u, li, sx.c)) * 0.25 + weave;
+                float u = tuni(s, 35u, li, sx.c);
+                float w = (0.006 + 0.074 * u * u * u) * (0.6 + 0.4 * U.scratches) * (0.5 + noise1(ss, 39u, c200.c, c200.f));
+                float depth = sstep(0.3, 0.55, noise1(ss, 40u, c120.c, c120.f));
+                if (depth <= 0.0) continue;
                 float dy = fabs(y - yc);
                 if (dy < w * 0.5) {
-                    out *= 0.2 * tuni(s, 36u, li, sx.c);
-                    lift += 0.4 * U.scratches;
+                    out *= 1.0 - 0.95 * depth;
+                    lift += 0.15 * depth * U.scratches;
                 } else if (dy < w * 1.5) {
-                    lift += 1.0 * U.scratches * (1.0 - (dy - w * 0.5) / w);
+                    lift += 0.35 * depth * U.scratches * (1.0 - (dy - w * 0.5) / w);
                 }
             }
         }
