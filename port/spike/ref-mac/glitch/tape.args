@@ -1,1 +1,1 @@
-1.3 head_switch=4 crinkle=0.9 search_speed=5 dropouts=0.8 dropout_compensation=0
+1.3 vcr=1 head_switch=4 tape_creases=0.9 search_speed=5 tape_dropouts=0.8 dropout_compensation=0

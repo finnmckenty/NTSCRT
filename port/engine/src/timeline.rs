@@ -191,7 +191,7 @@ impl Evaluator {
         a.glitch
             .iter()
             .map(|(id, va)| {
-                let toggle = crate::glitch::params::param(id).is_some_and(|p| p.is_toggle());
+                let toggle = crate::glitch::params::param(id).is_some_and(|p| p.is_discrete());
                 let v = match (va.as_f64(), b.glitch.get(id).and_then(Value::as_f64)) {
                     (Some(x), Some(y)) if !toggle => Value::from(x + (y - x) * u),
                     _ => va.clone(),

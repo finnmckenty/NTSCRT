@@ -3,15 +3,15 @@
 //  1. glitch_gate (a thread per row): what the TV's burst gate sees.
 //  2. glitch_chroma (one thread): the color reference loop down the rows.
 //  3. glitch_compose (a thread per pixel): the signal each screen pixel was
-//     scanned from, plus ghost, dropouts, hum, snow, decoded against the row's
-//     color reference.
+//     scanned from, plus ghost, hum, snow, decoded against the row's color
+//     reference. With the VCR playing, the picture is its output (vcr.wgsl).
 // A healthy set in lock reproduces its input exactly.
 
 struct GlitchU {
     width: u32, activeLines: u32, vbiLines: u32, totalLines: u32,
     preEqEnd: u32, vsyncEnd: u32, postEqEnd: u32, ccEnabled: u32,
-    ccBits: u32, fieldIndex: u32, seed: u32, dropoutCount: u32,
-    docEnabled: u32, tapsI: u32, tapsQ: u32, colorOnInit: u32,
+    ccBits: u32, fieldIndex: u32, seed: u32, pad0: u32,
+    pad1: u32, tapsI: u32, tapsQ: u32, colorOnInit: u32,
     usPerPixel: f32, lineUS: f32, ghostLevel: f32, ghostDelay: f32,
     ghostCos: f32, ghostSin: f32, brightness: f32, pictureGain: f32,
     burstAmp: f32, chromaAlpha: f32, accGamma: f32, killerKappa: f32,
@@ -20,9 +20,8 @@ struct GlitchU {
 struct Row {
     u0: f32, fieldLine: i32, lenPrev: f32, lenCur: f32, lenNext: f32,
     noiseIRE: f32, humIRE: f32, burstScale: f32,
-    tapeLoss: f32, gateShift: f32, pad1: f32, pad2: f32,
+    pad0: f32, gateShift: f32, pad1: f32, pad2: f32,
 };
-struct Dropout { fieldLine: i32, uStart: f32, uLength: f32, pad: f32, };
 
 const SYNC_END: f32 = 4.7;
 const BURST_S: f32 = 5.3;
@@ -39,7 +38,6 @@ const BURST_DIR: vec2<f32> = vec2<f32>(0.5446390350, -0.8386705679);
 @group(0) @binding(1) var<storage, read> rows: array<Row>;
 @group(0) @binding(2) var<storage, read_write> gate: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read_write> color: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> drops: array<Dropout>;
 @group(0) @binding(5) var src: texture_2d<f32>;
 @group(0) @binding(6) var dst: texture_storage_2d<rgba8unorm, write>;
 
@@ -84,17 +82,6 @@ fn locate(rw: Row, u_in: f32, L: u32) -> Loc {
     let iL = i32(L);
     line = ((line % iL) + iL) % iL;
     return Loc(line, u);
-}
-
-// Is (line, u) inside a dropout? x = 1 if so, y = where it starts.
-fn inDropout(count: u32, line: i32, u: f32) -> vec2<f32> {
-    for (var i = 0u; i < count; i++) {
-        let d = drops[i];
-        if (d.fieldLine == line && u >= d.uStart && u < d.uStart + d.uLength) {
-            return vec2<f32>(1.0, d.uStart);
-        }
-    }
-    return vec2<f32>(0.0, 0.0);
 }
 
 // Line 21: 7 cycles of clock run-in at 503.5 kHz, then 19 bits.
@@ -232,40 +219,14 @@ fn glitch_compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let u = rw.u0 + ACT_S + (f32(gid.x) + 0.5) * U.usPerPixel;
     let l = locate(rw, u, U.totalLines);
 
-    // Oxide dropout: a white streak with a dark tail without compensation;
-    // with it, the stretch replayed from the line before (a tall flaw repeats
-    // one line down several), after a ~0.7 µs tick.
-    var sigLine = l.line;
-    var streak = false;
-    var tail = 0.0;
-    let hit = inDropout(U.dropoutCount, l.line, l.u);
-    if (hit.x > 0.5) {
-        if (U.docEnabled != 0u && l.u - hit.y >= 0.7) {
-            var prior = l.line - 1;
-            for (var k = 0; k < 6 && prior > i32(U.vbiLines) && inDropout(U.dropoutCount, prior, l.u).x > 0.5; k++) { prior -= 1; }
-            sigLine = max(i32(U.vbiLines), prior);
-        } else {
-            streak = true;
-        }
-    } else if (U.docEnabled == 0u) {
-        for (var i = 0u; i < U.dropoutCount; i++) {
-            let d = drops[i];
-            if (d.fieldLine == l.line && l.u >= d.uStart + d.uLength && l.u < d.uStart + d.uLength + 1.5) {
-                tail = max(tail, 1.0 - (l.u - d.uStart - d.uLength) / 1.5);
-            }
-        }
-    }
-
-    let s = signalAt(sigLine, l.u);
-    let plain = s.picture && s.exact && sigLine == l.line && !streak && tail == 0.0
-        && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0 && rw.tapeLoss == 0.0
+    let s = signalAt(l.line, l.u);
+    let plain = s.picture && s.exact
+        && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0
         && U.pictureGain == 1.0 && U.brightness == 0.0
         && rc.x == 1.0 && rc.y == 0.0 && rc.z == 1.0;
     if (plain) { textureStore(dst, vec2<i32>(gid.xy), vec4<f32>(s.rgb, 1.0)); return; }
 
     var yiq = s.yiq;
-    if (streak) { yiq = vec3<f32>(1.0, 0.0, 0.0); }
-    if (tail > 0.0) { yiq.x = mix(yiq.x, -0.08, tail * 0.6); }
 
     // Multipath: the same signal again, later, possibly inverted.
     if (U.ghostLevel != 0.0) {
@@ -277,19 +238,6 @@ fn glitch_compose(@builtin(global_invocation_id) gid: vec3<u32>) {
                            g.yiq.y * U.ghostSin + g.yiq.z * U.ghostCos);
         yiq.x += U.ghostLevel * (g.yiq.x - ire2y(0.0));
         yiq = vec3<f32>(yiq.x, yiq.yz + U.ghostLevel * iq);
-    }
-
-    // Tape signal loss: the demodulator's streaks, chroma killed with it.
-    if (rw.tapeLoss > 0.0) {
-        let seg = 0.5 + 1.6 * uni(U.seed, U.fieldIndex, gid.y, 201u);
-        let pos = l.u + uni(U.seed, U.fieldIndex, gid.y, 202u) * seg;
-        let run = u32(max(0.0, pos) / seg);
-        let gg = gauss(U.seed ^ 0xF00Du, U.fieldIndex, run, gid.y);
-        var sparkle = 0.0;
-        if (uni(U.seed ^ 0xBEEFu, U.fieldIndex, run, gid.y) > 0.93) { sparkle = 0.6; }
-        let st = clamp(0.35 + 0.32 * gg + sparkle, -0.08, 1.05);
-        yiq.x = mix(yiq.x, st, rw.tapeLoss);
-        yiq = vec3<f32>(yiq.x, yiq.yz * (1.0 - rw.tapeLoss));
     }
 
     // AGC running out of gain: everything shrinks toward blanking.

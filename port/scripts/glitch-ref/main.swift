@@ -19,11 +19,14 @@ while t < time { t = min(time, t + 1.0 / 30.0); sim.advance(to: t, settings: set
 let plan = sim.plan()
 let rows = plan.rows.map { r in
     [Double(r.u0), Double(r.fieldLine), Double(r.lenPrev), Double(r.lenCur), Double(r.lenNext),
-     Double(r.noiseIRE), Double(r.humIRE), Double(r.burstScale), Double(r.tapeLoss), Double(r.gateShift)]
+     Double(r.noiseIRE), Double(r.humIRE), Double(r.burstScale), Double(r.gateShift)]
 }
-let drops = plan.dropouts.map { [Double($0.fieldLine), Double($0.uStart), Double($0.uLength)] }
+let vcr = (plan.vcr?.lines ?? []).map {
+    [Double($0.originBase), Double($0.originOffset), Double($0.along0), Double($0.spacing),
+     Double($0.grease), Double($0.gain), Double($0.head)]
+}
 let out: [String: Any] = [
-    "time": sim.time, "nominalTrigger": sim.nominalTrigger, "rows": rows, "dropouts": drops,
+    "time": sim.time, "nominalTrigger": sim.nominalTrigger, "rows": rows, "vcr": vcr,
     "chroma": [Double(plan.chromaPhase), Double(plan.chromaGain), Double(plan.killer), plan.colorOn ? 1.0 : 0.0],
     "pictureGain": Double(plan.pictureGain), "ccBits": Int(plan.ccBits), "fieldIndex": Int(plan.fieldIndex),
 ]

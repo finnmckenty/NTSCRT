@@ -6,6 +6,10 @@
 //! - `NTSCRT_SOURCE=<image>` (or a path argument): open it at launch.
 //! - `NTSCRT_UI_SNAPSHOT=<png>`: once the first frame is on screen, save a
 //!   screenshot of the window there and quit.
+//! - `NTSCRT_OPEN=vcr,glitch`: open only these sidebar sections (source,
+//!   crop, downscale, digital, ntsc, vcr, glitch, crt).
+//! - `NTSCRT_GLITCH=vcr=1,tape_mold=0.7`: set glitch knobs (ids as in the
+//!   look files).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -14,6 +18,7 @@ mod digital_panel;
 mod export;
 mod frame_cache;
 mod glitch_panel;
+mod vcr_panel;
 mod ntsc_panel;
 mod prefetch;
 mod producer;
@@ -56,13 +61,14 @@ struct Sections {
     downscale: bool,
     digital: bool,
     ntsc: bool,
+    vcr: bool,
     glitch: bool,
     crt: bool,
 }
 
 impl Default for Sections {
     fn default() -> Self {
-        Self { source: true, crop: false, downscale: true, digital: false, ntsc: true, glitch: true, crt: true }
+        Self { source: true, crop: false, downscale: true, digital: false, ntsc: true, vcr: true, glitch: true, crt: true }
     }
 }
 
@@ -342,6 +348,28 @@ impl App {
             // 0–3: Standard … Maximum.
             if let Some(q) = std::env::var("NTSCRT_EXPORT_QUALITY").ok().and_then(|v| v.parse::<usize>().ok()) {
                 app.export_quality = q.min(3);
+            }
+        }
+        if let Ok(list) = std::env::var("NTSCRT_OPEN") {
+            let has = |n: &str| list.split(',').any(|x| x.trim() == n);
+            app.open = Sections {
+                source: has("source"),
+                crop: has("crop"),
+                downscale: has("downscale"),
+                digital: has("digital"),
+                ntsc: has("ntsc"),
+                vcr: has("vcr"),
+                glitch: has("glitch"),
+                crt: has("crt"),
+            };
+        }
+        if let Ok(pairs) = std::env::var("NTSCRT_GLITCH") {
+            for kv in pairs.split(',') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    if let Ok(f) = v.trim().parse::<f64>() {
+                        app.glitch_values.values.insert(k.trim().to_string(), f);
+                    }
+                }
             }
         }
         if std::env::var("NTSCRT_COMPARE").as_deref() == Ok("1") {
@@ -757,6 +785,7 @@ impl App {
         let fps = self.video.map_or(self.timeline_fps as f64, |v| v.fps).max(1.0);
         let total = self.timeline_frames();
         let base = self.glitch_values.clone();
+        let reception_on = self.glitch_enabled;
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for k in &self.keys {
@@ -767,6 +796,7 @@ impl App {
             }
         }
         total.hash(&mut hasher);
+        reception_on.hash(&mut hasher);
         for (n, v) in &base.values {
             n.hash(&mut hasher);
             v.to_bits().hash(&mut hasher);
@@ -783,9 +813,21 @@ impl App {
                         s.values.insert(k, f);
                     }
                 }
-                s
+                if reception_on {
+                    s
+                } else {
+                    s.reception_healthy()
+                }
             }),
         })
+    }
+
+    /// The glitch stage runs when either of its sections is on: Glitch (the
+    /// TV) or the VCR — keyframed on anywhere counts.
+    fn glitch_stage_active(&self) -> bool {
+        self.glitch_enabled
+            || self.glitch_values.vcr()
+            || (self.timeline_open && self.keys.iter().any(|k| k.glitch.get(ntscrt_engine::glitch::VCR_ID).and_then(|v| v.as_f64()).unwrap_or(0.0) >= 0.5))
     }
 
     fn settings(&self, source: (u32, u32)) -> Settings {
@@ -806,8 +848,8 @@ impl App {
             // A clip's noise is seeded by its frame number + 1, as the Mac's
             // video export and PNG do; a still's by the Animate counter.
             frame: if self.video.is_some() { self.video_frame + 1 } else { self.frame },
-            glitch: self.glitch_enabled.then(|| ntscrt_engine::glitch::GlitchFrame {
-                settings: self.glitch_values.clone(),
+            glitch: self.glitch_stage_active().then(|| ntscrt_engine::glitch::GlitchFrame {
+                settings: if self.glitch_enabled { self.glitch_values.clone() } else { self.glitch_values.reception_healthy() },
                 time: self.glitch_time(),
                 history: self.glitch_history(),
             }),
@@ -891,12 +933,36 @@ impl App {
         ui.separator();
 
         ui.horizontal(|ui| {
+            twirl(ui, &mut self.open.vcr);
+            let mut on = self.glitch_values.vcr();
+            if ui
+                .checkbox(&mut on, egui::RichText::new("VCR").heading())
+                .on_hover_text("Play the picture from a simulated VHS tape: recorded as FM on slanted tracks, read back by two spinning heads through everything the tape and heads are doing to it.")
+                .changed()
+            {
+                self.glitch_values.values.insert(ntscrt_engine::glitch::VCR_ID.into(), if on { 1.0 } else { 0.0 });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset").on_hover_text("A brand-new tape in a deck with clean heads").clicked() {
+                    vcr_panel::reset(&mut self.glitch_values);
+                }
+            });
+        });
+        if self.open.vcr {
+            let on = self.glitch_values.vcr();
+            ui.add_enabled_ui(on, |ui| vcr_panel::controls(ui, &mut self.glitch_values));
+        }
+        ui.separator();
+
+        ui.horizontal(|ui| {
             twirl(ui, &mut self.open.glitch);
             ui.checkbox(&mut self.glitch_enabled, egui::RichText::new("Glitch").heading())
-                .on_hover_text("A simulated TV and VCR, for dramatic failures: rolling, tearing, bending, snow, tracking noise. With every knob healthy the picture is untouched.");
+                .on_hover_text("A simulated TV, for dramatic failures: rolling, tearing, bending, snow. With every knob healthy the picture is untouched.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Reset").on_hover_text("Every knob back to healthy").clicked() {
-                    self.glitch_values = ntscrt_engine::glitch::GlitchSettings::default();
+                    for p in ntscrt_engine::glitch::controls(ntscrt_engine::glitch::Group::Reception) {
+                        self.glitch_values.values.insert(p.id.into(), p.default);
+                    }
                 }
             });
         });

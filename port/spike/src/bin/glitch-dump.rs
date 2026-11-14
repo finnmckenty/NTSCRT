@@ -24,12 +24,12 @@ fn main() {
         .iter()
         .map(|r| {
             vec![r.u0 as f64, r.field_line as f64, r.len_prev as f64, r.len_cur as f64, r.len_next as f64, r.noise_ire as f64, r.hum_ire as f64,
-                 r.burst_scale as f64, r.tape_loss as f64, r.gate_shift as f64]
+                 r.burst_scale as f64, r.gate_shift as f64]
         })
         .collect();
-    let drops: Vec<Vec<f64>> = plan.dropouts.iter().map(|d| vec![d.field_line as f64, d.u_start as f64, d.u_length as f64]).collect();
+    let vcr: Vec<Vec<f64>> = plan.vcr.as_ref().map(|v| v.lines.iter().map(|l| vec![l.origin_base as f64, l.origin_offset as f64, l.along0 as f64, l.spacing as f64, l.grease as f64, l.gain as f64, l.head as f64]).collect()).unwrap_or_default();
     let out = ntscrt_engine::serde_json::json!({
-        "time": sim.time(), "nominalTrigger": sim.nominal_trigger, "rows": rows, "dropouts": drops,
+        "time": sim.time(), "nominalTrigger": sim.nominal_trigger, "rows": rows, "vcr": vcr,
         "chroma": [plan.chroma_phase as f64, plan.chroma_gain as f64, plan.killer as f64, if plan.color_on { 1.0 } else { 0.0 }],
         "pictureGain": plan.picture_gain as f64, "ccBits": plan.cc_bits, "fieldIndex": plan.field_index,
     });

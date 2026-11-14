@@ -8,7 +8,8 @@ use std::f64::consts::PI;
 use std::sync::Arc;
 
 use super::params::GlitchSettings;
-use super::receiver::{draw_constants, timing as T, Dropout, FieldPlan, Raster, Simulator, Snapshot};
+use super::receiver::{draw_constants, timing as T, FieldPlan, Raster, Simulator, Snapshot};
+use super::vcr::VcrGpu;
 
 /// How glitch settings vary over time (keyframes), for re-simulating a
 /// stretch of history exactly.
@@ -132,12 +133,14 @@ impl Renderer {
     }
 }
 
-/// The three passes, compiled once.
+/// The three passes, compiled once, and the VCR's ahead of them.
 pub struct Gpu {
     layout: wgpu::BindGroupLayout,
     gate: wgpu::ComputePipeline,
     chroma: wgpu::ComputePipeline,
     compose: wgpu::ComputePipeline,
+    vcr: VcrGpu,
+    vcr_output: std::sync::Mutex<Option<wgpu::Texture>>,
 }
 
 impl Gpu {
@@ -159,7 +162,6 @@ impl Gpu {
                 buffer(1, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer(2, wgpu::BufferBindingType::Storage { read_only: false }),
                 buffer(3, wgpu::BufferBindingType::Storage { read_only: false }),
-                buffer(4, wgpu::BufferBindingType::Storage { read_only: true }),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -193,7 +195,7 @@ impl Gpu {
                 cache: None,
             })
         };
-        Self { gate: pipe("glitch_gate"), chroma: pipe("glitch_chroma"), compose: pipe("glitch_compose"), layout }
+        Self { gate: pipe("glitch_gate"), chroma: pipe("glitch_chroma"), compose: pipe("glitch_compose"), layout, vcr: VcrGpu::new(device), vcr_output: Default::default() }
     }
 
     /// Draw the field `plan` describes from `input` into `output` (same size).
@@ -210,7 +212,26 @@ impl Gpu {
         let ghost_delay = s.get("ghost_delay");
         let ghost_angle = -2.0 * PI * T::SUBCARRIER_MHZ * ghost_delay;
         let snap = |v: f32, target: f32| if (v - target).abs() < 1e-6 { target } else { v };
-        let drop_count = plan.dropouts.len().min(64);
+        // The VCR plays the picture from tape first; the TV receives that.
+        let vcr_tex = plan.vcr.as_ref().map(|vp| {
+            let mut slot = self.vcr_output.lock().expect("vcr texture");
+            if slot.as_ref().map(|t| (t.width(), t.height())) != Some((input.width(), input.height())) {
+                *slot = Some(device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("vcr output"),
+                    size: wgpu::Extent3d { width: input.width(), height: input.height(), depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }));
+            }
+            let tex = slot.as_ref().expect("vcr texture").clone();
+            self.vcr.encode(device, queue, enc, input, &tex, vp, s, &raster, plan.field_index);
+            tex
+        });
+        let picture = vcr_tex.as_ref().unwrap_or(input);
         let u32s: [u32; 16] = [
             width,
             raster.active_lines as u32,
@@ -223,8 +244,8 @@ impl Gpu {
             plan.cc_bits,
             plan.field_index,
             0x9E3779B9,
-            drop_count as u32,
-            s.flag("dropout_compensation") as u32,
+            0,
+            0,
             ((0.38 / us_per_pixel).round() as u32).max(1),
             ((0.83 / us_per_pixel).round() as u32).max(1),
             plan.color_on as u32,
@@ -250,10 +271,6 @@ impl Gpu {
         let mut uniform: Vec<u8> = Vec::with_capacity(128);
         u32s.iter().for_each(|v| uniform.extend_from_slice(&v.to_le_bytes()));
         f32s.iter().for_each(|v| uniform.extend_from_slice(&v.to_le_bytes()));
-        let mut drops: Vec<Dropout> = plan.dropouts.iter().take(64).copied().collect();
-        if drops.is_empty() {
-            drops.push(Dropout { field_line: -1, u_start: 0.0, u_length: 0.0, pad: 0.0 });
-        }
         let buffer = |data: &[u8], usage: wgpu::BufferUsages| {
             let b = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: data.len().max(16) as u64, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             queue.write_buffer(&b, 0, data);
@@ -261,7 +278,6 @@ impl Gpu {
         };
         let ubuf = buffer(&uniform, wgpu::BufferUsages::UNIFORM);
         let rbuf = buffer(bytemuck::cast_slice(rows), wgpu::BufferUsages::STORAGE);
-        let dbuf = buffer(bytemuck::cast_slice(&drops), wgpu::BufferUsages::STORAGE);
         let gate = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: rows.len() as u64 * 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let color = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: rows.len() as u64 * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -272,8 +288,7 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 1, resource: rbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gate.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: color.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: dbuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&input.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&picture.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&output.create_view(&Default::default())) },
             ],
         });

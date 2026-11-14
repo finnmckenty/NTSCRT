@@ -1,1 +1,1 @@
-1.0 head_switch=4 afc_speed=0.1 timebase_jitter=1 crinkle=0.8 tracking=0.5
+1.0 vcr=1 head_switch=4 afc_speed=0.1 timebase_jitter=1 tape_creases=0.8 tracking=0.5

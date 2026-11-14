@@ -36,10 +36,28 @@ fn hover(r: egui::Response, s: &NtscSetting) -> egui::Response {
     }
 }
 
+/// ntsc-rs's own VHS emulation — filters standing in for a tape, replaced
+/// by the VCR section's simulation. Not shown, but still applied when a look
+/// carries them, so older looks render as they always did.
+const RETIRED_VHS: [&str; 3] = ["head_switching", "tracking_noise", "vhs_settings"];
+
 /// The settings' controls. Returns true when any value changed.
 pub fn controls(ui: &mut egui::Ui, settings: &[NtscSetting], values: &mut Map<String, Value>) -> bool {
     let mut changed = false;
-    for s in settings {
+    let in_use: Vec<&NtscSetting> = settings.iter().filter(|s| RETIRED_VHS.contains(&s.name.as_str()) && boolean(values, &s.name)).collect();
+    if !in_use.is_empty() {
+        egui::Frame::group(ui.style()).fill(egui::Color32::from_rgba_unmultiplied(255, 160, 0, 24)).show(ui, |ui| {
+            let names: Vec<&str> = in_use.iter().map(|s| s.label.as_str()).collect();
+            ui.label(format!("This look uses ntsc-rs's old VHS emulation ({}). The VCR section replaces it.", names.join(", ")));
+            if ui.button("Turn it off").clicked() {
+                for s in &in_use {
+                    values.insert(s.name.clone(), Value::Bool(false));
+                }
+                changed = true;
+            }
+        });
+    }
+    for s in settings.iter().filter(|s| !RETIRED_VHS.contains(&s.name.as_str())) {
         changed |= control(ui, s, values);
     }
     changed

@@ -1,6 +1,6 @@
 //! The receiver simulation against the Mac's (tests/fixtures/glitch, made by
 //! port/scripts/make-glitch-refs.sh from Receiver.swift compiled as-is):
-//! every row, the color reference and the dropouts, exactly.
+//! every row, the color reference and the VCR's view of each line, exactly.
 
 use ntscrt_engine::glitch::receiver::{Raster, Simulator};
 use ntscrt_engine::glitch::GlitchSettings;
@@ -46,7 +46,7 @@ fn field_plans_match_the_mac() {
         assert_eq!(rows.len(), plan.rows.len(), "{name}");
         for (y, (m, r)) in rows.iter().zip(&plan.rows).enumerate() {
             let ours = [r.u0 as f64, r.field_line as f64, r.len_prev as f64, r.len_cur as f64, r.len_next as f64, r.noise_ire as f64,
-                        r.hum_ire as f64, r.burst_scale as f64, r.tape_loss as f64, r.gate_shift as f64];
+                        r.hum_ire as f64, r.burst_scale as f64, r.gate_shift as f64];
             for (i, (a, b)) in m.as_array().unwrap().iter().zip(ours).enumerate() {
                 assert!(close(a.as_f64().unwrap(), b), "{name}: row {y} field {i}: Mac {a}, ours {b}");
             }
@@ -56,12 +56,13 @@ fn field_plans_match_the_mac() {
         for (a, b) in c.iter().zip(ours) {
             assert!(close(a.as_f64().unwrap(), b), "{name}: chroma Mac {a}, ours {b}");
         }
-        let drops = mac["dropouts"].as_array().unwrap();
-        assert_eq!(drops.len(), plan.dropouts.len(), "{name}: dropouts");
-        for (m, d) in drops.iter().zip(&plan.dropouts) {
-            let ours = [d.field_line as f64, d.u_start as f64, d.u_length as f64];
-            for (a, b) in m.as_array().unwrap().iter().zip(ours) {
-                assert!(close(a.as_f64().unwrap(), b), "{name}: dropout Mac {a}, ours {b}");
+        let vcr = mac["vcr"].as_array().unwrap();
+        let lines = plan.vcr.as_ref().map(|v| v.lines.as_slice()).unwrap_or(&[]);
+        assert_eq!(vcr.len(), lines.len(), "{name}: VCR lines");
+        for (y, (m, l)) in vcr.iter().zip(lines).enumerate() {
+            let ours = [l.origin_base as f64, l.origin_offset as f64, l.along0 as f64, l.spacing as f64, l.grease as f64, l.gain as f64, l.head as f64];
+            for (i, (a, b)) in m.as_array().unwrap().iter().zip(ours).enumerate() {
+                assert!(close(a.as_f64().unwrap(), b), "{name}: VCR line {y} field {i}: Mac {a}, ours {b}");
             }
         }
         n += 1;

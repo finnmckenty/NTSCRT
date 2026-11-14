@@ -79,10 +79,28 @@ impl Look {
             look.shader_params = floats(s.get("params"));
         }
         look.glitch_enabled = true;
+        // Looks from before the VCR panel: their Tape knobs become the
+        // physical conditions behind them, with the VCR on for the whole look
+        // if the base or any keyframe used one (and the stage was on).
+        let mut vcr_from_legacy: Option<f64> = None;
         if let Some(g) = raw.get("glitch").and_then(Value::as_object) {
-            let values = object(g.get("values"));
-            look.glitch_values = crate::glitch::GlitchSettings::from_values(values.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k, f))));
+            let values: std::collections::BTreeMap<String, f64> = object(g.get("values")).iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
             look.glitch_enabled = g.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            if !values.contains_key(crate::glitch::VCR_ID) {
+                let keyed: Vec<std::collections::BTreeMap<String, f64>> = raw
+                    .get("timeline")
+                    .and_then(|t| t.get("keys"))
+                    .and_then(Value::as_array)
+                    .map(|ks| ks.iter().map(|k| object(k.get("glitch")).iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect()).collect())
+                    .unwrap_or_default();
+                let used = std::iter::once(&values).chain(&keyed).any(|v| crate::glitch::GlitchSettings::migrated(v)[crate::glitch::VCR_ID] == 1.0);
+                vcr_from_legacy = Some(if used && look.glitch_enabled { 1.0 } else { 0.0 });
+            }
+            let mut migrated = crate::glitch::GlitchSettings::migrated(&values);
+            if let Some(v) = vcr_from_legacy {
+                migrated.insert(crate::glitch::VCR_ID.into(), v);
+            }
+            look.glitch_values = crate::glitch::GlitchSettings::from_values(migrated.iter().map(|(k, v)| (k, *v)));
         }
         if let Some(d) = raw.get("digital").and_then(Value::as_object) {
             let values: std::collections::BTreeMap<String, f64> =
@@ -106,7 +124,18 @@ impl Look {
                         easing: k.get("easing").and_then(Value::as_str).and_then(Easing::from_raw).unwrap_or_default(),
                         shader: floats(k.get("shader")),
                         ntsc: object(k.get("ntsc")),
-                        glitch: object(k.get("glitch")),
+                        glitch: {
+                            let g = object(k.get("glitch"));
+                            match vcr_from_legacy {
+                                Some(v) if !g.is_empty() => {
+                                    let floats: std::collections::BTreeMap<String, f64> = g.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
+                                    let mut m = crate::glitch::GlitchSettings::migrated(&floats);
+                                    m.insert(crate::glitch::VCR_ID.into(), v);
+                                    m.into_iter().map(|(k, v)| (k, Value::from(v))).collect()
+                                }
+                                _ => g,
+                            }
+                        },
                         digital: {
                             let d = object(k.get("digital"));
                             let floats: std::collections::BTreeMap<String, f64> = d.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
@@ -185,7 +214,8 @@ impl Look {
             shader,
             frame,
             // The receiver at time zero (a look's first moment).
-            glitch: self.glitch_enabled.then(|| crate::glitch::GlitchFrame { settings: self.glitch_values.clone(), time: 0.0, history: None }),
+            glitch: crate::glitch::GlitchSettings::for_stage(self.glitch_enabled, &self.glitch_values)
+                .map(|settings| crate::glitch::GlitchFrame { settings, time: 0.0, history: None }),
             // Frame 0 of a still at the timeline's rate.
             digital: digital.map(|settings| crate::DigitalFrame {
                 settings,
