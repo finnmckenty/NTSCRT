@@ -335,7 +335,7 @@ extension ReceiverSimulatorTests {
     func testTensionSkewsThePictureAtTheHeadSwitch() {
         // Tighter than the recorder: each line arrives a little later down
         // the field, and the next head starts on time — a jump of the
-        // strain × the field (3e-4 × 16.7 ms = 5 µs at full tension).
+        // strain × the field (8e-4 × 16.7 ms = 13 µs at full tension).
         let raster = ReceiverRaster(width: 320, activeLines: 240)
         let sim = ReceiverSimulator(raster: raster)
         sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "back_tension": 1]))
@@ -343,8 +343,8 @@ extension ReceiverSimulatorTests {
         let f = Int64((1.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
         let sw = f * L + L - Int64((3.5 * raster.scale).rounded())
         let jump = sim.timebaseError(sw) - sim.timebaseError(sw - 1)
-        XCTAssertEqual(jump, -5.0, accuracy: 0.6, "skew at the switch")
-        XCTAssertLessThan(abs(sim.timebaseError(sw - 2) - sim.timebaseError(sw - 1)), 0.1, "smooth between")
+        XCTAssertEqual(jump, -13.3, accuracy: 1.2, "skew at the switch")
+        XCTAssertLessThan(abs(sim.timebaseError(sw - 2) - sim.timebaseError(sw - 1)), 0.15, "smooth between")
     }
 
     func testStickyTapeJerksTheTiming() {

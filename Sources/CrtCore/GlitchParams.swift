@@ -106,14 +106,14 @@ public struct GlitchParam: Identifiable, Sendable {
         // The tape.
         GlitchParam(
             id: "tape_seed", label: "Cassette", group: .tape, kind: .seed, defaultValue: 1,
-            help: "Which cassette: another one has the same condition but its own flaws in its own places."),
+            help: "Which cassette: another one in the same condition, with its own flaws in their own places, its tracks bent a little differently and its sticky patches elsewhere. On a clean tape there's nothing to move, so it looks the same."),
         GlitchParam(
             id: "tape_speed", label: "Recorded at", group: .tape, kind: .choice(TapeFormat.names), defaultValue: 0,
             help: "The tape speed it was recorded at. LP and EP move the tape on half or a third as far between fields, so the tracks are narrower and closer: a weaker, noisier signal, color crosstalk from the neighboring tracks that the deck's comb filter has to cancel, flaws that last for more fields, and far less forgiveness of tracking errors."),
         GlitchParam(
             id: "tape_generation", label: "Generation", group: .tape,
             kind: .choice(["Original", "Copy", "Copy of a copy", "Third copy"]), defaultValue: 0,
-            help: "How many times the picture was dubbed from tape to tape before this one. Each copy is really recorded and played back again, on a good tape in a good deck: noise, softness, smeared color and the earlier decks' timing errors pile up."),
+            help: "How many times the picture was dubbed from tape to tape before this one, at this tape's speed. Each copy is really played back, sent over a composite cable — where the recording deck has to pull picture and color apart again, losing fine detail and mistaking some of it for color — and recorded again: softness, noise, smeared color and every deck's timing errors pile up."),
         GlitchParam(
             id: "tape_wear", label: "Wear", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,

@@ -163,6 +163,12 @@ public struct VcrFieldPlan {
     public var tape: TapeParams
     public var deck: DeckParams
     public var format: TapeFormat
+    /// Recorded from another deck's playback over a composite cable (a
+    /// copy), rather than from the picture itself: the recording deck has
+    /// to separate the picture from the color again.
+    public var linked = false
+    /// How far that deck's picture delay misses its color delay, samples.
+    public var ycMismatch = 0
     /// On a copy, the generations it was dubbed through, oldest first: the
     /// picture is recorded and played back through each in turn, then
     /// recorded onto this tape.
@@ -238,6 +244,24 @@ public final class VcrStage {
         var roughness: Float, pinhole: Float, flake: Float, burstAmp: Float
         var pitchUM: Float, headUM: Float, trackUM: Float, rowsPerTrack: Float
         var azF: Float, azC: Float, headW: Float, pad1: Float
+        var link: UInt32, lumaDelay: UInt32, nb0: Float, nb1: Float
+        var nb2: Float, na1: Float, na2: Float, kb0: Float
+        var kb1: Float, kb2: Float, ka1: Float, ka2: Float
+    }
+
+    /// A copying deck's composite input: a trap at the color subcarrier
+    /// (Q 1) for the picture, and the color demodulated and low-passed at
+    /// 1 MHz (two biquads), the picture delayed to match.
+    static let inputTrap: [Float] = {
+        let w0 = Double.pi / 4, q = 1.0              // 3.58 MHz at 8× its rate
+        let alpha = sin(w0) / (2 * q), a0 = 1 + alpha
+        return [Float(1 / a0), Float(-2 * cos(w0) / a0), Float(1 / a0),
+                Float(-2 * cos(w0) / a0), Float((1 - alpha) / a0)]
+    }()
+    static let inputChromaMHz = 1.0
+    /// Two Butterworth biquads' delay at low frequencies, in samples.
+    static var inputChromaDelay: Int {
+        Int((2 * 2.squareRoot() / (2 * Double.pi * inputChromaMHz) * VcrChannel.sampleRate).rounded())
     }
 
     private func buffer(_ name: String, bytes: Int) -> MTLBuffer? {
@@ -308,6 +332,7 @@ public final class VcrStage {
         let de = VcrChannel.shelf(zeroMHz: VcrChannel.emphasisPoleMHz, poleMHz: VcrChannel.emphasisZeroMHz)
         let lp = VcrChannel.lowPass(VcrChannel.lumaMHz)
         let cp = VcrChannel.lowPass(VcrChannel.chromaMHz)
+        let ck = VcrChannel.lowPass(Self.inputChromaMHz)
         var u = Uniforms(
             rows: UInt32(rows), n: UInt32(n), segs: UInt32(segs), width: UInt32(input.width),
             seed: t.seed, field: fieldIndex, doc: compensate ? 1 : 0,
@@ -335,7 +360,12 @@ public final class VcrStage {
             trackUM: Float(fmt.trackWidth * 1000), rowsPerTrack: Float(fmt.trackOffsetLines * raster.scale),
             azF: Float(Double.pi * TapeFormat.azimuthTan * TapeFormat.fmMHz / TapeGeometry.writingSpeed),
             azC: Float(Double.pi * TapeFormat.azimuthTan * VcrChannel.colorUnderMHz / TapeGeometry.writingSpeed),
-            headW: Float(fmt.headWidth), pad1: 0)
+            headW: Float(fmt.headWidth), pad1: 0,
+            link: plan.linked ? 1 : 0,
+            lumaDelay: UInt32(max(0, min(31, Self.inputChromaDelay - plan.ycMismatch))),
+            nb0: Self.inputTrap[0], nb1: Self.inputTrap[1], nb2: Self.inputTrap[2],
+            na1: Self.inputTrap[3], na2: Self.inputTrap[4],
+            kb0: ck[0], kb1: ck[1], kb2: ck[2], ka1: ck[3], ka2: ck[4])
 
         let samples = rows * n
         let lineBytes = rows * MemoryLayout<VcrLine>.stride
@@ -432,7 +462,8 @@ public final class VcrStage {
                          edge: t.edge, mold: t.mold, vaseline: t.vaseline, remanence: t.remanence,
                          roughness: t.roughness, pinhole: t.pinholeChance, flake: t.flakeChance,
                          burstAmp: 0, pitchUM: 0, headUM: 0, trackUM: 0, rowsPerTrack: 0,
-                         azF: 0, azC: 0, headW: 0, pad1: 0)
+                         azF: 0, azC: 0, headW: 0, pad1: 0, link: 0, lumaDelay: 0,
+                         nb0: 0, nb1: 0, nb2: 0, na1: 0, na2: 0, kb0: 0, kb1: 0, kb2: 0, ka1: 0, ka2: 0)
         var raw: [Float] = []
         for p in points { raw += [Float(bitPattern: UInt32(bitPattern: p.base)), p.offset, p.y, 0] }
         let inBuf = device.makeBuffer(bytes: raw, length: raw.count * 4, options: .storageModeShared)!
@@ -473,7 +504,15 @@ public final class VcrStage {
         float roughness, pinhole, flake, burstAmp;
         float pitchUM, headUM, trackUM, rowsPerTrack;
         float azF, azC, headW, pad1;
+        uint link, lumaDelay; float nb0, nb1;
+        float nb2, na1, na2, kb0;
+        float kb1, kb2, ka1, ka2;
     };
+    inline float bq(thread float4& s, float x, float b0, float b1, float b2, float a1, float a2) {
+        float y = b0 * x + b1 * s.x + b2 * s.y - a1 * s.z - a2 * s.w;
+        s = float4(x, s.x, y, s.z);
+        return y;
+    }
     struct VcrLine {
         int originBase; float originOffset; float along0; float spacing;
         float grease; float gain; uint head; float delta0; float deltaSlope; float pad;
@@ -714,10 +753,19 @@ public final class VcrStage {
     {
         if (y >= U.rows) return;
         int w = int(U.width);
-        float phase = 6.2831853 * tuni(U.seed ^ 0xA5A5u, U.field, int(y), 1);
-        float xPrev = 0.0, ePrev = 0.0;
-        for (uint i = 0; i < U.n; i++) {
-            float u = (float(i) + 0.5) * U.dt;
+        uint row = y * U.n;
+        // First the signal arriving at the deck (IRE into rf, chroma into
+        // iq), then, in place, what the deck records of it.
+        // A copy: the deck's composite input (see VcrStage.inputTrap).
+        float4 sTrap = float4(-40.0), sI1 = float4(0.0), sI2 = float4(0.0), sQ1 = float4(0.0), sQ2 = float4(0.0);
+        float ring[32];
+        for (int k = 0; k < 32; k++) ring[k] = -40.0;
+        // The color filters lag by `lag`; the deck delays the picture to
+        // match (lumaDelay, which misses by a little), and everything is
+        // timed from sync, so the lag itself goes.
+        uint lag = U.link != 0u ? 13u : 0u;           // VcrStage.inputChromaDelay
+        for (uint i = 0; i < U.n + lag; i++) {
+            float u = (float(min(i, U.n - 1u)) + 0.5) * U.dt;
             float ire = 0.0;
             float2 c = float2(0.0);
             if (u < SYNC_END) ire = -40.0;
@@ -734,6 +782,33 @@ public final class VcrStage {
                 ire = 7.5 + 92.5 * q.x;
                 c = q.yz;
             }
+            if (U.link != 0u) {
+                // It arrives as one composite signal, color on the 3.58 MHz
+                // subcarrier (227.5 cycles a line, so inverted line to
+                // line). The picture is what a trap at the subcarrier lets
+                // through — fine detail near it goes — and the color is what
+                // demodulating there finds, picture detail included
+                // (cross-color).
+                float th = 0.78539816 * float(i & 7u) + 3.14159265 * float(y & 1u);
+                float cs = cos(th), sn = sin(th);
+                float comp = ire + 92.5 * (c.x * cs + c.y * sn);
+                float l = bq(sTrap, comp, U.nb0, U.nb1, U.nb2, U.na1, U.na2);
+                float2 d = (2.0 / 92.5) * comp * float2(cs, sn);
+                d.x = bq(sI2, bq(sI1, d.x, U.kb0, U.kb1, U.kb2, U.ka1, U.ka2), U.kb0, U.kb1, U.kb2, U.ka1, U.ka2);
+                d.y = bq(sQ2, bq(sQ1, d.y, U.kb0, U.kb1, U.kb2, U.ka1, U.ka2), U.kb0, U.kb1, U.kb2, U.ka1, U.ka2);
+                ring[i & 31u] = l;
+                if (i < lag) continue;
+                rf[row + i - lag] = ring[(i + 32u - U.lumaDelay) & 31u];
+                iq[row + i - lag] = d;
+            } else {
+                rf[row + i] = ire;
+                iq[row + i] = c;
+            }
+        }
+        float phase = 6.2831853 * tuni(U.seed ^ 0xA5A5u, U.field, int(y), 1);
+        float xPrev = rf[row], ePrev = rf[row];
+        for (uint i = 0; i < U.n; i++) {
+            float ire = rf[row + i];
             // Main emphasis, then the white and dark clips.
             float e = U.emB0 * ire + U.emB1 * xPrev - U.emA1 * ePrev;
             xPrev = ire; ePrev = e;
@@ -743,8 +818,7 @@ public final class VcrStage {
             phase -= 6.2831853 * floor(phase / 6.2831853);
             // The FM, and the chroma to go under it — mixed onto the tape as
             // each track's head writes it (vcr_magnet).
-            rf[y * U.n + i] = cos(phase);
-            iq[y * U.n + i] = c;
+            rf[row + i] = cos(phase);
         }
     }
 

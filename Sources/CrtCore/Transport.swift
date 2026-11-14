@@ -28,9 +28,10 @@ public struct TransportParams: Equatable {
     }
 
     /// How much longer the tape is stretched than when it was recorded: the
-    /// strain of ~0.3 N more tension on a VHS tape's 0.24 mm² of PET at the
-    /// knob's end.
-    public var strain: Double { 3e-4 * tension }
+    /// strain of ~0.85 N more tension on a VHS tape's 0.24 mm² of PET at
+    /// the knob's end (a band brake badly out of adjustment, or a tape
+    /// stretched by a chewing deck): a 13 µs jump at the head switch.
+    public var strain: Double { 8e-4 * tension }
 
     public var searching: Bool { search > 1.02 }
 }

@@ -784,30 +784,44 @@ public final class ReceiverSimulator {
         var plan = VcrFieldPlan(lines: lines, tape: k.tape, deck: k.deck, format: fmt)
         if k.generations > 0 {
             plan.earlier = (1...k.generations).map { dubPlan(field: f, generation: $0) }
+            plan.linked = true
+            plan.ycMismatch = ycMismatch(generation: k.generations + 1)
         }
         return plan
     }
 
+    /// How far generation g's recording deck's picture delay misses its
+    /// color delay (samples, ±100 ns).
+    private func ycMismatch(generation g: Int) -> Int {
+        let s = GlitchRandom.mix(seed ^ UInt64(g) &* 0x9E37_79B9)
+        return Int((6 * GlitchRandom.uniform(s, 3, 0) - 3).rounded())
+    }
+
     /// Generation g of the copies this tape was dubbed through (1 is the
-    /// first recording): a good tape at SP in a good deck.
+    /// first recording; later ones were recorded from the one before's
+    /// playback): a decent tape in a decent deck, at this tape's speed.
     private func dubPlan(field f: Int64, generation g: Int) -> VcrFieldPlan {
         let settings = GlitchSettings(values: [
             "tape_seed": Double(knobs.settings["tape_seed"].rounded()) + Double(1000 * g),
             "tape_wear": 0.1, "tape_dropouts": 0.05, "head_wear": 0.1])
         let tape = TapeParams(settings), deck = DeckParams(settings)
+        let fmt = knobs.transport.format
         var lines: [VcrLine] = []
         lines.reserveCapacity(raster.activeLines)
         for y in 0..<raster.activeLines {
             let j = f * Int64(L) + Int64(raster.vbiLines + y)
             let read = trackPlace(j, u: 0)
             let h = Int(posmod(Int64(head(j) + g), 2))
-            let origin = TapePosition(x: TapeGeometry.trackOrigin(field: read.field), y: 0)
+            let origin = TapePosition(x: TapeGeometry.trackOrigin(field: read.field, format: fmt), y: 0)
             lines.append(VcrLine(
                 originBase: origin.base, originOffset: origin.offset, along0: Float(read.along),
                 spacing: deck.wearSpacing(h), grease: 0, gain: deck.efficiency(h), head: UInt32(h),
                 delta0: 0, deltaSlope: 0))
         }
-        return VcrFieldPlan(lines: lines, tape: tape, deck: deck, format: .sp)
+        var plan = VcrFieldPlan(lines: lines, tape: tape, deck: deck, format: fmt)
+        plan.linked = g > 1
+        plan.ycMismatch = ycMismatch(generation: g)
+        return plan
     }
 
     private func noiseSigma(loss: Double) -> Double {
