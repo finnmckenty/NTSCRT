@@ -2,12 +2,12 @@
 
 ![NTSCRT — the full NTSC + CRT pipeline on the left of the compare split, untouched source on the right, with a keyframed animation on the timeline below](docs/header.webp)
 
-**Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through an optional digital camera and codec (webcam, video call, MiniDV), an analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs): composite artifacts, tape noise, head switching), a simulated TV and VCR for the dramatic glitches, and the CRT shaders RetroArch uses (via [librashader](https://github.com/SnowflakePowered/librashader): scanlines, phosphor masks, glow).
+**Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through an optional digital camera and codec (webcam, video call, MiniDV), an analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs): composite artifacts, chroma bleed, noise), a simulated VHS tape and deck, a simulated TV for the dramatic glitches, and the CRT shaders RetroArch uses (via [librashader](https://github.com/SnowflakePowered/librashader): scanlines, phosphor masks, glow).
 
-Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Digital video and Glitch stages, Screen Loop video feedback, cropping, a keyframe timeline, and video and GIF export.
+Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Digital video, VCR and Glitch stages, Screen Loop video feedback, cropping, a keyframe timeline, and video and GIF export.
 
 ```
-your image/video → crop → digital camera + codec → NTSC/VHS signal (full res) → downscale to retro resolution → TV/VCR glitches → CRT shader → screen
+your image/video → crop → digital camera + codec → NTSC/VHS signal (full res) → downscale to retro resolution → VHS tape and deck → TV glitches → CRT shader → screen
 ```
 
 ## Download
@@ -38,9 +38,18 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 - **Crop**: cuts the picture to an aspect ratio (square, or portrait and landscape shapes from 3:4 to 1:2) before anything else sees it. Drag the picture in the preview to move the crop, or a corner to zoom in (to cut black borders, say); double-click to center.
 - **Downscale**: the retro resolution the CRT sees (SNES 256 px, VGA 320 px, or any width). **Chunky** keeps hard pixel edges; **Smooth** is softer and steadier on video.
 - **Digital video** (off by default): a digital camera and codec ahead of the analog signal, like webcam footage dubbed to VHS. See [Digital video](#digital-video) below.
-- **NTSC (TV)**: the analog signal, with composite noise, chroma bleed, head switching, tape speed, and about sixty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases).
-- **Glitch**: a simulated TV and VCR, for dramatic failures like rolling, tearing, bending, snow and tracking noise. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.
+- **NTSC (TV)**: the analog signal, with composite noise, chroma bleed and about fifty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases). (Its VHS settings are retired: the VCR replaces them. Older looks that use them still render the same.)
+- **VCR** (off by default): the picture recorded onto a simulated VHS tape and played back by a simulated deck. See [VCR](#vcr) below.
+- **Glitch**: a simulated TV, for dramatic failures like rolling, tearing, bending and snow. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.
 - **CRT**: seven RetroArch CRT shaders (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every parameter exposed. A grayed-out control shows which switch turns it on.
+
+### VCR
+
+- **Pick a tape and a deck**: Brand new, Used, Worn out, Moldy, Vaselined or Chewed; Clean, Dirty, Worn or Neglected heads. Then adjust the knobs under each.
+- **Nothing is drawn**: the picture is recorded as VHS records it (FM luminance, color-under) on the tape's slanted tracks, and read back through what the tape and heads are doing to it.
+- **The tape is a real surface**: flaws, scratches, creases, mold and Vaseline sit at places on it, so they come back in the same spot, sweep through the picture as the heads cross them, and differ between cassettes (**Another**).
+- **The heads have a history**: a shedding tape clogs an uncleaned deck as it plays; clogs knock loose; Vaseline rubs off onto the heads. Each head has its own dirt and wear, so alternate fields differ.
+- **Spacing hurts detail first**: anything holding the heads off the tape costs the picture far more than the color, so the picture breaks into noise while the color smears on.
 
 ### Digital video
 
@@ -129,6 +138,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full developer setup (Swift + Rust 
 
 - [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) — the NTSC/VHS signal emulation (MIT/ISC/Apache-2.0)
 - [librashader](https://github.com/SnowflakePowered/librashader) by SnowflakePowered — the RetroArch-compatible shader runtime (MPL-2.0)
+- [vhs-decode](https://github.com/oyvindln/vhs-decode) — the VHS format numbers (carriers, emphasis, filters) the VCR simulation is built to (GPL-3.0; numbers only, no code)
 - [analogtv](https://www.jwz.org/xscreensaver/) by Trevor Blackwell (xscreensaver) — the design the Glitch stage's receiver simulation follows: glitches as the response of simulated TV circuits
 - [libretro/slang-shaders](https://github.com/libretro/slang-shaders) and the RetroArch community — the CRT shaders themselves: crt-royale by TroggleMonkey, crt-easymode and crt-aperture by EasyMode, crt-hyllian by Hyllian, crtsim, crtglow (various licenses, largely GPL)
 
