@@ -45,11 +45,15 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 
 ### VCR
 
-- **Pick a tape and a deck**: Brand new, Used, Worn out, Moldy, Vaselined or Chewed; Clean, Dirty, Worn or Neglected heads. Then adjust the knobs under each.
+- **Pick a tape and a deck**: Brand new, Used, Worn out, Moldy, Vaselined, Chewed, Sticky or Bootleg; Clean, Dirty or Worn heads, Worn transport, or Neglected. Then adjust the knobs under each.
 - **Nothing is drawn**: the picture is recorded as VHS records it (FM luminance, color-under) on the tape's slanted tracks, and read back through what the tape and heads are doing to it.
 - **The tape is a real surface**: flaws, scratches, creases, mold and Vaseline sit at places on it, so they come back in the same spot, sweep through the picture as the heads cross them, and differ between cassettes (**Another**).
 - **The heads have a history**: a shedding tape clogs an uncleaned deck as it plays; clogs knock loose; Vaseline rubs off onto the heads. Each head has its own dirt and wear, so alternate fields differ.
 - **Spacing hurts detail first**: anything holding the heads off the tape costs the picture far more than the color, so the picture breaks into noise while the color smears on.
+- **The tape moves for real**: a tracking servo follows the control track at the tape's bottom edge, so a chewed edge makes the tracking wander. Tension skews the top of the picture, a sticky tape jerks it, and a worn transport makes it wobble. Turning **Tracking** too far brings out noise bands, and **Search** sweeps the heads across the tracks.
+- **Neighboring tracks bleed in**: the heads read their neighbors at the wrong azimuth, which mostly cancels the picture but not the color. The deck's comb filter cancels the color, at the cost of half its vertical detail.
+- **SP, LP and EP**: slower speeds give narrower tracks, a noisier picture, more crosstalk and less tolerance for tracking errors.
+- **Copies**: **Generation** dubs the picture from tape to tape up to three times, recording and playing it back again each time.
 
 ### Digital video
 

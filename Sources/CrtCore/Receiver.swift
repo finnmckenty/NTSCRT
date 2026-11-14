@@ -228,6 +228,8 @@ public final class ReceiverSimulator {
     private var knobs: Knobs
     /// The deck's heads, as the tape plays (only while the VCR is on).
     private let deck = DeckSimulator(settings: GlitchSettings())
+    /// The tape's motion past the drum (only while the VCR is on).
+    private let transport: TransportSimulator
     /// Creases each recent field's track crosses.
     private var foldCache: [(field: Int64, folds: [TapeSurface.Fold])] = []
     /// Within-field line where a healthy, locked set's vertical oscillator
@@ -246,6 +248,7 @@ public final class ReceiverSimulator {
         thetaLog = Array(repeating: 0, count: logCap)
         gateLog = Array(repeating: 0, count: logCap)
         knobs = Knobs(GlitchSettings(), raster: raster)
+        transport = TransportSimulator(linesPerField: raster.totalLines, seed: seed, settings: GlitchSettings())
         nominalTrigger = Self.calibrate(raster: raster, seed: seed)
         reset()
     }
@@ -262,6 +265,7 @@ public final class ReceiverSimulator {
         triggers.removeAll()
         for i in thetaLog.indices { thetaLog[i] = 0; gateLog[i] = 0 }
         deck.reset(atField: 0)
+        transport.reset()
         foldCache = []
     }
 
@@ -281,12 +285,14 @@ public final class ReceiverSimulator {
         fileprivate let triggers: [Int64]
         fileprivate let thetaLog: [Double]
         fileprivate let deck: DeckSimulator.Snapshot
+        fileprivate let transport: TransportSimulator.Snapshot
     }
 
     public func snapshot() -> Snapshot {
         Snapshot(time: time, r: r, theta: theta, integ: integ, vPhase: vPhase, vInteg: vInteg,
                  vAbove: vAbove, gateErr: gateErr, gateLog: gateLog,
-                 triggers: triggers, thetaLog: thetaLog, deck: deck.snapshot())
+                 triggers: triggers, thetaLog: thetaLog, deck: deck.snapshot(),
+                 transport: transport.snapshot())
     }
 
     public func restore(_ s: Snapshot) {
@@ -294,6 +300,7 @@ public final class ReceiverSimulator {
         vAbove = s.vAbove; gateErr = s.gateErr; gateLog = s.gateLog
         triggers = s.triggers; thetaLog = s.thetaLog
         deck.restore(s.deck)
+        transport.restore(s.transport)
         foldCache = []
     }
 
@@ -301,9 +308,10 @@ public final class ReceiverSimulator {
     /// previous call.
     public func advance(to time: Double, settings: GlitchSettings) {
         let k = Knobs(settings, raster: raster)
-        if k.tape != knobs.tape { foldCache = [] }
+        if k.tape != knobs.tape || k.transport.format != knobs.transport.format { foldCache = [] }
         knobs = k
         deck.update(settings)
+        transport.update(settings)
         let target = (time + Self.warmup) * usPerSecond
         while Double(r) * H + theta <= target { step() }
     }
@@ -346,6 +354,9 @@ public final class ReceiverSimulator {
     private func step() {
         let k = knobs
         let tau = Double(r) * H + theta
+        // The tape moves on (a few lines ahead of the scan, so everything
+        // that asks where it was finds it already there).
+        if k.vcr { transport.advance(through: Int64((tau / H).rounded()) + 3) }
 
         // The signal line whose sync edge is nearest the TV's line start.
         var j = Int64((tau / H).rounded())
@@ -568,8 +579,12 @@ public final class ReceiverSimulator {
         return Int(posmod(f + (jf >= switchLine ? 1 : 0), 2))
     }
 
-    /// Time-base error of signal line j (µs): the deck's head switching,
-    /// flutter and search, and the tape's creases. Zero without the VCR.
+    /// Time-base error of signal line j (µs): when the deck delivers it
+    /// against when it should. The heads' placement on the drum (a jump at
+    /// each switch), the drum's speed wavering, the tape's motion (servo
+    /// error, stick-slip), its stretch against the recording (skew), its
+    /// creases — and, on a copy, the same from every deck it was dubbed
+    /// through, recorded into it. Zero without the VCR.
     func timebaseError(_ j: Int64) -> Double {
         let k = knobs
         guard k.vcr else { return 0 }
@@ -581,27 +596,50 @@ public final class ReceiverSimulator {
             let wobble = 1 + 0.15 * GlitchRandom.gauss(seed, 31, f)
             e += (head(j) == 0 ? 0.5 : -0.5) * k.headSwitch * wobble
         }
-        if k.jitter > 0 {
-            let lineScale = 1 / raster.scale
-            let slow = GlitchRandom.value(seed, 32, Double(j) * lineScale / 40)
-            let fast = GlitchRandom.gauss(seed, 33, j) * 0.35
-            e += k.jitter * (slow + fast)
-        }
-        if k.search > 1.05 {
-            let crossing = Int64(searchAt(j).crossings)
-            let f = floordiv(j, Int64(L))
-            e += 1.2 * GlitchRandom.gauss(seed, 36, f, crossing)
+        e += drumFlutter(j, amount: k.transport.flutter, seed: seed)
+        e += transport.line(j).tbe
+        let read = trackPlace(j, u: 0)
+        if k.transport.strain != 0 {
+            // Stretched further than when recorded, the tape's lines arrive
+            // later the further along the track; the next head starts on
+            // its own track's start, and the picture jumps back: skew.
+            e += k.transport.strain * read.along / TapeGeometry.lineLength * H
         }
         if k.tape.creases > 0 {
             // A fold shortens the track: everything after it arrives early.
-            let read = trackPlace(j, u: 0)
             for fold in folds(field: read.field) where fold.shortening > 0 {
                 let x = (read.along - fold.along) / max(0.05, fold.width)
                 let passed = x <= -1 ? 0 : x >= 1 ? 1 : 0.5 + 0.5 * sin(x * .pi / 2)
                 e -= fold.shortening / TapeGeometry.writingSpeed * passed
             }
         }
+        if k.generations > 0 {
+            for g in 1...k.generations { e += dubError(j, generation: g, along: read.along) }
+        }
         return e
+    }
+
+    /// The drum's speed wavering, as time-base error (µs): a once-a-turn
+    /// wobble (29.97 Hz), the servo hunting, the motor's cogging and bearing
+    /// noise.
+    private func drumFlutter(_ j: Int64, amount: Double, seed: UInt64) -> Double {
+        guard amount > 0 else { return 0 }
+        let t = fieldTime(j)
+        let turn = sin(2 * .pi * (NTSCTiming.fieldRate / 2) * t + 6.2832 * GlitchRandom.uniform(seed, 40, 0))
+        return amount * (0.8 * turn + 1.3 * GlitchRandom.value(seed, 41, t * 4)
+                         + 0.45 * GlitchRandom.value(seed, 42, t * 180)
+                         + 0.07 * GlitchRandom.gauss(seed, 43, j))
+    }
+
+    /// An earlier generation's deck, recorded into this copy: its heads'
+    /// switching jump, its drum's flutter and a little skew — a good deck,
+    /// but no two are alike.
+    private func dubError(_ j: Int64, generation g: Int, along: Double) -> Double {
+        let s = GlitchRandom.mix(seed ^ UInt64(g) &* 0x9E37_79B9)
+        let f = floordiv(j + Int64((3.5 * raster.scale).rounded()), Int64(L))
+        let jump = (0.4 + 0.8 * GlitchRandom.uniform(s, 1, 0)) * (posmod(f + Int64(g), 2) == 0 ? 0.5 : -0.5)
+        let strain = 3e-4 * 0.2 * (2 * GlitchRandom.uniform(s, 2, 0) - 1)
+        return jump + strain * along / TapeGeometry.lineLength * H + drumFlutter(j, amount: 0.12, seed: s)
     }
 
     /// Where line j's start is read: which field's track, how far along it.
@@ -621,62 +659,109 @@ public final class ReceiverSimulator {
 
     private func folds(field f: Int64) -> [TapeSurface.Fold] {
         if let c = foldCache.first(where: { $0.field == f }) { return c.folds }
-        let list = TapeSurface.folds(field: f, knobs.tape)
+        let list = TapeSurface.folds(field: f, knobs.tape, format: knobs.transport.format)
         foldCache.append((f, list))
         if foldCache.count > 8 { foldCache.removeFirst() }
         return list
     }
 
-    /// How much of its own track the head reads on line j (tracking error,
-    /// picture search): 1 on track, falling toward 0 between tracks.
-    private func onTrack(_ j: Int64) -> Double {
+    /// How far line j's head is off its own track's center, `along` mm up
+    /// track `g` (track pitches; ±1 is the neighboring track): the tape out
+    /// of place (servo, tracking control, stick-slip), the track bent
+    /// against the heads' path (recorded on another deck), stretch turning
+    /// it, and picture search sweeping across.
+    private func headDelta(_ j: Int64, along: Double, track g: Int64) -> Double {
         let k = knobs
-        var loss = 0.0
-        if k.search > 1.05 { loss = max(loss, searchAt(j).loss) }
-        if k.tracking > 0 { loss = max(loss, trackingAt(j)) }
-        return 1 - min(1, loss)
+        var d = transport.line(j).delta + trackShape(along)
+        d += k.transport.strain * along * cos(TapeGeometry.angle) / k.transport.format.advancePerField
+        if k.transport.searching {
+            let s = transport.search(field: g)
+            d += s.phase + s.rate * along / TapeGeometry.trackLength
+        }
+        return d
     }
 
-    /// What the playing head sees at line j, u µs in: the tape there, its
-    /// own condition, and the carrier amplitude that leaves at `mhz`.
-    private func carrier(_ j: Int64, u: Double, mhz: Double) -> Double {
+    /// The recorded track against the heads' path (pitches): no two decks'
+    /// tape guides are set alike, so a track bends and leans a few µm away
+    /// from where this deck's heads sweep — the same µm being more of a
+    /// narrow LP or EP track.
+    private func trackShape(_ along: Double) -> Double {
+        let ts = UInt64(knobs.tape.seed)
+        let lean = 4 * (2 * GlitchRandom.uniform(ts, 91, 0) - 1)
+        let bow = 2.5 * (2 * GlitchRandom.uniform(ts, 92, 0) - 1)
+        let x = 2 * along / TapeGeometry.trackLength - 1
+        return (lean * x + bow * (1 - x * x)) / (knobs.transport.format.trackPitch * 1000)
+    }
+
+    /// Spacing a slack tape adds where it doesn't hug the drum, at the two
+    /// ends of the heads' sweep (µm).
+    private func slackSpacing(_ along: Double) -> Double {
+        let slack = max(0, -knobs.transport.tension)
+        guard slack > 0 else { return 0 }
+        // The tape lifts most where it wraps onto the drum — the start of
+        // the sweep, the top of the picture — and a little where it leaves.
+        let L = TapeGeometry.trackLength
+        let end = Double(max(TapeSurface.smoothstep(22, 0, Float(along)),
+                             0.6 * TapeSurface.smoothstep(Float(L - 10), Float(L), Float(along))))
+        return 0.6 * slack * end
+    }
+
+    /// What the playing head sees at line j, u µs in, at `mhz`: the carrier
+    /// it reads off tracks of its own azimuth, and the crosstalk off the
+    /// others — through the tape there, the head's own condition, and how
+    /// it sits across the tracks.
+    private func carrier(_ j: Int64, u: Double, mhz: Double) -> (own: Double, crosstalk: Double) {
         let read = trackPlace(j, u: u)
         let h = head(j)
         let heads = deck.heads(forField: read.field)
         let dk = knobs.deck
-        let p = TapeSurface.at(TapeGeometry.point(field: read.field, along: read.along),
+        let fmt = knobs.transport.format
+        let delta = headDelta(j, along: read.along, track: read.field)
+        let p = TapeSurface.at(TapeGeometry.point(field: read.field, along: read.along,
+                                                  across: -delta * fmt.trackPitch, format: fmt),
                                knobs.tape, detail: false)
         let d = Double(p.lift + dk.wearSpacing(h) + dk.baselineDirt(h, seed: knobs.tape.seed)
-                       + heads[h].debris + max(p.film, heads[h].grease))
-        let a = Double(p.output * dk.efficiency(h)) * onTrack(j)
-        return a * VcrChannel.channelGain(mhz: mhz, spacing: d, gap: Double(dk.gap(h)))
+                       + heads[h].debris + max(p.film, heads[h].grease)) + slackSpacing(read.along)
+        let a = Double(p.output * dk.efficiency(h)) * VcrChannel.channelGain(mhz: mhz, spacing: d, gap: Double(dk.gap(h)))
+        let r = fmt.read(delta: delta)
+        let shares = mhz < 1 ? r.color : r.fm
+        var own = 0.0, cross = 0.0
+        for t in 0..<3 {
+            if (r.center - 1 + t) % 2 == 0 { own += shares[t] } else { cross += abs(shares[t]) }
+        }
+        return (a * own, a * cross)
     }
 
     /// Fraction of line j's sync lost to the tape: the FM carrier at the
-    /// sync tip against the deck's noise. Above the FM threshold (~11 dB)
-    /// demodulated sync stays clean; below it, it drowns in clicks.
+    /// sync tip against the deck's noise and the neighbors' crosstalk. Above
+    /// the FM threshold (~11 dB) demodulated sync stays clean; below it, it
+    /// drowns in clicks.
     func signalLoss(_ j: Int64) -> Double {
         guard knobs.vcr else { return 0 }
-        let a = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz)
-        let cnr = 20 * log10(max(1e-6, a)) + VcrChannel.carrierToNoiseDB
+        let c = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz)
+        let noise = pow(10, -VcrChannel.carrierToNoiseDB / 10) * pow(knobs.transport.format.noiseScale, 2)
+        let cnr = 10 * log10(max(1e-12, c.own * c.own) / (noise + 0.5 * c.crosstalk * c.crosstalk))
         let x = min(1, max(0, (11 - cnr) / 9))
         return x * x
     }
 
     /// The share of line j's color burst the deck passes on: its color
     /// killer cuts out when the color-under carrier is lost (about 30 dB
-    /// down), and keeps the burst up (ACC) until then.
+    /// down), and keeps the burst up (ACC) until then. Crosstalk from the
+    /// other azimuth's tracks the comb filter cancels.
     private func burstSurviving(_ j: Int64) -> Double {
         guard knobs.vcr else { return 1 }
-        let a = carrier(j, u: 6.5, mhz: VcrChannel.colorUnderMHz)
+        let a = carrier(j, u: 6.5, mhz: VcrChannel.colorUnderMHz).own
         let db = 20 * log10(max(1e-6, a))
         let t = min(1, max(0, (db + 34) / 8))
         return t * t * (3 - 2 * t)
     }
 
-    /// The displayed field's active lines as the VCR reads them.
+    /// The displayed field's active lines as the VCR reads them — and, on a
+    /// copy, as each deck before read the tapes it was dubbed from.
     private func vcrPlan(field f: Int64) -> VcrFieldPlan {
         let k = knobs
+        let fmt = k.transport.format
         var lines: [VcrLine] = []
         lines.reserveCapacity(raster.activeLines)
         for y in 0..<raster.activeLines {
@@ -684,49 +769,45 @@ public final class ReceiverSimulator {
             let read = trackPlace(j, u: 0)
             let h = head(j)
             let heads = deck.heads(forField: read.field)
+            let origin = TapePosition(x: TapeGeometry.trackOrigin(field: read.field, format: fmt), y: 0)
+            let d0 = headDelta(j, along: read.along, track: read.field)
+            let d1 = headDelta(j, along: read.along + 1, track: read.field)
+            lines.append(VcrLine(
+                originBase: origin.base, originOffset: origin.offset, along0: Float(read.along),
+                spacing: k.deck.wearSpacing(h) + k.deck.baselineDirt(h, seed: k.tape.seed) + heads[h].debris
+                    + Float(slackSpacing(read.along)),
+                grease: heads[h].grease,
+                gain: k.deck.efficiency(h),
+                head: UInt32(h),
+                delta0: Float(d0), deltaSlope: Float(d1 - d0)))
+        }
+        var plan = VcrFieldPlan(lines: lines, tape: k.tape, deck: k.deck, format: fmt)
+        if k.generations > 0 {
+            plan.earlier = (1...k.generations).map { dubPlan(field: f, generation: $0) }
+        }
+        return plan
+    }
+
+    /// Generation g of the copies this tape was dubbed through (1 is the
+    /// first recording): a good tape at SP in a good deck.
+    private func dubPlan(field f: Int64, generation g: Int) -> VcrFieldPlan {
+        let settings = GlitchSettings(values: [
+            "tape_seed": Double(knobs.settings["tape_seed"].rounded()) + Double(1000 * g),
+            "tape_wear": 0.1, "tape_dropouts": 0.05, "head_wear": 0.1])
+        let tape = TapeParams(settings), deck = DeckParams(settings)
+        var lines: [VcrLine] = []
+        lines.reserveCapacity(raster.activeLines)
+        for y in 0..<raster.activeLines {
+            let j = f * Int64(L) + Int64(raster.vbiLines + y)
+            let read = trackPlace(j, u: 0)
+            let h = Int(posmod(Int64(head(j) + g), 2))
             let origin = TapePosition(x: TapeGeometry.trackOrigin(field: read.field), y: 0)
             lines.append(VcrLine(
                 originBase: origin.base, originOffset: origin.offset, along0: Float(read.along),
-                spacing: k.deck.wearSpacing(h) + k.deck.baselineDirt(h, seed: k.tape.seed) + heads[h].debris,
-                grease: heads[h].grease,
-                gain: k.deck.efficiency(h) * Float(onTrack(j)),
-                head: UInt32(h)))
+                spacing: deck.wearSpacing(h), grease: 0, gain: deck.efficiency(h), head: UInt32(h),
+                delta0: 0, deltaSlope: 0))
         }
-        return VcrFieldPlan(lines: lines, tape: k.tape, deck: k.deck)
-    }
-
-    /// Mistracking: the head drifts off its track, and the stretch where it
-    /// straddles the next one reads noise. With good tracking that stretch
-    /// sits at the field's start (the vertical interval); the error moves it
-    /// up into the picture and widens it. It wanders a little as tape
-    /// tension varies.
-    private func trackingAt(_ j: Int64) -> Double {
-        let e = knobs.tracking
-        let pos = Double(posmod(j, Int64(L))) / Double(L)
-        let wander = 0.03 * GlitchRandom.value(seed, 37, fieldTime(j) * 1.7)
-        let center = 1 - 0.55 * e + wander         // climbs from the bottom edge
-        let width = 0.02 + 0.10 * e
-        var d = abs(pos - center)
-        d = min(d, 1 - d)
-        return min(1, max(0, 1 - d / width) * min(1, 0.4 + e))
-    }
-
-    /// Picture search: at n× the heads cross n−1 track boundaries per field.
-    /// Between tracks they read the guard band and the neighboring
-    /// azimuth's track — noise; on a track, picture. The bars drift as the
-    /// heads' phase against the tracks slides. Returns the loss at line j and
-    /// how many crossings precede it in the field (for the timing jumps).
-    private func searchAt(_ j: Int64) -> (loss: Double, crossings: Int) {
-        let bars = knobs.search - 1
-        let pos = Double(posmod(j, Int64(L))) / Double(L)
-        let drift = (fieldTime(j) * 0.23).truncatingRemainder(dividingBy: 1)
-        let x = pos * bars + drift
-        let phase = x - floor(x)
-        // Noise where the head straddles a boundary: a band ~30% of the
-        // spacing, soft-edged as the signal fades between tracks.
-        let d = min(phase, 1 - phase)
-        let loss = min(1, max(0, 1 - d / 0.15) * 1.2)
-        return (loss, Int(floor(x)))
+        return VcrFieldPlan(lines: lines, tape: tape, deck: deck, format: .sp)
     }
 
     private func noiseSigma(loss: Double) -> Double {
@@ -771,6 +852,7 @@ public final class ReceiverSimulator {
         thetaLog = Array(repeating: 0, count: logCap)
         gateLog = Array(repeating: 0, count: logCap)
         knobs = Knobs(GlitchSettings(), raster: raster)
+        transport = TransportSimulator(linesPerField: raster.totalLines, seed: seed, settings: GlitchSettings())
         nominalTrigger = 0
     }
 }
@@ -805,11 +887,10 @@ struct Knobs {
     let vcr: Bool
     let tape: TapeParams
     let deck: DeckParams
+    let transport: TransportParams
+    /// Copies the tape was dubbed through before this one (0: the original).
+    let generations: Int
     let headSwitch: Double
-    let jitter: Double
-    /// Picture search multiple (1 = normal play).
-    let search: Double
-    let tracking: Double
     let captions: Bool
     /// Burst-key loop rate per raster line (~6 NTSC lines).
     let gateAlpha: Double
@@ -860,10 +941,9 @@ struct Knobs {
         vcr = settings.vcr
         tape = TapeParams(settings)
         deck = DeckParams(settings)
+        transport = TransportParams(settings)
+        generations = min(3, max(0, Int(settings["tape_generation"].rounded())))
         headSwitch = settings["head_switch"]
-        jitter = settings["timebase_jitter"]
-        search = max(1, settings["search_speed"])
-        tracking = min(1, max(0, settings["tracking"]))
         captions = settings.flag("closed_captions")
         gateAlpha = 1 - exp(-1 / (6 * s))
         chromaAlpha = 1 - exp(-1 / (4 * s))

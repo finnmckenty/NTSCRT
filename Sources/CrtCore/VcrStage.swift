@@ -129,7 +129,7 @@ public enum VcrChannel {
 }
 
 /// One active line as the VCR reads it: where on the tape, by which head,
-/// in what state. Mirrors the GPU struct (8 × 4 bytes).
+/// in what state. Mirrors the GPU struct (10 × 4 bytes).
 public struct VcrLine: Equatable {
     /// The track's start on the tape (see `TapePosition`).
     public var originBase: Int32
@@ -140,10 +140,21 @@ public struct VcrLine: Equatable {
     public var spacing: Float
     /// Its greasy film, µm (the head rides on whichever film is thicker).
     public var grease: Float
-    /// Read efficiency × how much of its track the head is on.
+    /// The head's read efficiency.
     public var gain: Float
     public var head: UInt32
+    /// How far the head is off its own track's center at the line's start
+    /// (track pitches), and how that changes per mm along the track.
+    public var delta0: Float
+    public var deltaSlope: Float
     var pad: Float = 0
+
+    public init(originBase: Int32, originOffset: Float, along0: Float, spacing: Float, grease: Float,
+                gain: Float, head: UInt32, delta0: Float = 0, deltaSlope: Float = 0) {
+        self.originBase = originBase; self.originOffset = originOffset; self.along0 = along0
+        self.spacing = spacing; self.grease = grease; self.gain = gain; self.head = head
+        self.delta0 = delta0; self.deltaSlope = deltaSlope
+    }
 }
 
 /// What the VCR needs for one displayed field.
@@ -151,15 +162,30 @@ public struct VcrFieldPlan {
     public var lines: [VcrLine]
     public var tape: TapeParams
     public var deck: DeckParams
+    public var format: TapeFormat
+    /// On a copy, the generations it was dubbed through, oldest first: the
+    /// picture is recorded and played back through each in turn, then
+    /// recorded onto this tape.
+    public var earlier: [VcrFieldPlan] = []
+
+    public init(lines: [VcrLine], tape: TapeParams, deck: DeckParams, format: TapeFormat = .sp,
+                earlier: [VcrFieldPlan] = []) {
+        self.lines = lines; self.tape = tape; self.deck = deck; self.format = format; self.earlier = earlier
+    }
 }
 
 /// GPU half of the VCR: records each active line of the picture onto tape as
 /// VHS does — luminance as FM after pre-emphasis and clipping, chroma
-/// heterodyned down to 629 kHz under it — and plays it back: through the
-/// tape (its coating, flaws and film, sampled across the head's width), the
-/// head (spacing and gap losses, per head), noise, and the deck's
+/// heterodyned down to 629 kHz under it, its phase turned 90° a line (one
+/// way on one head's tracks, the other way on the other's) — and plays it
+/// back: through the tape (its coating, flaws and film, sampled across the
+/// head's width), the tracks the head is over (its own, and the neighbors'
+/// at the other azimuth, mostly cancelled for the FM but not the color),
+/// the head (spacing and gap losses, per head), noise, and the deck's
 /// electronics (FM demodulation, de-emphasis, dropout detection and
-/// compensation, color-under recovery with ACC, APC and a color killer).
+/// compensation, color-under recovery, the comb filter that cancels the
+/// neighbors' color, ACC, APC and a color killer). A copy is played back
+/// through the same chain once per generation.
 /// Every failure is how that chain responds to what the tape and heads do:
 /// sparkles are the FM threshold, streaks after bright edges are the lost
 /// upper sideband, smeared color over noise is spacing loss sparing the
@@ -168,15 +194,16 @@ public final class VcrStage {
     private let device: MTLDevice
     private let pipes: [String: MTLComputePipelineState]
     private var buffers: [String: MTLBuffer] = [:]
-    private var bankCache: (key: [Float], buffer: MTLBuffer)?
+    private var bankCache: [[Float]: MTLBuffer] = [:]
     private let fmTaps: MTLBuffer
+    private var passTextures: [MTLTexture] = []
 
     public init(device: MTLDevice) throws {
         self.device = device
         let library = try device.makeLibrary(source: Self.metalSource, options: nil)
         var p: [String: MTLComputePipelineState] = [:]
         for name in ["vcr_record", "vcr_tape", "vcr_magnet", "vcr_play", "vcr_fmband",
-                     "vcr_line", "vcr_acc", "vcr_out"] {
+                     "vcr_line", "vcr_comb", "vcr_acc", "vcr_out"] {
             guard let fn = library.makeFunction(name: name) else {
                 throw NSError(domain: "VcrStage", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "missing kernel \(name)"])
@@ -209,6 +236,8 @@ public final class VcrStage {
         var wear: Float, dropouts: Float, scratches: Float, creases: Float
         var edge: Float, mold: Float, vaseline: Float, remanence: Float
         var roughness: Float, pinhole: Float, flake: Float, burstAmp: Float
+        var pitchUM: Float, headUM: Float, trackUM: Float, rowsPerTrack: Float
+        var azF: Float, azC: Float, headW: Float, pad1: Float
     }
 
     private func buffer(_ name: String, bytes: Int) -> MTLBuffer? {
@@ -220,40 +249,77 @@ public final class VcrStage {
 
     private func bankBuffer(_ deck: DeckParams) -> MTLBuffer? {
         let key = [deck.gap(0), deck.gap(1)]
-        if let c = bankCache, c.key == key { return c.buffer }
+        if let b = bankCache[key] { return b }
         let data = VcrChannel.bank(gap: key[0]) + VcrChannel.bank(gap: key[1])
         guard let b = data.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count,
                                                                options: .storageModeShared) })
         else { return nil }
-        bankCache = (key, b)
+        if bankCache.count > 8 { bankCache.removeAll() }
+        bankCache[key] = b
         return b
     }
 
+    /// Intermediate pictures between dubbing generations.
+    private func passTexture(_ i: Int, like input: MTLTexture) -> MTLTexture? {
+        if i < passTextures.count, passTextures[i].width == input.width, passTextures[i].height == input.height {
+            return passTextures[i]
+        }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: input.width,
+                                                         height: input.height, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .private
+        while passTextures.count <= i {
+            guard let t = device.makeTexture(descriptor: d) else { return nil }
+            passTextures.append(t)
+        }
+        if passTextures[i].width != input.width || passTextures[i].height != input.height {
+            guard let t = device.makeTexture(descriptor: d) else { return nil }
+            passTextures[i] = t
+        }
+        return passTextures[i]
+    }
+
     /// Plays the picture `input` (one row per active line) from tape into
-    /// `output` (same size).
+    /// `output` (same size) — through every generation it was dubbed
+    /// through first, on a copy.
     public func encode(into cb: MTLCommandBuffer, input: MTLTexture, output: MTLTexture,
                        plan: VcrFieldPlan, settings: GlitchSettings, raster: ReceiverRaster,
                        fieldIndex: UInt32) {
+        var source = input
+        for (i, gen) in plan.earlier.enumerated() {
+            guard let tex = passTexture(i % 2, like: input) else { return }
+            encodePass(into: cb, input: source, output: tex, plan: gen, compensate: true,
+                       raster: raster, fieldIndex: fieldIndex)
+            source = tex
+        }
+        encodePass(into: cb, input: source, output: output, plan: plan,
+                   compensate: settings.flag("dropout_compensation"), raster: raster, fieldIndex: fieldIndex)
+    }
+
+    private func encodePass(into cb: MTLCommandBuffer, input: MTLTexture, output: MTLTexture,
+                            plan: VcrFieldPlan, compensate: Bool, raster: ReceiverRaster,
+                            fieldIndex: UInt32) {
         let rows = min(plan.lines.count, input.height)
         guard rows > 0 else { return }
         let n = VcrChannel.samplesPerLine, segs = VcrChannel.segments
         let t = plan.tape
+        let fmt = plan.format
         let em = VcrChannel.shelf(zeroMHz: VcrChannel.emphasisZeroMHz, poleMHz: VcrChannel.emphasisPoleMHz)
         let de = VcrChannel.shelf(zeroMHz: VcrChannel.emphasisPoleMHz, poleMHz: VcrChannel.emphasisZeroMHz)
         let lp = VcrChannel.lowPass(VcrChannel.lumaMHz)
         let cp = VcrChannel.lowPass(VcrChannel.chromaMHz)
         var u = Uniforms(
             rows: UInt32(rows), n: UInt32(n), segs: UInt32(segs), width: UInt32(input.width),
-            seed: t.seed, field: fieldIndex, doc: settings.flag("dropout_compensation") ? 1 : 0,
+            seed: t.seed, field: fieldIndex, doc: compensate ? 1 : 0,
             fmReach: UInt32(VcrChannel.fmReach),
             levels: UInt32(VcrChannel.levels), reach: UInt32(VcrChannel.reach),
             linesPerField: UInt32(raster.totalLines), pad0: 0,
             usPerPixel: Float(NTSCTiming.activeLength / Double(input.width)),
             dt: Float(1 / VcrChannel.sampleRate), lineUS: Float(NTSCTiming.line),
-            lineLength: Float(TapeGeometry.lineLength), pitch: Float(TapeGeometry.trackPitch),
+            lineLength: Float(TapeGeometry.lineLength), pitch: Float(fmt.trackPitch),
             cosA: Float(cos(TapeGeometry.angle)), sinA: Float(sin(TapeGeometry.angle)),
             trackStart: Float(TapeGeometry.trackStart),
-            noise: VcrChannel.noise, chromaLevel: VcrChannel.chromaLevel,
+            noise: VcrChannel.noise * Float(fmt.noiseScale), chromaLevel: VcrChannel.chromaLevel,
             cuStep: Float(2 * Double.pi * VcrChannel.colorUnderMHz / VcrChannel.sampleRate),
             maxSpacing: VcrChannel.maxSpacing,
             emB0: em[0], emB1: em[1], emA1: em[2], whiteClip: VcrChannel.whiteClipIRE,
@@ -264,7 +330,12 @@ public final class VcrStage {
             wear: t.wear, dropouts: t.dropouts, scratches: t.scratches, creases: t.creases,
             edge: t.edge, mold: t.mold, vaseline: t.vaseline, remanence: t.remanence,
             roughness: t.roughness, pinhole: t.pinholeChance, flake: t.flakeChance,
-            burstAmp: Float(NTSCTiming.burstAmplitude))
+            burstAmp: Float(NTSCTiming.burstAmplitude),
+            pitchUM: Float(fmt.trackPitch * 1000), headUM: Float(fmt.headWidth * 1000),
+            trackUM: Float(fmt.trackWidth * 1000), rowsPerTrack: Float(fmt.trackOffsetLines * raster.scale),
+            azF: Float(Double.pi * TapeFormat.azimuthTan * TapeFormat.fmMHz / TapeGeometry.writingSpeed),
+            azC: Float(Double.pi * TapeFormat.azimuthTan * VcrChannel.colorUnderMHz / TapeGeometry.writingSpeed),
+            headW: Float(fmt.headWidth), pad1: 0)
 
         let samples = rows * n
         let lineBytes = rows * MemoryLayout<VcrLine>.stride
@@ -272,7 +343,9 @@ public final class VcrStage {
                   device.makeBuffer(bytes: $0.baseAddress!, length: lineBytes, options: .storageModeShared) }),
               let bank = bankBuffer(plan.deck),
               let rf = buffer("rf", bytes: samples * 4),
-              let seg = buffer("seg", bytes: rows * segs * 8),
+              let iq = buffer("iq", bytes: samples * 8),
+              let combed = buffer("combed", bytes: samples * 8),
+              let seg = buffer("seg", bytes: rows * segs * 32),
               let mag = buffer("mag", bytes: samples * 8),
               let pb = buffer("pb", bytes: samples * 4),
               let z = buffer("z", bytes: samples * 8),
@@ -311,6 +384,8 @@ public final class VcrStage {
         enc.setBuffer(color, offset: 0, index: 10)
         enc.setBuffer(bank, offset: 0, index: 11)
         enc.setBuffer(fmTaps, offset: 0, index: 12)
+        enc.setBuffer(iq, offset: 0, index: 13)
+        enc.setBuffer(combed, offset: 0, index: 14)
         enc.setTexture(input, index: 0)
         enc.setTexture(output, index: 1)
 
@@ -320,6 +395,7 @@ public final class VcrStage {
         grid("vcr_play", n, rows)
         grid("vcr_fmband", n, rows)
         perRow("vcr_line")
+        perRow("vcr_comb")
         let acc = pipes["vcr_acc"]!
         enc.setComputePipelineState(acc)
         enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
@@ -355,7 +431,8 @@ public final class VcrStage {
                          wear: t.wear, dropouts: t.dropouts, scratches: t.scratches, creases: t.creases,
                          edge: t.edge, mold: t.mold, vaseline: t.vaseline, remanence: t.remanence,
                          roughness: t.roughness, pinhole: t.pinholeChance, flake: t.flakeChance,
-                         burstAmp: 0)
+                         burstAmp: 0, pitchUM: 0, headUM: 0, trackUM: 0, rowsPerTrack: 0,
+                         azF: 0, azC: 0, headW: 0, pad1: 0)
         var raw: [Float] = []
         for p in points { raw += [Float(bitPattern: UInt32(bitPattern: p.base)), p.offset, p.y, 0] }
         let inBuf = device.makeBuffer(bytes: raw, length: raw.count * 4, options: .storageModeShared)!
@@ -394,11 +471,23 @@ public final class VcrStage {
         float wear, dropouts, scratches, creases;
         float edge, mold, vaseline, remanence;
         float roughness, pinhole, flake, burstAmp;
+        float pitchUM, headUM, trackUM, rowsPerTrack;
+        float azF, azC, headW, pad1;
     };
     struct VcrLine {
         int originBase; float originOffset; float along0; float spacing;
-        float grease; float gain; uint head; float pad;
+        float grease; float gain; uint head; float delta0; float deltaSlope; float pad;
     };
+
+    // (cos, sin) of an angle a turned on by q quarter turns.
+    inline float2 quarter(float c, float s, int q) {
+        int r = q & 3;
+        return r == 0 ? float2(c, s) : r == 1 ? float2(-s, c) : r == 2 ? float2(-c, -s) : float2(s, -c);
+    }
+    // The color-under's phase on line `row` of a track recorded by a head
+    // turning it `sense` (±1) quarter turns a line.
+    inline int turns(int sense, int row) { return sense * row; }
+    inline float sincf(float x) { return fabs(x) < 1e-4 ? 1.0 : sin(x) / x; }
 
     constant float SYNC_END = 4.7;
     constant float BURST_S = 5.3;
@@ -619,6 +708,7 @@ public final class VcrStage {
     // ---- 1: record each line (one thread per row, along the line) ----
     kernel void vcr_record(constant VcrU& U [[buffer(0)]],
                            device float* rf [[buffer(2)]],
+                           device float2* iq [[buffer(13)]],
                            texture2d<float, access::read> src [[texture(0)]],
                            uint y [[thread_position_in_grid]])
     {
@@ -651,25 +741,31 @@ public final class VcrStage {
             float mhz = 3.4 + (ec + 40.0) / 140.0;
             phase += 6.2831853 * mhz * U.dt;
             phase -= 6.2831853 * floor(phase / 6.2831853);
-            float a = U.cuStep * float(i);
-            float under = U.chromaLevel * (c.x * cos(a) - c.y * sin(a));
-            rf[y * U.n + i] = cos(phase) + under;
+            // The FM, and the chroma to go under it — mixed onto the tape as
+            // each track's head writes it (vcr_magnet).
+            rf[y * U.n + i] = cos(phase);
+            iq[y * U.n + i] = c;
         }
     }
 
     // ---- 2: the tape under each segment, across the head's width ----
+    // And which tracks the head is over: its center track (nearest the
+    // head) and the two beside it, each one's share of a full SP track's
+    // output — at the other azimuth, after azimuth loss — for the FM and
+    // for the color-under.
     kernel void vcr_tape(constant VcrU& U [[buffer(0)]],
                          device const VcrLine* lines [[buffer(1)]],
-                         device float2* seg [[buffer(3)]],
+                         device float4* seg [[buffer(3)]],
                          uint2 gid [[thread_position_in_grid]])
     {
         if (gid.x >= U.segs || gid.y >= U.rows) return;
         VcrLine L = lines[gid.y];
         float u = (float(gid.x) + 0.5) * 16.0 * U.dt;
         float along = L.along0 + u / U.lineUS * U.lineLength;
+        float delta = L.delta0 + L.deltaSlope * (along - L.along0);
         float lift = 0.0, film = 0.0, out = 0.0;
         for (int k = 0; k < 4; k++) {
-            float across = (float(k) - 1.5) * 0.25 * U.pitch;
+            float across = -delta * U.pitch + (float(k) - 1.5) * 0.25 * U.headW;
             TPos p;
             p.base = L.originBase;
             p.off = L.originOffset + (along * U.cosA - across * U.sinA) * 10.0;
@@ -679,14 +775,34 @@ public final class VcrStage {
         }
         lift *= 0.25; film *= 0.25; out *= 0.25;
         float d = lift + L.spacing + max(film, L.grease);
-        seg[gid.y * U.segs + gid.x] = float2(d, out * L.gain);
+        float g = out * L.gain;
+        int kc = int(floor(delta + 0.5));
+        float lo = delta * U.pitchUM - 0.5 * U.headUM, hi = delta * U.pitchUM + 0.5 * U.headUM;
+        float gF[3], gC[3];
+        for (int t = 0; t < 3; t++) {
+            int k = kc - 1 + t;
+            float c = float(k) * U.pitchUM;
+            float o = max(0.0, min(hi, c + 0.5 * U.trackUM) - max(lo, c - 0.5 * U.trackUM));
+            float share = o / 58.0 * g;
+            bool same = (k & 1) == 0;
+            gF[t] = same ? share : share * sincf(U.azF * o);
+            gC[t] = same ? share : share * sincf(U.azC * o);
+        }
+        uint i = (gid.y * U.segs + gid.x) * 2u;
+        seg[i] = float4(d, float(kc), gF[0], gC[0]);
+        seg[i + 1u] = float4(gF[1], gC[1], gF[2], gC[2]);
     }
 
     // ---- 3: what is magnetized under the head, and how far away ----
+    // Each track's FM, and its chroma turned the way its own head turned
+    // it, mixed in the head's shares of them. A neighbor's lines sit 1.5
+    // lines along (SP) from the head's own: that line's signal, aligned.
     kernel void vcr_magnet(constant VcrU& U [[buffer(0)]],
+                           device const VcrLine* lines [[buffer(1)]],
                            device const float* rf [[buffer(2)]],
-                           device const float2* seg [[buffer(3)]],
+                           device const float4* seg [[buffer(3)]],
                            device float2* mag [[buffer(4)]],
+                           device const float2* iq [[buffer(13)]],
                            uint2 gid [[thread_position_in_grid]])
     {
         if (gid.x >= U.n || gid.y >= U.rows) return;
@@ -694,10 +810,32 @@ public final class VcrStage {
         int i0 = clamp(int(floor(sf)), 0, int(U.segs) - 1);
         int i1 = min(i0 + 1, int(U.segs) - 1);
         float t = clamp(sf - float(i0), 0.0, 1.0);
-        float2 a = seg[gid.y * U.segs + i0], b = seg[gid.y * U.segs + i1];
-        float2 v = mix(a, b, t);
-        uint k = gid.y * U.n + gid.x;
-        mag[k] = float2(rf[k] * v.y, v.x);
+        uint b0 = (gid.y * U.segs + uint(i0)) * 2u, b1 = (gid.y * U.segs + uint(i1)) * 2u;
+        float4 a0 = seg[b0], c0 = seg[b0 + 1u], a1 = seg[b1], c1 = seg[b1 + 1u];
+        // Across a change of center track the shares belong to different
+        // tracks: take the nearer segment's.
+        if (a0.y != a1.y) t = t < 0.5 ? 0.0 : 1.0;
+        float4 a = mix(a0, a1, t), c = mix(c0, c1, t);
+        int kc = int(t < 0.5 ? a0.y : a1.y);
+        float gF[3] = { a.z, c.x, c.z };
+        float gC[3] = { a.w, c.y, c.w };
+        int own = lines[gid.y].head == 0u ? 1 : -1;
+        float ang = U.cuStep * float(gid.x);
+        float ca = cos(ang), sa = sin(ang);
+        float acc = 0.0;
+        for (int k3 = 0; k3 < 3; k3++) {
+            if (gF[k3] == 0.0 && gC[k3] == 0.0) continue;
+            int k = kc - 1 + k3;
+            int m = int(floor(float(kc - k) * U.rowsPerTrack + 0.5));
+            int row = clamp(int(gid.y) + m, 0, int(U.rows) - 1);
+            uint s = uint(row) * U.n + gid.x;
+            int sense = (k & 1) == 0 ? own : -own;
+            float2 cs = quarter(ca, sa, turns(sense, row));
+            float2 c2 = iq[s];
+            float under = U.chromaLevel * (c2.x * cs.x - c2.y * cs.y);
+            acc += gF[k3] * rf[s] + gC[k3] * under;
+        }
+        mag[gid.y * U.n + gid.x] = float2(acc, a.x);
     }
 
     // ---- 4: the head reads it: spacing and gap losses, plus noise ----
@@ -762,6 +900,7 @@ public final class VcrStage {
     // dropout detector; color-under brought back to baseband (zero-phase
     // low-pass) and its burst measured.
     kernel void vcr_line(constant VcrU& U [[buffer(0)]],
+                         device const VcrLine* lines [[buffer(1)]],
                          device const float* pb [[buffer(5)]],
                          device const float2* z [[buffer(6)]],
                          device float* luma [[buffer(7)]],
@@ -812,10 +951,14 @@ public final class VcrStage {
             // Flagged samples are stored as v + 10000 (decoded in vcr_out).
             luma[row + i] = chroma[row + i].x > 0.5 ? v + 10000.0 : v;
         }
-        // Color-under: mix down, zero-phase low-pass twice (8th order).
+        // Color-under: mix down, turning this line's phase back the way the
+        // head's own track turned it, then zero-phase low-pass twice (8th
+        // order).
+        int q = turns(lines[y].head == 0u ? 1 : -1, int(y));
         for (uint i = 0; i < N; i++) {
             float a = U.cuStep * float(i);
-            chroma[row + i] = pb[row + i] * float2(cos(a), -sin(a));
+            float2 cs = quarter(cos(a), sin(a), q);
+            chroma[row + i] = pb[row + i] * float2(cs.x, -cs.y);
         }
         for (int pass = 0; pass < 2; pass++) {
             float4 sr = float4(0.0), si = float4(0.0);
@@ -833,12 +976,29 @@ public final class VcrStage {
         }
         // Mixing halves the amplitude; recover chroma units.
         float k = 2.0 / U.chromaLevel;
+        for (uint i = 0; i < N; i++) chroma[row + i] *= k;
+    }
+
+    // ---- 6b: the comb filter ----
+    // Each line's color averaged with the line before through a one-line
+    // delay. The head's own color comes back the same on both; color picked
+    // up off a neighboring track (turned the other way when it was
+    // recorded) comes back reversed on alternate lines, and cancels. It
+    // costs half the color's vertical detail, as on every VHS deck.
+    kernel void vcr_comb(constant VcrU& U [[buffer(0)]],
+                         device const float2* chroma [[buffer(8)]],
+                         device float2* burst [[buffer(9)]],
+                         device float2* combed [[buffer(14)]],
+                         uint y [[thread_position_in_grid]])
+    {
+        if (y >= U.rows) return;
+        uint row = y * U.n, prev = (y > 0u ? y - 1u : y) * U.n;
         float2 b = float2(0.0);
         int cnt = 0;
-        for (uint i = 0; i < N; i++) {
+        for (uint i = 0; i < U.n; i++) {
+            float2 c = 0.5 * (chroma[row + i] + chroma[prev + i]);
+            combed[row + i] = c;
             float u = (float(i) + 0.5) * U.dt;
-            float2 c = chroma[row + i] * k;
-            chroma[row + i] = c;
             if (u >= BURST_S + 0.3 && u < BURST_E - 0.3) { b += c; cnt++; }
         }
         burst[y] = b / float(max(cnt, 1));
@@ -874,7 +1034,7 @@ public final class VcrStage {
     // ---- 8: back to pixels, with dropout compensation ----
     kernel void vcr_out(constant VcrU& U [[buffer(0)]],
                         device const float* luma [[buffer(7)]],
-                        device const float2* chroma [[buffer(8)]],
+                        device const float2* chroma [[buffer(14)]],
                         device const float4* color [[buffer(10)]],
                         texture2d<float, access::write> dst [[texture(1)]],
                         uint2 gid [[thread_position_in_grid]])

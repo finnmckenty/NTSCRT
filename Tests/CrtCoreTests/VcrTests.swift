@@ -142,6 +142,12 @@ final class VcrTests: XCTestCase {
         XCTAssertEqual(GlitchSettings.migrated(["tracking": 0.5])["vcr"], 1)
         let current: [String: Double] = ["vcr": 0, "tape_mold": 1]
         XCTAssertEqual(GlitchSettings.migrated(current), current, "already current")
+        // 0.24's Tracking (an amount of error) and Time-base jitter (µs).
+        let v24 = GlitchSettings.migrated(["vcr": 1, "tracking": 0.5, "timebase_jitter": 1])
+        XCTAssertNil(v24["tracking"]); XCTAssertNil(v24["timebase_jitter"])
+        XCTAssertEqual(v24["tracking_offset"]!, 0.65, accuracy: 1e-9)
+        XCTAssertEqual(v24["transport_flutter"]!, 0.4, accuracy: 1e-9)
+        XCTAssertEqual(GlitchSettings.migrated(["vcr": 1, "tracking": 0])["tracking_offset"], 0)
     }
 }
 
@@ -225,6 +231,30 @@ final class VcrPlaybackTests: XCTestCase {
         let held = patch(try render(input, ["vcr": 1, "head_dirt": 1, "head_mismatch": 0]))
         XCTAssertGreaterThan(held.noise, 0.06, "luma at the FM threshold")
         XCTAssertGreaterThan(held.chroma, clean.chroma * 0.6, "color still there")
+    }
+
+    func testEPIsNoisierButTheCombFilterKeepsItsColor() throws {
+        // EP's 19 µm tracks give a third of SP's signal, and its 26 µm heads
+        // overlap both neighbors, whose color (the other azimuth, turned the
+        // other way) only the comb filter cancels.
+        let input = texture { _, _ in (0.7, 0.45, 0.3) }
+        let src = patch(try render(input, ["vcr": 0]))
+        let sp = patch(try render(input, ["vcr": 1]))
+        let ep = patch(try render(input, ["vcr": 1, "tape_speed": 2]))
+        XCTAssertGreaterThan(ep.noise, sp.noise * 1.3, "EP is noisier")
+        XCTAssertEqual(ep.chroma, src.chroma, accuracy: 0.05, "the neighbors' color cancels")
+        XCTAssertEqual(ep.luma, src.luma, accuracy: 0.03)
+    }
+
+    func testEveryCopyIsRecordedAndPlayedAgain() throws {
+        let input = texture { _, _ in (0.5, 0.5, 0.5) }
+        let original = patch(try render(input, ["vcr": 1])).noise
+        let copy = patch(try render(input, ["vcr": 1, "tape_generation": 1])).noise
+        let third = patch(try render(input, ["vcr": 1, "tape_generation": 3])).noise
+        // (The earlier generation's noise is filtered again by the next
+        // playback, so it adds less than its own.)
+        XCTAssertGreaterThan(copy, original * 1.07, "a copy adds a generation's noise")
+        XCTAssertGreaterThan(third, copy * 1.1, "and so does each copy after it")
     }
 
     func testFieldsPlayedByTheDirtierHeadAreNoisier() throws {

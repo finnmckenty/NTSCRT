@@ -2076,9 +2076,10 @@ final class AppState {
                     let shader = (k["shader"] as? [String: Double])?.mapValues { Float($0) } ?? [:]
                     let ntsc = k["ntsc"] as? [String: Any] ?? [:]
                     var glitch = k["glitch"] as? [String: Double] ?? [:]
-                    if let v = vcrFromLegacy, !glitch.isEmpty {
+                    if !glitch.isEmpty {
+                        let hadVCR = glitch[GlitchParam.vcrID] != nil
                         glitch = GlitchSettings.migrated(glitch)
-                        glitch[GlitchParam.vcrID] = v
+                        if !hadVCR { glitch[GlitchParam.vcrID] = vcrFromLegacy ?? glitchValues[GlitchParam.vcrID] }
                     }
                     let digital = DigitalSettings.migrated(k["digital"] as? [String: Double] ?? [:],
                                                            lookVersion: lookVersion)

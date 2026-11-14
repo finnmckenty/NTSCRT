@@ -258,7 +258,9 @@ final class ReceiverSimulatorTests: XCTestCase {
         let values: [String: Double] = ["vertical_hold": 0.5, "horizontal_hold": 0.7,
                                         "signal_strength": 0.3, "vcr": 1, "tape_creases": 0.8,
                                         "tape_mold": 0.6, "head_dirt": 0.4, "dirt_buildup": 0.8,
-                                        "head_switch": 3, "timebase_jitter": 1, "tape_dropouts": 0.5]
+                                        "head_switch": 3, "transport_flutter": 0.5, "tape_dropouts": 0.5,
+                                        "tape_sticky": 0.6, "back_tension": 0.4, "tracking_offset": 0.3,
+                                        "tape_edge_damage": 0.7, "tape_generation": 2, "tape_speed": 2]
         let s = GlitchSettings(values: values)
         // Frame by frame...
         let a = ReceiverSimulator(raster: raster)
@@ -279,40 +281,106 @@ final class ReceiverSimulatorTests: XCTestCase {
     }
 }
 
-extension ReceiverSimulatorTests {
-    func testSearchShowsOneFewerNoiseBarThanTheSpeed() {
-        let raster = ReceiverRaster(width: 320, activeLines: 240)
-        for speed in [3.0, 5.0] {
-            let sim = ReceiverSimulator(raster: raster)
-            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "search_speed": speed]))
-            let noisy = sim.plan().vcr!.lines.map { $0.gain < 0.5 }
-            // Count noise bands down the screen (a band split by the top or
-            // bottom edge counts once at each edge).
-            var bands = 0
-            for y in 1..<noisy.count where noisy[y] && !noisy[y - 1] { bands += 1 }
-            if noisy[0] { bands += 1 }
-            XCTAssertEqual(Double(bands), speed - 1, accuracy: 1, "\(speed)× search")
-        }
-        let normal = ReceiverSimulator(raster: raster)
-        normal.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "search_speed": 1]))
-        XCTAssertTrue(normal.plan().vcr!.lines.allSatisfy { $0.gain == 1 }, "1× is normal play")
-    }
+/// How much of its own tracks' FM a planned line's head reads at its start
+/// (1: centered on its own track, in SP).
+private func ownShare(_ line: VcrLine, _ format: TapeFormat = .sp) -> Double {
+    let r = format.read(delta: Double(line.delta0))
+    return (0..<3).filter { (r.center - 1 + $0) % 2 == 0 }.map { r.fm[$0] }.reduce(0, +)
 }
 
 extension ReceiverSimulatorTests {
-    func testTrackingBandClimbsIntoThePictureAsTheErrorGrows() {
+    func testSearchCrossesTracksIntoNoiseBars() {
+        // At n× the tape runs n× as fast, so a head's sweep crosses n−1
+        // tracks: picture on its own azimuth's, noise on the others' —
+        // (n−1)/2 noise bars a field.
         let raster = ReceiverRaster(width: 320, activeLines: 240)
-        func noisyRows(_ e: Double) -> [Int] {
+        for speed in [3.0, 5.0, 9.0] {
             let sim = ReceiverSimulator(raster: raster)
-            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "tracking": e]))
-            return sim.plan().vcr!.lines.enumerated().filter { $0.element.gain < 0.5 }.map { $0.offset }
+            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "search_speed": speed]))
+            let noisy = sim.plan().vcr!.lines.map { ownShare($0) < 0.3 }
+            var bands = 0
+            for y in 1..<noisy.count where noisy[y] && !noisy[y - 1] { bands += 1 }
+            if noisy[0] { bands += 1 }
+            XCTAssertEqual(Double(bands), (speed - 1) / 2, accuracy: 1, "\(speed)× search")
+            XCTAssertTrue(noisy.contains(false), "picture between the bars at \(speed)×")
         }
-        XCTAssertTrue(noisyRows(0).isEmpty, "tracked: nothing visible")
-        let mild = noisyRows(0.3), bad = noisyRows(0.9)
-        XCTAssertFalse(bad.isEmpty, "bad tracking shows a noise band")
-        let mildCenter = mild.isEmpty ? Double(raster.activeLines) : Double(mild.reduce(0, +)) / Double(mild.count)
-        let badCenter = Double(bad.reduce(0, +)) / Double(bad.count)
-        XCTAssertLessThan(badCenter, mildCenter, "it climbs as the error grows")
-        XCTAssertGreaterThan(bad.count, mild.count, "and widens")
+        let normal = ReceiverSimulator(raster: raster)
+        normal.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "search_speed": 1]))
+        XCTAssertTrue(normal.plan().vcr!.lines.allSatisfy { ownShare($0) > 0.85 }, "1× is normal play")
+    }
+
+    func testTrackingNoiseBreaksOutWhereTheTrackStraysFurthest() {
+        // The servo puts the tape where the tracking control says. The
+        // picture holds while the heads are mostly on their own tracks; past
+        // that the noise starts where the track bends furthest from the
+        // heads' path, and spreads.
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        func shares(_ offset: Double) -> [Double] {
+            let sim = ReceiverSimulator(raster: raster)
+            sim.advance(to: 3.0, settings: GlitchSettings(values: ["vcr": 1, "tracking_offset": offset]))
+            return sim.plan().vcr!.lines.map { ownShare($0) }
+        }
+        // (The knob: 0.3 is half a track, 0.6 is 0.84.)
+        XCTAssertTrue(shares(0).allSatisfy { $0 > 0.8 }, "tracked")
+        XCTAssertTrue(shares(0.3).allSatisfy { $0 > 0.3 }, "half a track off still reads")
+        let near = shares(0.6)
+        let spread = near.max()! - near.min()!
+        XCTAssertGreaterThan(spread, 0.03, "the track bends against the heads' path")
+        // The worst end is at the top or bottom of the picture.
+        let worst = near.firstIndex(of: near.min()!)!
+        XCTAssertTrue(worst < 20 || worst >= near.count - 20, "worst at an end (\(worst))")
+        XCTAssertTrue(shares(1).allSatisfy { $0 < 0.2 }, "a whole track off: the wrong azimuth")
+    }
+
+    func testTensionSkewsThePictureAtTheHeadSwitch() {
+        // Tighter than the recorder: each line arrives a little later down
+        // the field, and the next head starts on time — a jump of the
+        // strain × the field (3e-4 × 16.7 ms = 5 µs at full tension).
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        let sim = ReceiverSimulator(raster: raster)
+        sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "back_tension": 1]))
+        let L = Int64(raster.totalLines)
+        let f = Int64((1.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
+        let sw = f * L + L - Int64((3.5 * raster.scale).rounded())
+        let jump = sim.timebaseError(sw) - sim.timebaseError(sw - 1)
+        XCTAssertEqual(jump, -5.0, accuracy: 0.6, "skew at the switch")
+        XCTAssertLessThan(abs(sim.timebaseError(sw - 2) - sim.timebaseError(sw - 1)), 0.1, "smooth between")
+    }
+
+    func testStickyTapeJerksTheTiming() {
+        // Stick-slip: a sawtooth of lag and release — line-to-line timing
+        // jumps of a fraction of a µs that a smooth tape never has.
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        func jumps(_ sticky: Double) -> Double {
+            let sim = ReceiverSimulator(raster: raster)
+            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "tape_sticky": sticky]))
+            // The last two fields played (time counts from the warm-up).
+            let field = Int64((1.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
+            let j0 = field * Int64(raster.totalLines)
+            return (1..<raster.totalLines).map { i in
+                abs(sim.timebaseError(j0 + Int64(i)) - sim.timebaseError(j0 + Int64(i) - 1))
+            }.max()!
+        }
+        XCTAssertLessThan(jumps(0), 0.01, "smooth tape")
+        XCTAssertGreaterThan(jumps(0.8), 0.4, "sticky tape slips")
+    }
+
+    func testAChewedEdgeLosesTheControlTrack() {
+        // The control head misses pulses on a crinkled bottom edge (and
+        // fakes some), so the servo loses its hold and the tracking wanders.
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        func wander(_ edge: Double) -> Double {
+            let sim = ReceiverSimulator(raster: raster)
+            var worst = 0.0
+            for i in 0..<40 {
+                sim.advance(to: 1 + Double(i) * 0.1,
+                            settings: GlitchSettings(values: ["vcr": 1, "tape_edge_damage": edge]))
+                let d = sim.plan().vcr!.lines.map { Double($0.delta0) }
+                worst = max(worst, abs(d.reduce(0, +) / Double(d.count)))
+            }
+            return worst
+        }
+        XCTAssertLessThan(wander(0), 0.15, "a good edge holds the tracking")
+        XCTAssertGreaterThan(wander(1), 0.3, "a chewed one doesn't")
     }
 }

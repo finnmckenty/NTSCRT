@@ -37,16 +37,91 @@ public enum TapeGeometry {
     }
 
     /// The track of field `field` starts this far along the tape (mm).
-    public static func trackOrigin(field: Int64) -> Double {
-        Double(field) * advancePerField
+    public static func trackOrigin(field: Int64, format: TapeFormat = .sp) -> Double {
+        Double(field) * format.advancePerField
     }
 
     /// The tape point `along` mm up the track of field `field`, offset
     /// `across` mm sideways (toward the top edge).
-    public static func point(field: Int64, along: Double, across: Double = 0) -> TapePosition {
-        let x = trackOrigin(field: field) + along * cos(angle) - across * sin(angle)
+    public static func point(field: Int64, along: Double, across: Double = 0,
+                             format: TapeFormat = .sp) -> TapePosition {
+        let x = trackOrigin(field: field, format: format) + along * cos(angle) - across * sin(angle)
         let y = trackStart + along * sin(angle) + across * cos(angle)
         return TapePosition(x: x, y: y)
+    }
+}
+
+/// The speed a tape was recorded at. The drum turns at the same rate in all
+/// three, so the tracks are as long and the signal on them the same; the
+/// tape just moves on less between fields, so the tracks are narrower and
+/// lie closer — a deck records LP and EP with narrower heads, which in EP
+/// are wider than the track and overwrite part of the one before.
+public struct TapeFormat: Equatable, Sendable {
+    /// 0 SP (standard play), 1 LP (long play, ½ speed), 2 EP (extended, ⅓).
+    public let speed: Int
+    public init(speed: Int) { self.speed = min(2, max(0, speed)) }
+
+    public init(_ s: GlitchSettings) { self.init(speed: Int(s["tape_speed"].rounded())) }
+
+    public static let sp = TapeFormat(speed: 0)
+    public static let names = ["SP", "LP", "EP"]
+
+    /// Tape transport per field, mm.
+    public var advancePerField: Double { TapeGeometry.advancePerField / Double(speed + 1) }
+    /// Neighboring tracks' spacing across the tape, mm (58, 29, 19.3 µm).
+    public var trackPitch: Double { advancePerField * sin(TapeGeometry.angle) }
+    /// The video heads' width, mm: full-width SP heads, and the narrow
+    /// heads of a four-head deck for LP and EP.
+    public var headWidth: Double { speed == 0 ? 0.058 : 0.026 }
+    /// What's left of each recorded track once the next has been written
+    /// over its edge, mm.
+    public var trackWidth: Double { min(headWidth, trackPitch) }
+    /// How far a track's lines sit along from the neighboring track's, in
+    /// lines (1.5 SP, 0.75 LP, 0.5 EP): the tracks are shifted one advance
+    /// along the tape.
+    public var trackOffsetLines: Double { advancePerField * cos(TapeGeometry.angle) / TapeGeometry.lineLength }
+    /// The head and tape noise a head of this width picks up, against an SP
+    /// head's (tape noise grows with the width read).
+    public var noiseScale: Double { (headWidth / 0.058).squareRoot() }
+
+    /// What a head `delta` track pitches off its own track's center reads
+    /// of the three tracks nearest it (`center` − 1, `center`, `center` + 1):
+    /// each one's share of a full SP track's output for the FM carrier and
+    /// for the color-under. Tracks an odd number from its own were written
+    /// by the other head, with the other azimuth (±6°): across the width
+    /// the head overlaps, the recorded pattern is tilted 12° to its gap, so
+    /// short wavelengths cancel (azimuth loss) — the FM almost entirely, the
+    /// long color-under far less.
+    public func read(delta: Double) -> (center: Int, fm: SIMD3<Double>, color: SIMD3<Double>) {
+        let p = trackPitch * 1000, w = headWidth * 1000, tw = trackWidth * 1000
+        let center = Int((delta).rounded())
+        let lo = delta * p - w / 2, hi = delta * p + w / 2
+        var fm = SIMD3<Double>(repeating: 0), color = SIMD3<Double>(repeating: 0)
+        for t in 0..<3 {
+            let k = center - 1 + t
+            let o = max(0, min(hi, Double(k) * p + tw / 2) - max(lo, Double(k) * p - tw / 2))
+            let share = o / 58
+            if k % 2 == 0 {
+                fm[t] = share; color[t] = share
+            } else {
+                fm[t] = share * Self.azimuthLoss(width: o, mhz: Self.fmMHz)
+                color[t] = share * Self.azimuthLoss(width: o, mhz: VcrChannel.colorUnderMHz)
+            }
+        }
+        return (center, fm, color)
+    }
+
+    /// The FM carrier's frequency for azimuth loss (mid-band).
+    static let fmMHz = 4.0
+    /// tan of the 12° between the two heads' azimuths.
+    static let azimuthTan = tan(12 * Double.pi / 180)
+
+    /// Amplitude (signed) a head reads of a track recorded at the other
+    /// azimuth across `width` µm, at `mhz`.
+    public static func azimuthLoss(width: Double, mhz: Double) -> Double {
+        let lambda = TapeGeometry.writingSpeed / mhz
+        let x = Double.pi * width * azimuthTan / lambda
+        return x < 1e-6 ? 1 : sin(x) / x
     }
 }
 
@@ -80,6 +155,8 @@ public struct TapeParams: Equatable {
     public var edge: Float
     public var mold: Float
     public var vaseline: Float
+    /// Binder breaking down (sticky shed): the tape drags and sheds.
+    public var sticky: Float
 
     public init(_ s: GlitchSettings) {
         seed = UInt32(truncatingIfNeeded: Int(s["tape_seed"].rounded()) &* 7919 &+ 17)
@@ -91,6 +168,7 @@ public struct TapeParams: Equatable {
         edge = u("tape_edge_damage")
         mold = u("tape_mold")
         vaseline = u("tape_vaseline")
+        sticky = u("tape_sticky")
     }
 
     /// Remanent magnetization relative to a new tape: wear loses up to 10 dB.
@@ -181,7 +259,9 @@ public enum TapeSurface {
         var lift = t.roughness
         var out = t.remanence
         var film: Float = 0
-        var shed: Float = 0.02 * t.wear
+        // Worn coating sheds a little everywhere; a hydrolyzed binder sheds
+        // gummy oxide all along the tape.
+        var shed: Float = 0.02 * t.wear + 0.9 * t.sticky * t.sticky
 
         // Coating thickness varies a little from place to place.
         do {
@@ -373,10 +453,10 @@ public enum TapeSurface {
     /// The creases track `field` crosses, in order along it. The fold
     /// shortens the tape there, so everything the head reads after a crease
     /// arrives early — a timing jump for the TV to chase.
-    public static func folds(field: Int64, _ t: TapeParams) -> [Fold] {
+    public static func folds(field: Int64, _ t: TapeParams, format: TapeFormat = .sp) -> [Fold] {
         guard t.creases > 0 else { return [] }
         let s = t.seed
-        let start = TapeGeometry.trackOrigin(field: field)
+        let start = TapeGeometry.trackOrigin(field: field, format: format)
         let lo = Int32((start * 10 / 400).rounded(.down)) - 1
         let hi = Int32(((start + TapeGeometry.trackLength) * 10 / 400).rounded(.down)) + 1
         let c = cos(TapeGeometry.angle), sn = sin(TapeGeometry.angle)

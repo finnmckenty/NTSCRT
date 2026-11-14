@@ -21,6 +21,8 @@ public struct GlitchParam: Identifiable, Sendable {
         /// A whole number that picks one of endlessly many variations (which
         /// cassette); shown as a "new one" button, never interpolated.
         case seed
+        /// One of a few named settings, stored as its index.
+        case choice([String])
     }
 
     public let id: String
@@ -29,10 +31,24 @@ public struct GlitchParam: Identifiable, Sendable {
     public let kind: Kind
     public let defaultValue: Double
     public let help: String
+    /// A heading the control sits under within its group's panel section
+    /// (shown where it changes).
+    public let section: String?
+
+    public init(id: String, label: String, group: Group, kind: Kind, defaultValue: Double,
+                help: String, section: String? = nil) {
+        self.id = id; self.label = label; self.group = group; self.kind = kind
+        self.defaultValue = defaultValue; self.help = help; self.section = section
+    }
 
     public var isToggle: Bool { kind == .toggle }
     /// Stepped, not blended, between keyframes.
-    public var isDiscrete: Bool { kind == .toggle || kind == .seed }
+    public var isDiscrete: Bool {
+        switch kind {
+        case .toggle, .seed, .choice: return true
+        case .slider: return false
+        }
+    }
 
     /// The VCR panel's on/off switch, kept with the knobs so it is saved,
     /// keyframed and exported along with them.
@@ -92,6 +108,13 @@ public struct GlitchParam: Identifiable, Sendable {
             id: "tape_seed", label: "Cassette", group: .tape, kind: .seed, defaultValue: 1,
             help: "Which cassette: another one has the same condition but its own flaws in its own places."),
         GlitchParam(
+            id: "tape_speed", label: "Recorded at", group: .tape, kind: .choice(TapeFormat.names), defaultValue: 0,
+            help: "The tape speed it was recorded at. LP and EP move the tape on half or a third as far between fields, so the tracks are narrower and closer: a weaker, noisier signal, color crosstalk from the neighboring tracks that the deck's comb filter has to cancel, flaws that last for more fields, and far less forgiveness of tracking errors."),
+        GlitchParam(
+            id: "tape_generation", label: "Generation", group: .tape,
+            kind: .choice(["Original", "Copy", "Copy of a copy", "Third copy"]), defaultValue: 0,
+            help: "How many times the picture was dubbed from tape to tape before this one. Each copy is really recorded and played back again, on a good tape in a good deck: noise, softness, smeared color and the earlier decks' timing errors pile up."),
+        GlitchParam(
             id: "tape_wear", label: "Wear", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "Age and plays. The magnetic coating weakens and roughens, so the heads read a weaker signal over a slightly larger gap — noisier pictures, then sparkles where the signal sinks to the FM threshold — and pinholes appear in the oxide."),
@@ -116,47 +139,69 @@ public struct GlitchParam: Identifiable, Sendable {
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "Fungus colonies, thickest near the edges where it grows in the wound pack. Each one lifts the tape off the heads and eats into the coating, and it sheds — what it sheds collects on the heads."),
         GlitchParam(
+            id: "tape_sticky", label: "Sticky shed", group: .tape,
+            kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "The binder holding the oxide on has soaked up moisture and gone gummy. The tape drags on the guides and moves in tiny stick-and-slip jerks — the picture's edges go jagged and it may squeal — the drag pulls the tracking off, and gummy oxide clogs the heads."),
+        GlitchParam(
             id: "tape_vaseline", label: "Vaseline", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
             help: "A film smeared on the tape, holding the heads off it. Spacing costs the short-wavelength picture signal far more than the long-wavelength color, so the picture breaks into noise while color survives and smears. It rubs off onto the heads, too."),
 
-        // The deck.
+        // The deck: its heads...
         GlitchParam(
             id: "head_wear", label: "Head wear", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Worn heads stand less proud of the drum, so they press into the tape less, and their gaps erode wider. Both lose the top of the signal first: black streaks trail bright edges, then the picture gets noisy."),
+            help: "Worn heads stand less proud of the drum, so they press into the tape less, and their gaps erode wider. Both lose the top of the signal first: black streaks trail bright edges, then the picture gets noisy.",
+            section: "Heads"),
         GlitchParam(
             id: "head_dirt", label: "Head dirt", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Debris already on the heads when play starts. It holds them off the tape; each head carries its own, so one can be clogged while the other is clear — every other field fails."),
+            help: "Debris already on the heads when play starts. It holds them off the tape; each head carries its own, so one can be clogged while the other is clear — every other field fails.",
+            section: "Heads"),
         GlitchParam(
             id: "dirt_buildup", label: "Dirt buildup", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "How readily the heads collect what the tape sheds — low for a deck that's had a head-cleaning tape, high for one that never has. Shedding tapes (mold, wear, flaws) clog it as they play; clogs sometimes knock loose."),
+            help: "How readily the heads collect what the tape sheds — low for a deck that's had a head-cleaning tape, high for one that never has. Shedding tapes (mold, wear, flaws, sticky shed) clog it as they play; clogs sometimes knock loose.",
+            section: "Heads"),
         GlitchParam(
             id: "head_mismatch", label: "Head mismatch", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "How unevenly the two heads have aged: one reads a weaker signal than the other, and since they take turns, field by field, the picture flickers between them."),
+            help: "How unevenly the two heads have aged: one reads a weaker signal than the other, and since they take turns, field by field, the picture flickers between them.",
+            section: "Heads"),
         GlitchParam(
             id: "head_switch", label: "Head switching", group: .deck,
             kind: .slider(min: 0, max: 8, percent: false, unit: "µs"), defaultValue: 0,
-            help: "How far the two heads are from exactly opposite on the drum, as a timing jump when the deck changes heads just before vertical sync. The bottom lines jump sideways and the TV's AFC chases the jump into the top of the next field — the bend called flagging."),
+            help: "How far the two heads are from exactly opposite on the drum, as a timing jump when the deck changes heads just before vertical sync. The bottom lines jump sideways and the TV's AFC chases the jump into the top of the next field — the bend called flagging.",
+            section: "Heads"),
+
+        // ...its transport...
         GlitchParam(
-            id: "dropout_compensation", label: "Dropout compensation", group: .deck,
-            kind: .toggle, defaultValue: 1,
-            help: "The deck watches the signal coming off the heads and, where it drops out, repeats the picture from the line before. On, dropouts become short smears of the line above; off, they show as the demodulator's streaks."),
+            id: "back_tension", label: "Back tension", group: .deck,
+            kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "How hard the supply reel holds the tape back, against the deck that recorded it. Tighter stretches the tape, so each field's lines arrive a little later than the last, and the heads switch with a jump: skew, the top of the picture hooking sideways. Too slack and the tape stops hugging the heads at the ends of their sweep, so the top and bottom of the picture get noisy.",
+            section: "Transport"),
         GlitchParam(
-            id: "timebase_jitter", label: "Time-base jitter", group: .deck,
-            kind: .slider(min: 0, max: 3, percent: false, unit: "µs"), defaultValue: 0,
-            help: "Tape stretch and transport flutter. The TV's AFC follows the slow wander; the fast jitter shows as ragged lines."),
-        GlitchParam(
-            id: "tracking", label: "Tracking error", group: .deck,
+            id: "transport_flutter", label: "Flutter", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "The heads drifting off the recorded tracks. Well tracked, the stretch where they cross to the next track rests in the vertical interval, out of sight; as the error grows the heads read less and less of their track there, and the noise band climbs into the picture."),
+            help: "A tired transport: a worn drum motor and bearings, stretched belts, a lumpy pinch roller. The drum's speed wavers, so the picture's timing wanders — wavy verticals on a TV with slow AFC, ragged lines on a fast one — and the tape's speed wavers, so the tracking breathes.",
+            section: "Transport"),
+
+        // ...and the controls on its front.
+        GlitchParam(
+            id: "tracking_offset", label: "Tracking", group: .deck,
+            kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
+            help: "The tracking control: it shifts when the tracking servo expects the control-track pulses, moving the tape along so the heads ride beside their tracks instead of on them (±100% is a whole track). The picture holds up until a head is mostly on its neighbor's track, recorded at the other azimuth — then noise bands break out wherever the tracks bend furthest from the heads' path. Tapes recorded on another deck need a little.",
+            section: "Controls"),
         GlitchParam(
             id: "search_speed", label: "Search", group: .deck,
             kind: .slider(min: 1, max: 9, percent: false, unit: "×"), defaultValue: 1,
-            help: "Fast-forward picture search. The spinning heads cross from track to track, reading noise between them: one fewer noise bar than the speed, drifting as the tracking phase slides, with the picture jumping at each crossing."),
+            help: "Fast-forward picture search: the tape runs n× as fast, so each head's sweep crosses n−1 tracks. On the tracks of its own azimuth it reads picture; on the others, noise, with the color gone where the comb filter cancels it. The bars stand still at odd speeds and drift between them.",
+            section: "Controls"),
+        GlitchParam(
+            id: "dropout_compensation", label: "Dropout compensation", group: .deck,
+            kind: .toggle, defaultValue: 1,
+            help: "The deck watches the signal coming off the heads and, where it drops out, repeats the picture from the line before. On, dropouts become short smears of the line above; off, they show as the demodulator's streaks.",
+            section: "Controls"),
     ]
 
     public static let byID: [String: GlitchParam] =
@@ -183,9 +228,11 @@ public struct VcrCondition: Identifiable, Sendable {
 
     /// The knobs a picker sets: a tape's condition, or a deck's heads (not
     /// the transport knobs, nor dropout compensation).
-    public static let tapeKeys = ["tape_wear", "tape_dropouts", "tape_scratches", "tape_creases",
-                                  "tape_edge_damage", "tape_mold", "tape_vaseline"]
-    public static let deckKeys = ["head_wear", "head_dirt", "dirt_buildup", "head_mismatch"]
+    public static let tapeKeys = ["tape_speed", "tape_generation", "tape_wear", "tape_dropouts",
+                                  "tape_scratches", "tape_creases", "tape_edge_damage", "tape_mold",
+                                  "tape_sticky", "tape_vaseline"]
+    public static let deckKeys = ["head_wear", "head_dirt", "dirt_buildup", "head_mismatch",
+                                  "head_switch", "back_tension", "transport_flutter"]
 
     public static let tapes: [VcrCondition] = [
         VcrCondition(name: "Brand new", help: "Fresh out of the shrink-wrap.",
@@ -203,6 +250,11 @@ public struct VcrCondition: Identifiable, Sendable {
         VcrCondition(name: "Chewed", help: "Eaten by a deck and wound back by hand.",
                      values: ["tape_wear": 0.4, "tape_dropouts": 0.3, "tape_scratches": 0.4,
                               "tape_creases": 0.7, "tape_edge_damage": 0.7]),
+        VcrCondition(name: "Sticky", help: "Its binder is breaking down: it squeals, stutters and sheds.",
+                     values: ["tape_wear": 0.45, "tape_dropouts": 0.2, "tape_sticky": 0.75]),
+        VcrCondition(name: "Bootleg", help: "A copy of a copy, squeezed onto a tape at EP.",
+                     values: ["tape_speed": 2, "tape_generation": 2, "tape_wear": 0.35,
+                              "tape_dropouts": 0.15, "tape_scratches": 0.1]),
     ]
 
     public static let decks: [VcrCondition] = [
@@ -213,10 +265,14 @@ public struct VcrCondition: Identifiable, Sendable {
                               "head_mismatch": 0.3]),
         VcrCondition(name: "Worn heads", help: "Thousands of hours on the drum.",
                      values: ["head_wear": 0.7, "head_dirt": 0.05, "dirt_buildup": 0.2,
-                              "head_mismatch": 0.35]),
+                              "head_mismatch": 0.35, "head_switch": 1.5, "transport_flutter": 0.2]),
+        VcrCondition(name: "Worn transport", help: "Stretched belts and a slack back-tension band.",
+                     values: ["head_wear": 0.2, "head_switch": 2, "back_tension": -0.5,
+                              "transport_flutter": 0.6]),
         VcrCondition(name: "Neglected", help: "Worn, filthy, and still in use.",
                      values: ["head_wear": 0.5, "head_dirt": 0.55, "dirt_buildup": 0.8,
-                              "head_mismatch": 0.5]),
+                              "head_mismatch": 0.5, "head_switch": 2.5, "back_tension": -0.35,
+                              "transport_flutter": 0.45]),
     ]
 
     /// The condition whose values `values` match exactly, if any.
@@ -284,34 +340,47 @@ public struct GlitchSettings: Equatable, Sendable {
 
     public var timing: [String: Double] { values.filter { Self.timingIDs.contains($0.key) } }
 
-    /// Values saved before the VCR panel existed, in today's terms. The old
-    /// Tape knobs were effects drawn on the signal; their nearest physical
-    /// causes are a flawed or creased tape and dirty heads. A look that used
-    /// any of them gets the VCR switched on (it was playing a tape). Values
-    /// that already have the VCR key are returned unchanged.
+    /// Values saved by older versions, in today's terms.
+    ///
+    /// Before the VCR panel, the Tape knobs were effects drawn on the
+    /// signal; their nearest physical causes are a flawed or creased tape
+    /// and dirty heads, and a look that used any of them gets the VCR
+    /// switched on (it was playing a tape). Values that already have the
+    /// VCR key keep its setting.
+    ///
+    /// Before the transport was simulated (0.24), Tracking was an amount of
+    /// error that drew a noise band, and Time-base jitter was in µs: they
+    /// become a tracking offset that puts the heads near the edge of their
+    /// tracks, and Flutter.
     public static func migrated(_ values: [String: Double]) -> [String: Double] {
-        guard values[GlitchParam.vcrID] == nil else { return values }
         var v = values
-        let legacy = ["head_clog", "crinkle", "dropouts"]
-        let kept = ["head_switch", "timebase_jitter", "tracking", "search_speed"]
-        var usedTape = false
-        if let c = v.removeValue(forKey: "head_clog"), c > 0 {
-            v["head_dirt"] = min(1, c * 0.9)
-            usedTape = true
+        if v[GlitchParam.vcrID] == nil {
+            let kept = ["head_switch", "timebase_jitter", "tracking", "search_speed"]
+            var usedTape = false
+            if let c = v.removeValue(forKey: "head_clog"), c > 0 {
+                v["head_dirt"] = min(1, c * 0.9)
+                usedTape = true
+            }
+            if let c = v.removeValue(forKey: "crinkle"), c > 0 {
+                v["tape_creases"] = min(1, c)
+                usedTape = true
+            }
+            if let d = v.removeValue(forKey: "dropouts"), d > 0 {
+                v["tape_dropouts"] = min(1, d)
+                usedTape = true
+            }
+            for k in kept {
+                let healthy: Double = k == "search_speed" ? 1 : 0
+                if let x = v[k], abs(x - healthy) > 1e-9 { usedTape = true }
+            }
+            v[GlitchParam.vcrID] = usedTape ? 1 : 0
         }
-        if let c = v.removeValue(forKey: "crinkle"), c > 0 {
-            v["tape_creases"] = min(1, c)
-            usedTape = true
+        if let e = v.removeValue(forKey: "tracking") {
+            v["tracking_offset"] = e > 1e-9 ? min(1, 0.45 + 0.4 * e) : 0
         }
-        if let d = v.removeValue(forKey: "dropouts"), d > 0 {
-            v["tape_dropouts"] = min(1, d)
-            usedTape = true
+        if let j = v.removeValue(forKey: "timebase_jitter") {
+            v["transport_flutter"] = min(1, max(0, j / 2.5))
         }
-        for k in legacy { v.removeValue(forKey: k) }
-        for k in kept {
-            if let x = v[k], let p = GlitchParam.byID[k], abs(x - p.defaultValue) > 1e-9 { usedTape = true }
-        }
-        v[GlitchParam.vcrID] = usedTape ? 1 : 0
         return v
     }
 }

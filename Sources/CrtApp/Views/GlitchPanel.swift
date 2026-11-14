@@ -75,6 +75,21 @@ struct GlitchControl: View {
             .padding(.leading, 12)
             .help(param.help)
 
+        case .choice(let names):
+            HStack {
+                Text(param.label).font(.callout).lineLimit(1)
+                Spacer(minLength: 8)
+                let picker = Picker("", selection: Binding(get: { Int(value.wrappedValue.rounded()) },
+                                                           set: { value.wrappedValue = Double($0) })) {
+                    ForEach(names.indices, id: \.self) { i in Text(names[i]).tag(i) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                if names.count <= 3 { picker.pickerStyle(.segmented) } else { picker.pickerStyle(.menu) }
+            }
+            .padding(.leading, 12)
+            .help(param.help)
+
         case .slider(let min, let max, let percent, let unit):
             VStack(alignment: .leading, spacing: 2) {
                 HStack {

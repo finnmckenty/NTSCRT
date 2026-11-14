@@ -64,6 +64,7 @@ public struct HeadState: Equatable {
 public final class DeckSimulator {
     public private(set) var tape: TapeParams
     public private(set) var deck: DeckParams
+    public private(set) var format: TapeFormat
     /// The last field stepped through (the heads' state is after it).
     public private(set) var field: Int64 = 0
     private(set) var heads: [HeadState] = []
@@ -74,11 +75,13 @@ public final class DeckSimulator {
     public init(settings: GlitchSettings) {
         tape = TapeParams(settings)
         deck = DeckParams(settings)
+        format = TapeFormat(settings)
     }
 
     public func update(_ settings: GlitchSettings) {
         tape = TapeParams(settings)
         deck = DeckParams(settings)
+        format = TapeFormat(settings)
     }
 
     /// Back to the start of play, at `field`.
@@ -129,7 +132,7 @@ public final class DeckSimulator {
         let n = 12
         for i in 0..<n {
             let along = (Double(i) + 0.5) / Double(n) * TapeGeometry.trackLength
-            let p = TapeSurface.at(TapeGeometry.point(field: f, along: along), tape, detail: false)
+            let p = TapeSurface.at(TapeGeometry.point(field: f, along: along, format: format), tape, detail: false)
             shed += p.shed
             film += p.film
         }

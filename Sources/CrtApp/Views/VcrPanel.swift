@@ -72,7 +72,13 @@ private struct VcrSection: View {
                 .help("Start from a typical \(title.lowercased()) condition, then adjust it below")
             }
             if expanded {
-                ForEach(GlitchParam.controls(in: group)) { param in
+                let params = GlitchParam.controls(in: group)
+                ForEach(Array(params.enumerated()), id: \.element.id) { i, param in
+                    if let section = param.section, i == 0 || params[i - 1].section != section {
+                        Text(section)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .padding(.leading, 12).padding(.top, i == 0 ? 0 : 4)
+                    }
                     GlitchControl(param: param)
                 }
             }
