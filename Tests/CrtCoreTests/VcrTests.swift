@@ -234,14 +234,16 @@ final class VcrPlaybackTests: XCTestCase {
     }
 
     func testEPIsNoisierButTheCombFilterKeepsItsColor() throws {
-        // EP's 19 µm tracks give a third of SP's signal, and its 26 µm heads
-        // overlap both neighbors, whose color (the other azimuth, turned the
-        // other way) only the comb filter cancels.
+        // EP's 19 µm tracks give a third of SP's signal (its narrow heads
+        // make most of it back: a little noisier, not a lot), and its 26 µm
+        // heads overlap both neighbors, whose color (the other azimuth,
+        // turned the other way) only the comb filter cancels.
         let input = texture { _, _ in (0.7, 0.45, 0.3) }
         let src = patch(try render(input, ["vcr": 0]))
         let sp = patch(try render(input, ["vcr": 1]))
         let ep = patch(try render(input, ["vcr": 1, "tape_speed": 2]))
-        XCTAssertGreaterThan(ep.noise, sp.noise * 1.3, "EP is noisier")
+        XCTAssertGreaterThan(ep.noise, sp.noise * 1.08, "EP is noisier")
+        XCTAssertLessThan(ep.noise, sp.noise * 1.6, "but not much")
         XCTAssertEqual(ep.chroma, src.chroma, accuracy: 0.05, "the neighbors' color cancels")
         XCTAssertEqual(ep.luma, src.luma, accuracy: 0.03)
     }

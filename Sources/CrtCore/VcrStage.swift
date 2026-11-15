@@ -1005,7 +1005,9 @@ public final class VcrStage {
             luma[row + i] = (mhz - 3.4) * 140.0 - 40.0;
             env += 0.12 * (length(c) - env);
             ref = env > ref ? ref + 0.05 * (env - ref) : ref * 0.99885;
-            float on = max(0.02, U.docOn * ref), off = max(0.03, U.docOff * ref);
+            // Floors against the head's own noise (a narrow LP or EP head's
+            // carrier and noise are both lower): below them it is noise.
+            float on = max(0.9 * U.noise, U.docOn * ref), off = max(1.36 * U.noise, U.docOff * ref);
             if (flagged) {
                 if (env > off) { hold -= 1; if (hold <= 0) flagged = false; }
                 else hold = 14;

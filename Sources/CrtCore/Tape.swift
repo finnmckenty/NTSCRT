@@ -80,9 +80,15 @@ public struct TapeFormat: Equatable, Sendable {
     /// lines (1.5 SP, 0.75 LP, 0.5 EP): the tracks are shifted one advance
     /// along the tape.
     public var trackOffsetLines: Double { advancePerField * cos(TapeGeometry.angle) / TapeGeometry.lineLength }
-    /// The head and tape noise a head of this width picks up, against an SP
-    /// head's (tape noise grows with the width read).
-    public var noiseScale: Double { (headWidth / 0.058).squareRoot() }
+    /// The noise a head picks up, against an SP head's. A narrow track gives
+    /// a third of SP's carrier in EP (−9.5 dB), but decks make most of it
+    /// back with their narrow heads (finer gaps, more efficient cores, a
+    /// preamp matched to them): spec sheets give much the same video S/N in
+    /// every speed (Sony SVT-S480ES: VHS 44 dB in SP and EP). Set to leave
+    /// LP about 1.5 dB and EP 2.5 dB of carrier-to-noise behind SP; the
+    /// narrow track still makes them less forgiving of the heads straying
+    /// off it.
+    public var noiseScale: Double { [1, 0.53, 0.445][speed] }
 
     /// What a head `delta` track pitches off its own track's center reads
     /// of the three tracks nearest it (`center` − 1, `center`, `center` + 1):

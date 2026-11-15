@@ -710,7 +710,7 @@ public final class ReceiverSimulator {
     /// it reads off tracks of its own azimuth, and the crosstalk off the
     /// others — through the tape there, the head's own condition, and how
     /// it sits across the tracks.
-    private func carrier(_ j: Int64, u: Double, mhz: Double) -> (own: Double, crosstalk: Double) {
+    func carrier(_ j: Int64, u: Double, mhz: Double) -> (own: Double, crosstalk: Double) {
         let read = trackPlace(j, u: u)
         let h = head(j)
         let heads = deck.heads(forField: read.field)
@@ -733,14 +733,21 @@ public final class ReceiverSimulator {
     }
 
     /// Fraction of line j's sync lost to the tape: the FM carrier at the
-    /// sync tip against the deck's noise and the neighbors' crosstalk. Above
-    /// the FM threshold (~11 dB) demodulated sync stays clean; below it, it
-    /// drowns in clicks.
+    /// sync tip against the deck's noise. Above the FM threshold (~11 dB)
+    /// demodulated sync stays clean; below it, it drowns in clicks.
+    ///
+    /// The neighbors' crosstalk is another FM carrier, not noise: the
+    /// limiter and demodulator ride over a weaker one (the capture effect),
+    /// and it only brings the threshold closer where it beats against the
+    /// carrier, its envelope dipping to own − crosstalk. (Counted as noise
+    /// power, the few µm of neighbor an EP head always reads held a clean EP
+    /// tape 4 dB above threshold, against SP's 23.)
     func signalLoss(_ j: Int64) -> Double {
         guard knobs.vcr else { return 0 }
         let c = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz)
         let noise = pow(10, -VcrChannel.carrierToNoiseDB / 10) * pow(knobs.transport.format.noiseScale, 2)
-        let cnr = 10 * log10(max(1e-12, c.own * c.own) / (noise + 0.5 * c.crosstalk * c.crosstalk))
+        let envelope = max(0, c.own - c.crosstalk)
+        let cnr = 10 * log10(max(1e-12, envelope * envelope) / noise)
         let x = min(1, max(0, (11 - cnr) / 9))
         return x * x
     }

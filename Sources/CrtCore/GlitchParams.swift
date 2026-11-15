@@ -109,7 +109,7 @@ public struct GlitchParam: Identifiable, Sendable {
             help: "Which cassette: another one in the same condition, with its own flaws in their own places, its tracks bent a little differently and its sticky patches elsewhere. On a clean tape there's nothing to move, so it looks the same."),
         GlitchParam(
             id: "tape_speed", label: "Recorded at", group: .tape, kind: .choice(TapeFormat.names), defaultValue: 0,
-            help: "The tape speed it was recorded at. LP and EP move the tape on half or a third as far between fields, so the tracks are narrower and closer: a weaker, noisier signal, color crosstalk from the neighboring tracks that the deck's comb filter has to cancel, flaws that last for more fields, and far less forgiveness of tracking errors."),
+            help: "The tape speed it was recorded at. LP and EP move the tape on half or a third as far between fields, so the tracks are narrower and closer: a slightly noisier picture, color crosstalk from the neighboring tracks that the deck's comb filter has to cancel, flaws that take longer to pass (a damaged stretch of tape plays for three times as long in EP), and less forgiveness of tracking errors and skew."),
         GlitchParam(
             id: "tape_generation", label: "Generation", group: .tape,
             kind: .choice(["Original", "Copy", "Copy of a copy", "Third copy"]), defaultValue: 0,

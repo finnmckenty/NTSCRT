@@ -420,4 +420,28 @@ extension ReceiverSimulatorTests {
         }
         XCTAssertLessThan(worst, 60 * 0.15 * 30 + 2, "bounded by the capstan's range")
     }
+
+    func testEPHoldsItsSyncNearlyAsWellAsSP() {
+        // A worn, creased tape in a dirty deck: EP's narrow track leaves it a little
+        // less margin, not a cliff. (The neighbors' carriers once counted as
+        // noise, holding even a clean EP tape just above the FM threshold.)
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        let L = raster.totalLines
+        func loss(_ speed: Int) -> Double {
+            let sim = ReceiverSimulator(raster: raster)
+            sim.advance(to: 3, settings: GlitchSettings(values: [
+                "vcr": 1, "tape_speed": Double(speed), "tape_wear": 0.63, "tape_dropouts": 0.72,
+                "tape_scratches": 1, "tape_creases": 0.95, "tape_mold": 0.13, "tape_vaseline": 0.14,
+                "back_tension": 0, "head_dirt": 0.4, "head_wear": 0.15, "head_mismatch": 0.3,
+                "dirt_buildup": 0.18, "head_switch": 7.9]))
+            let f0 = Int64((3 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 31
+            var sum = 0.0
+            for f in f0..<(f0 + 30) { for i in 0..<L { sum += sim.signalLoss(f * Int64(L) + Int64(i)) } }
+            return sum / Double(30 * L)
+        }
+        let sp = loss(0), ep = loss(2)
+        XCTAssertLessThan(sp, 0.08)
+        XCTAssertGreaterThan(ep, sp, "EP is less forgiving")
+        XCTAssertLessThan(ep, 0.2, "but not a cliff (was 0.33)")
+    }
 }
