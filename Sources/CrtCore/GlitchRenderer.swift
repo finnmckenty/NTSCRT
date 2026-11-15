@@ -77,8 +77,16 @@ public final class GlitchRenderer {
         let standingStill = abs(time - sim.time) <= 2 * lineTime
         let jumped = time < sim.time - 2 * lineTime || time - sim.time > Self.maxStep
         let retuned = standingStill && lastSettings != nil && lastSettings?.timing != settings.timing
+        let past = standingStill ? nil : history()
         if fresh || jumped || retuned {
-            resimulate(sim, to: time, settings: settings, history: history())
+            resimulate(sim, to: time, settings: settings, history: past ?? history())
+        } else if let past, checkpointKey == .history(past.id, past.frameDuration) {
+            // A short step forward through keyframed knobs (playback, or a
+            // scrub of under a second): run it frame by frame through the
+            // keyframes, exactly as the re-run from zero would, so a moment
+            // looks the same however the playhead got there.
+            sim.resimulate(to: time, frameDuration: past.frameDuration,
+                           settingsAt: past.settingsAt, resumeFrom: sim.snapshot())
         } else {
             sim.advance(to: time, settings: settings)
             // Playing on under the same constant settings extends the

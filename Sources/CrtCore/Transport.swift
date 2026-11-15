@@ -79,7 +79,8 @@ final class TransportSimulator {
     fileprivate struct State {
         var line: Int64 = -1            // last line stepped
         var delta = 0.0                 // servo-held tape position error, pitches
-        var speed = 0.0                 // capstan speed error, pitches per frame
+        var speed = 0.0                 // capstan speed correction, pitches per frame
+        var kick = 0.0                  // this frame's phase correction, pitches
         var integ = 0.0                 // servo's integral term
         var lag = [0.0, 0.0, 0.0]       // stick-slip lag at each guide, µm
         var breakAt = [8.0, 6.0, 5.0]   // lag at which each tears loose, µm
@@ -159,7 +160,7 @@ final class TransportSimulator {
         let t = Double(j) * NTSCTiming.line * 1e-6
         let motor = 0.004 * (2 * GlitchRandom.uniform(seed, 69, 0) - 1)
             + 0.006 * GlitchRandom.value(seed, 60, t / 3)
-        s.delta += (motor + s.speed) / Double(2 * L)
+        s.delta += (motor + s.speed + s.kick) / Double(2 * L)
         // A gummy tape drags: the capstan slips a little against it.
         if tape.sticky > 0 {
             let st = Double(tape.sticky)
@@ -200,7 +201,9 @@ final class TransportSimulator {
         let alpha = p.format.trackOffsetLines
         // Soft-limited to under half a line: past that the heads are on the
         // next track and the picture is noise anyway.
-        let tbe = NTSCTiming.line * 0.45 * tanh(alpha * delta / 0.45)
+        // Measured from the nearest track of the heads' own azimuth: a tape
+        // a whole frame out (servo lost, drifting) is back on a track.
+        let tbe = NTSCTiming.line * 0.45 * tanh(alpha * wrap2(delta) / 0.45)
         if s.lines.count >= cap { s.lines.removeFirst(s.lines.count - cap + 1) }
         s.lines.append(Line(delta: delta, tbe: tbe))
         s.line = j
@@ -214,6 +217,7 @@ final class TransportSimulator {
             let prev = s.fields.last
             s.phase = prev.map { wrap2($0.phase + $0.rate) } ?? 0
             s.rate = p.search - 1
+            s.kick = 0
         } else {
             if s.rate != 0 || s.phase != 0 {
                 // Back to play: the servo has to pull the tape back in.
@@ -234,23 +238,36 @@ final class TransportSimulator {
         // recording deck's own (its control head sat a few µm elsewhere).
         let recorded = 1.5 * (2 * Double(TapeSurface.uni(tape.seed, 95, 0, 0)) - 1) / pitch
         let target = p.tracking + recorded
-        // The pulse, as the control head reads it off the bottom edge.
+        // The pulse, as the control head reads it off the bottom edge. The
+        // control amplifier has gain to spare: a weaker tape overall (worn
+        // oxide) still reads, but missing coating or the tape held off the
+        // head by a crinkle or mold loses the pulse.
         let at = TapePosition(x: TapeGeometry.trackOrigin(field: f, format: p.format) + Self.controlOffset,
                               y: Self.controlY)
         let edge = TapeSurface.at(at, tape, detail: false)
-        let amplitude = Double(edge.output) * exp(-2 * .pi * Double(edge.lift) / 12)
+        let amplitude = Double(edge.output / tape.remanence) * exp(-2 * .pi * Double(edge.lift) / 12)
         let u = GlitchRandom.uniform(seed, 66, f)
-        var measured: Double? = amplitude * (0.85 + 0.3 * u) > 0.5 ? s.delta - target : nil
+        // The phase detector compares the pulse with the drum's own once-a-
+        // frame reference, so it reads the error to the nearest frame: it
+        // pulls the tape onto the nearest pair of tracks, never more than a
+        // track away.
+        var measured: Double? = amplitude * (0.85 + 0.3 * u) > 0.5 ? wrap2(s.delta - target) : nil
         // A crinkle passing the head can fake a pulse.
         let fake = 0.5 * Double(TapeSurface.smoothstep(0.8, 2.5, edge.lift))
         if GlitchRandom.uniform(seed, 67, f) < fake {
             measured = GlitchRandom.uniform(seed, 68, f) - 0.5
         }
-        // No pulse: the correction stays where it was, and the tape drifts
-        // with the motor until the next one.
+        // No pulse: the capstan holds the speed it had settled on (its
+        // speed loop runs off the motor's own tachometer), and the tape
+        // drifts with the motor's wander until the next one. The phase
+        // correction is a nudge of one frame, not a speed held until the
+        // next pulse — held over a run of missing pulses it would build into
+        // a swing the next pulse overcorrects, ever wider.
+        s.kick = 0
         guard let e = measured else { return }
-        s.speed = -(0.377 * e + s.integ)
-        s.integ += 0.0986 * e
+        s.speed = -s.integ
+        s.kick = -0.377 * e
+        s.integ = min(0.15, max(-0.15, s.integ + 0.0986 * e))
     }
 }
 

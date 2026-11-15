@@ -253,4 +253,22 @@ final class GlitchCheckpointTests: XCTestCase {
         let fresh = try plan(try GlitchRenderer(context: context), t, history.settingsAt(t), history)
         XCTAssertEqual(viaCheckpoint.rows, fresh.rows)
     }
+
+    /// A short scrub forward through keyframed VCR knobs runs through the
+    /// keyframes frame by frame, not on the destination's values throughout:
+    /// a moment looks the same however the playhead reached it.
+    func testScrubbingForwardMatchesAFullRerunWithKeyframedSettings() throws {
+        let history = GlitchHistory(frameDuration: 1.0 / 24, id: 8) { t in
+            GlitchSettings(values: ["vcr": 1, "tracking_offset": min(0.6, t / 5),
+                                    "back_tension": t > 2.3 ? 0.6 : 0, "tape_sticky": min(1, t / 3),
+                                    "dirt_buildup": 0.8, "tape_mold": 0.4])
+        }
+        let scrubber = try GlitchRenderer(context: context)
+        _ = try plan(scrubber, 48.0 / 24, history.settingsAt(48.0 / 24), history)
+        let t = 70.0 / 24                                  // under a second on
+        let scrubbed = try plan(scrubber, t, history.settingsAt(t), history)
+        let fresh = try plan(try GlitchRenderer(context: context), t, history.settingsAt(t), history)
+        XCTAssertEqual(scrubbed.rows, fresh.rows)
+        XCTAssertEqual(scrubbed.vcr?.lines, fresh.vcr?.lines)
+    }
 }

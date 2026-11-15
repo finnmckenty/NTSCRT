@@ -383,4 +383,41 @@ extension ReceiverSimulatorTests {
         XCTAssertLessThan(wander(0), 0.15, "a good edge holds the tracking")
         XCTAssertGreaterThan(wander(1), 0.3, "a chewed one doesn't")
     }
+
+    func testAWornTapeKeepsItsTracking() {
+        // Worn oxide reads weaker everywhere, but the control amplifier has
+        // gain to spare: the servo holds. (It once lost every other pulse
+        // and, holding each correction through the gaps, swung the tape
+        // further each frame until the picture was noise.)
+        let L = ReceiverRaster(width: 320, activeLines: 240).totalLines
+        for extra in [["tape_wear": 1.0],
+                      ["tape_wear": 0.7, "tape_dropouts": 0.45, "tape_scratches": 0.5, "tape_edge_damage": 0.35]] {
+            let t = TransportSimulator(linesPerField: L, seed: 0x4E54_5343_5254,
+                                       settings: GlitchSettings(values: extra.merging(["vcr": 1]) { a, _ in a }))
+            t.reset()
+            var worst = 0.0
+            for f in 1...Int64(30 * 60) {
+                t.advance(through: f * Int64(L))
+                worst = max(worst, abs(t.line(f * Int64(L)).delta))
+            }
+            XCTAssertLessThan(worst, 0.1, "\(extra)")
+        }
+    }
+
+    func testALostControlTrackDriftsButNeverRunsAway() {
+        // With pulses missing and faked, the tape wanders off its tracks —
+        // a slow drift with the capstan's own speed, not a swing that grows.
+        let L = ReceiverRaster(width: 320, activeLines: 240).totalLines
+        let t = TransportSimulator(linesPerField: L, seed: 0x4E54_5343_5254,
+                                   settings: GlitchSettings(values: ["vcr": 1, "tape_edge_damage": 1,
+                                                                     "tape_mold": 1, "tape_wear": 1]))
+        t.reset()
+        var worst = 0.0
+        for f in 1...Int64(60 * 60) {
+            t.advance(through: f * Int64(L))
+            worst = max(worst, abs(t.line(f * Int64(L)).delta))
+            XCTAssertLessThan(abs(t.line(f * Int64(L)).tbe), NTSCTiming.line / 2)
+        }
+        XCTAssertLessThan(worst, 60 * 0.15 * 30 + 2, "bounded by the capstan's range")
+    }
 }

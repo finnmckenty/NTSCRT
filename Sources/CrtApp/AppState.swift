@@ -774,6 +774,19 @@ final class AppState {
 
     func setGlitchValue(_ id: String, _ value: Double) {
         glitchValues[id] = value
+        glitchEdited()
+    }
+
+    /// The glitch knobs as the user last set them between keyframes, while
+    /// they still are: the preview runs on them rather than on the
+    /// keyframes, as every other panel's edits show until the next scrub.
+    @ObservationIgnored private var glitchOffKeyEdit: [String: Double]?
+
+    private func glitchEdited() {
+        let parked = timelineKeys.contains { abs($0.t - playheadT) < parkedTolerance }
+        if timelineEnabled, !suppressAutoKey, !timelineKeys.isEmpty, !parked || timelinePlaying {
+            glitchOffKeyEdit = glitchValues
+        }
         autoKeyIfParked()
         markChainDirty()
     }
@@ -782,8 +795,7 @@ final class AppState {
     /// are left alone).
     func resetGlitch() {
         for p in GlitchParam.controls(in: .reception) { glitchValues[p.id] = p.defaultValue }
-        autoKeyIfParked()
-        markChainDirty()
+        glitchEdited()
     }
 
     /// The VCR panel's Reset: a new tape in a clean deck (switch left as is).
@@ -791,19 +803,18 @@ final class AppState {
         for g in [GlitchParam.Group.tape, .deck] {
             for p in GlitchParam.controls(in: g) where p.kind != .seed { glitchValues[p.id] = p.defaultValue }
         }
-        autoKeyIfParked()
-        markChainDirty()
+        glitchEdited()
     }
 
     /// A Tape or Deck picker choice: its condition's values for `keys`.
     func applyVcrCondition(_ c: VcrCondition, keys: [String]) {
         glitchValues = c.applied(to: glitchValues, keys: keys)
-        autoKeyIfParked()
-        markChainDirty()
+        glitchEdited()
     }
 
     /// Timeline scrub/playback: merge keyed values without auto-keying.
     private func applyGlitchValues(_ values: [String: Double]) {
+        glitchOffKeyEdit = nil
         guard !values.isEmpty else { return }
         glitchValues = glitchValues.merging(values) { _, new in new }
         markChainDirty()
@@ -964,7 +975,8 @@ final class AppState {
     /// How the glitch knobs vary over the timeline, so a seek re-simulates
     /// the history an export would have run through. nil without keyframes.
     var glitchHistory: GlitchHistory? {
-        guard timelineEnabled, !timelineKeys.isEmpty, let ev = makeTimelineEvaluator() else { return nil }
+        guard timelineEnabled, !timelineKeys.isEmpty, glitchOffKeyEdit != glitchValues,
+              let ev = makeTimelineEvaluator() else { return nil }
         let fps = glitchFrameRate
         let total = timelineTotalFrames
         let base = glitchValues
@@ -1138,6 +1150,7 @@ final class AppState {
     }
 
     func setKeyframeAtPlayhead() {
+        glitchOffKeyEdit = nil
         let snapshot = Keyframe(t: playheadT,
                                 shaderParams: paramValues,
                                 ntscValues: ntscValues,
