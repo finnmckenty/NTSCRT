@@ -21,12 +21,23 @@ let rows = plan.rows.map { r in
     [Double(r.u0), Double(r.fieldLine), Double(r.lenPrev), Double(r.lenCur), Double(r.lenNext),
      Double(r.noiseIRE), Double(r.humIRE), Double(r.burstScale), Double(r.gateShift)]
 }
-let vcr = (plan.vcr?.lines ?? []).map {
-    [Double($0.originBase), Double($0.originOffset), Double($0.along0), Double($0.spacing),
-     Double($0.grease), Double($0.gain), Double($0.head)]
+func lines(_ p: VcrFieldPlan?) -> [[Double]] {
+    (p?.lines ?? []).map {
+        [Double($0.originBase), Double($0.originOffset), Double($0.along0), Double($0.spacing),
+         Double($0.grease), Double($0.gain), Double($0.head), Double($0.delta0), Double($0.deltaSlope)]
+    }
 }
+let vcr = lines(plan.vcr)
+// A copy's earlier generations, and how each was recorded.
+let earlier = (plan.vcr?.earlier ?? []).map { g -> [String: Any] in
+    ["lines": lines(g), "linked": g.linked ? 1 : 0, "ycMismatch": g.ycMismatch, "speed": g.format.speed]
+}
+let vcrInfo: [String: Any] = plan.vcr.map {
+    ["linked": $0.linked ? 1 : 0, "ycMismatch": $0.ycMismatch, "speed": $0.format.speed]
+} ?? [:]
 let out: [String: Any] = [
     "time": sim.time, "nominalTrigger": sim.nominalTrigger, "rows": rows, "vcr": vcr,
+    "earlier": earlier, "vcrInfo": vcrInfo,
     "chroma": [Double(plan.chromaPhase), Double(plan.chromaGain), Double(plan.killer), plan.colorOn ? 1.0 : 0.0],
     "pictureGain": Double(plan.pictureGain), "ccBits": Int(plan.ccBits), "fieldIndex": Int(plan.fieldIndex),
 ]

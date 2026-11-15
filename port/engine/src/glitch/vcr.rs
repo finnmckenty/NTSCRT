@@ -9,7 +9,7 @@
 
 use super::deck::DeckParams;
 use super::receiver::{timing as T, Raster};
-use super::tape::{TapeGeometry, TapeParams};
+use super::tape::{TapeFormat, TapeGeometry, TapeParams};
 use super::GlitchSettings;
 use std::f64::consts::PI;
 
@@ -101,7 +101,7 @@ pub fn fm_band_taps() -> Vec<[f32; 2]> {
         .collect()
 }
 
-fn low_pass(mhz: f64) -> [f32; 5] {
+pub(crate) fn low_pass(mhz: f64) -> [f32; 5] {
     let k = (PI * mhz / sample_rate()).tan();
     let s2 = 2f64.sqrt();
     let norm = 1.0 / (1.0 + s2 * k + k * k);
@@ -115,19 +115,23 @@ fn shelf(zero: f64, pole: f64) -> [f32; 3] {
     [((1.0 + a) / (1.0 + b)) as f32, ((1.0 - a) / (1.0 + b)) as f32, ((1.0 - b) / (1.0 + b)) as f32]
 }
 
-/// One active line as the VCR reads it (mirrors the GPU struct, 32 bytes).
+/// One active line as the VCR reads it (mirrors the GPU struct, 40 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VcrLine {
     pub origin_base: i32,
     pub origin_offset: f32,
     pub along0: f32,
-    /// Spacing the head brings (worn tip, dirt, debris), µm.
+    /// Spacing the head brings (worn tip, dirt, debris, slack tape), µm.
     pub spacing: f32,
     pub grease: f32,
-    /// Read efficiency × how much of its track the head is on.
+    /// The head's read efficiency.
     pub gain: f32,
     pub head: u32,
+    /// How far the head is off its own track's center at the line's start
+    /// (track pitches), and how that changes per mm along the track.
+    pub delta0: f32,
+    pub delta_slope: f32,
     pub pad: f32,
 }
 
@@ -137,15 +141,50 @@ pub struct VcrFieldPlan {
     pub lines: Vec<VcrLine>,
     pub tape: TapeParams,
     pub deck: DeckParams,
+    pub format: TapeFormat,
+    /// Recorded from another deck's playback over a composite cable (a
+    /// copy), rather than from the picture itself: the recording deck has
+    /// to separate the picture from the color again.
+    pub linked: bool,
+    /// How far that deck's picture delay misses its color delay, samples.
+    pub yc_mismatch: i32,
+    /// On a copy, the generations it was dubbed through, oldest first: the
+    /// picture is recorded and played back through each in turn, then
+    /// recorded onto this tape.
+    pub earlier: Vec<VcrFieldPlan>,
 }
 
-/// The uniforms (mirrors `VcrU` in vcr.wgsl: 12 u32, then 44 f32).
-fn uniforms(plan: &VcrFieldPlan, s: &GlitchSettings, raster: &Raster, width: u32, rows: u32, field: u32) -> Vec<u8> {
+impl VcrFieldPlan {
+    pub fn new(lines: Vec<VcrLine>, tape: TapeParams, deck: DeckParams, format: TapeFormat) -> Self {
+        Self { lines, tape, deck, format, linked: false, yc_mismatch: 0, earlier: Vec::new() }
+    }
+}
+
+/// A copying deck's composite input: a trap at the color subcarrier (Q 1)
+/// for the picture, and the color demodulated and low-passed at 1 MHz (two
+/// biquads), the picture delayed to match.
+fn input_trap() -> [f32; 5] {
+    let (w0, q) = (PI / 4.0, 1.0);
+    let alpha = w0.sin() / (2.0 * q);
+    let a0 = 1.0 + alpha;
+    [(1.0 / a0) as f32, (-2.0 * w0.cos() / a0) as f32, (1.0 / a0) as f32, (-2.0 * w0.cos() / a0) as f32, ((1.0 - alpha) / a0) as f32]
+}
+const INPUT_CHROMA_MHZ: f64 = 1.0;
+/// Two Butterworth biquads' delay at low frequencies, in samples.
+fn input_chroma_delay() -> i32 {
+    (2.0 * 2f64.sqrt() / (2.0 * PI * INPUT_CHROMA_MHZ) * sample_rate()).round() as i32
+}
+
+/// The uniforms (mirrors `VcrU` in vcr.wgsl: 12 u32, 52 f32, 2 u32, 10 f32).
+fn uniforms(plan: &VcrFieldPlan, compensate: bool, raster: &Raster, width: u32, rows: u32, field: u32) -> Vec<u8> {
     let t = &plan.tape;
+    let fmt = plan.format;
     let em = shelf(EMPHASIS_ZERO_MHZ, EMPHASIS_POLE_MHZ);
     let de = shelf(EMPHASIS_POLE_MHZ, EMPHASIS_ZERO_MHZ);
     let lp = low_pass(LUMA_MHZ);
     let cp = low_pass(CHROMA_MHZ);
+    let ck = low_pass(INPUT_CHROMA_MHZ);
+    let trap = input_trap();
     let a = TapeGeometry::angle();
     let u32s: [u32; 12] = [
         rows,
@@ -154,23 +193,23 @@ fn uniforms(plan: &VcrFieldPlan, s: &GlitchSettings, raster: &Raster, width: u32
         width,
         t.seed,
         field,
-        s.flag("dropout_compensation") as u32,
+        compensate as u32,
         FM_REACH,
         LEVELS,
         REACH,
         raster.total_lines() as u32,
         0,
     ];
-    let f32s: [f32; 44] = [
+    let f32s: [f32; 52] = [
         (T::ACTIVE_LENGTH / width as f64) as f32,
         (1.0 / sample_rate()) as f32,
         T::LINE as f32,
         TapeGeometry::line_length() as f32,
-        TapeGeometry::track_pitch() as f32,
+        fmt.track_pitch() as f32,
         a.cos() as f32,
         a.sin() as f32,
         TapeGeometry::TRACK_START as f32,
-        NOISE,
+        NOISE * fmt.noise_scale() as f32,
         CHROMA_LEVEL,
         (2.0 * PI * color_under_mhz() / sample_rate()) as f32,
         MAX_SPACING,
@@ -206,32 +245,64 @@ fn uniforms(plan: &VcrFieldPlan, s: &GlitchSettings, raster: &Raster, width: u32
         t.pinhole_chance(),
         t.flake_chance(),
         T::BURST_AMPLITUDE as f32,
+        (fmt.track_pitch() * 1000.0) as f32,
+        (fmt.head_width() * 1000.0) as f32,
+        (fmt.track_width() * 1000.0) as f32,
+        (fmt.track_offset_lines() * raster.scale()) as f32,
+        (PI * TapeFormat::azimuth_tan() * TapeFormat::FM_MHZ / TapeGeometry::WRITING_SPEED) as f32,
+        (PI * TapeFormat::azimuth_tan() * color_under_mhz() / TapeGeometry::WRITING_SPEED) as f32,
+        fmt.head_width() as f32,
+        0.0,
     ];
-    let mut out = Vec::with_capacity(224);
+    let link: [u32; 2] = [plan.linked as u32, (input_chroma_delay() - plan.yc_mismatch).clamp(0, 31) as u32];
+    let tail: [f32; 10] = [trap[0], trap[1], trap[2], trap[3], trap[4], ck[0], ck[1], ck[2], ck[3], ck[4]];
+    let mut out = Vec::with_capacity(304);
     u32s.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
     f32s.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+    link.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+    tail.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
     out
 }
 
-/// The eight passes, compiled once, and their working buffers.
+/// The nine kernels, compiled once, and their working buffers.
 pub struct VcrGpu {
     pipes: Vec<(&'static str, wgpu::ComputePipeline, &'static [u32])>,
     fm_taps: wgpu::Buffer,
-    bank: std::sync::Mutex<Option<([f32; 2], wgpu::Buffer)>>,
+    bank: std::sync::Mutex<Vec<([f32; 2], wgpu::Buffer)>>,
+    /// Intermediate pictures between dubbing generations.
+    pass_textures: std::sync::Mutex<Vec<wgpu::Texture>>,
 }
 
 /// Each kernel and the bindings it uses (only those: WebGPU allows 8
-/// storage buffers per stage).
-const KERNELS: [(&str, &[u32]); 8] = [
-    ("vcr_record", &[0, 2, 13]),
+/// storage buffers per stage). 13 and 14 are the input and output
+/// pictures.
+const KERNELS: [(&str, &[u32]); 9] = [
+    ("vcr_record", &[0, 2, 13, 15]),
     ("vcr_tape", &[0, 1, 3]),
-    ("vcr_magnet", &[0, 2, 3, 4]),
+    ("vcr_magnet", &[0, 1, 2, 3, 4, 15]),
     ("vcr_play", &[0, 1, 4, 5, 11]),
     ("vcr_fmband", &[0, 5, 6, 12]),
-    ("vcr_line", &[0, 5, 6, 7, 8, 9]),
+    ("vcr_line", &[0, 1, 5, 6, 7, 8]),
+    ("vcr_comb", &[0, 8, 9, 16]),
     ("vcr_acc", &[0, 9, 10]),
-    ("vcr_out", &[0, 7, 8, 10, 14]),
+    ("vcr_out", &[0, 7, 10, 14, 16]),
 ];
+
+/// The working buffers one pass uses, shared by the passes of a copy (the
+/// GPU runs them in order).
+struct Work {
+    rf: wgpu::Buffer,
+    iq: wgpu::Buffer,
+    combed: wgpu::Buffer,
+    seg: wgpu::Buffer,
+    mag: wgpu::Buffer,
+    pb: wgpu::Buffer,
+    z: wgpu::Buffer,
+    luma: wgpu::Buffer,
+    chroma: wgpu::Buffer,
+    burst: wgpu::Buffer,
+    color: wgpu::Buffer,
+}
 
 impl VcrGpu {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -262,65 +333,117 @@ impl VcrGpu {
         });
         fm_taps.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&taps));
         fm_taps.unmap();
-        Self { pipes, fm_taps, bank: Default::default() }
+        Self { pipes, fm_taps, bank: Default::default(), pass_textures: Default::default() }
+    }
+
+    fn upload(device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        let b = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: data.len().max(16) as u64, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        queue.write_buffer(&b, 0, data);
+        b
+    }
+
+    fn bank_buffer(&self, device: &wgpu::Device, queue: &wgpu::Queue, deck: &DeckParams) -> wgpu::Buffer {
+        let gaps = [deck.gap(0), deck.gap(1)];
+        let mut cache = self.bank.lock().expect("bank");
+        if let Some((_, b)) = cache.iter().find(|(g, _)| *g == gaps) {
+            return b.clone();
+        }
+        let data: Vec<f32> = bank(gaps[0]).into_iter().chain(bank(gaps[1])).collect();
+        let b = Self::upload(device, queue, bytemuck::cast_slice(&data), wgpu::BufferUsages::STORAGE);
+        if cache.len() > 8 {
+            cache.clear();
+        }
+        cache.push((gaps, b.clone()));
+        b
+    }
+
+    fn pass_texture(&self, device: &wgpu::Device, i: usize, like: &wgpu::Texture) -> wgpu::Texture {
+        let mut list = self.pass_textures.lock().expect("pass textures");
+        let make = || {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("vcr generation"),
+                size: wgpu::Extent3d { width: like.width(), height: like.height(), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        while list.len() <= i {
+            list.push(make());
+        }
+        if (list[i].width(), list[i].height()) != (like.width(), like.height()) {
+            list[i] = make();
+        }
+        list[i].clone()
     }
 
     /// Play `input` (one row per active line) from tape into `output`
-    /// (Rgba16Float, same size).
+    /// (Rgba16Float, same size) — through every generation it was dubbed
+    /// through first, on a copy.
     #[allow(clippy::too_many_arguments)]
     pub fn encode(&self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, input: &wgpu::Texture, output: &wgpu::Texture, plan: &VcrFieldPlan, settings: &GlitchSettings, raster: &Raster, field: u32) {
+        let rows = plan.lines.len().min(input.height() as usize) as u64;
+        if rows == 0 {
+            return;
+        }
+        let samples = rows * SAMPLES_PER_LINE as u64;
+        let make = |size: u64| device.create_buffer(&wgpu::BufferDescriptor { label: None, size: size.max(16), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let work = Work {
+            rf: make(samples * 4),
+            iq: make(samples * 8),
+            combed: make(samples * 8),
+            seg: make(rows * SEGMENTS as u64 * 32),
+            mag: make(samples * 8),
+            pb: make(samples * 4),
+            z: make(samples * 8),
+            luma: make(samples * 4),
+            chroma: make(samples * 8),
+            burst: make(rows * 8),
+            color: make(rows * 16),
+        };
+        let mut source = input.clone();
+        for (i, generation) in plan.earlier.iter().enumerate() {
+            let tex = self.pass_texture(device, i % 2, input);
+            self.encode_pass(device, queue, enc, &work, &source, &tex, generation, true, raster, field);
+            source = tex;
+        }
+        self.encode_pass(device, queue, enc, &work, &source, output, plan, settings.flag("dropout_compensation"), raster, field);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_pass(&self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, work: &Work, input: &wgpu::Texture, output: &wgpu::Texture, plan: &VcrFieldPlan, compensate: bool, raster: &Raster, field: u32) {
         let rows = plan.lines.len().min(input.height() as usize) as u32;
         if rows == 0 {
             return;
         }
-        let n = SAMPLES_PER_LINE as u64;
-        let samples = rows as u64 * n;
         let width = input.width();
-        let make = |size: u64| device.create_buffer(&wgpu::BufferDescriptor { label: None, size: size.max(16), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-        let upload = |data: &[u8], usage: wgpu::BufferUsages| {
-            let b = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: data.len().max(16) as u64, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-            queue.write_buffer(&b, 0, data);
-            b
-        };
-        let gaps = [plan.deck.gap(0), plan.deck.gap(1)];
-        let bank = {
-            let mut cache = self.bank.lock().expect("bank");
-            if cache.as_ref().map(|c| c.0) != Some(gaps) {
-                let data: Vec<f32> = bank(gaps[0]).into_iter().chain(bank(gaps[1])).collect();
-                *cache = Some((gaps, upload(bytemuck::cast_slice(&data), wgpu::BufferUsages::STORAGE)));
-            }
-            cache.as_ref().expect("bank").1.clone()
-        };
-        let ubuf = upload(&uniforms(plan, settings, raster, width, rows, field), wgpu::BufferUsages::UNIFORM);
-        let lines = upload(bytemuck::cast_slice(&plan.lines[..rows as usize]), wgpu::BufferUsages::STORAGE);
-        let rf = make(samples * 4);
-        let seg = make(rows as u64 * SEGMENTS as u64 * 8);
-        let mag = make(samples * 8);
-        let pb = make(samples * 4);
-        let z = make(samples * 8);
-        let luma = make(samples * 4);
-        let chroma = make(samples * 8);
-        let burst = make(rows as u64 * 8);
-        let color = make(rows as u64 * 16);
+        let bank = self.bank_buffer(device, queue, &plan.deck);
+        let ubuf = Self::upload(device, queue, &uniforms(plan, compensate, raster, width, rows, field), wgpu::BufferUsages::UNIFORM);
+        let lines = Self::upload(device, queue, bytemuck::cast_slice(&plan.lines[..rows as usize]), wgpu::BufferUsages::STORAGE);
         let in_view = input.create_view(&Default::default());
         let out_view = output.create_view(&Default::default());
         let resource = |b: u32| -> wgpu::BindingResource<'_> {
             match b {
                 0 => ubuf.as_entire_binding(),
                 1 => lines.as_entire_binding(),
-                2 => rf.as_entire_binding(),
-                3 => seg.as_entire_binding(),
-                4 => mag.as_entire_binding(),
-                5 => pb.as_entire_binding(),
-                6 => z.as_entire_binding(),
-                7 => luma.as_entire_binding(),
-                8 => chroma.as_entire_binding(),
-                9 => burst.as_entire_binding(),
-                10 => color.as_entire_binding(),
+                2 => work.rf.as_entire_binding(),
+                3 => work.seg.as_entire_binding(),
+                4 => work.mag.as_entire_binding(),
+                5 => work.pb.as_entire_binding(),
+                6 => work.z.as_entire_binding(),
+                7 => work.luma.as_entire_binding(),
+                8 => work.chroma.as_entire_binding(),
+                9 => work.burst.as_entire_binding(),
+                10 => work.color.as_entire_binding(),
                 11 => bank.as_entire_binding(),
                 12 => self.fm_taps.as_entire_binding(),
                 13 => wgpu::BindingResource::TextureView(&in_view),
-                _ => wgpu::BindingResource::TextureView(&out_view),
+                14 => wgpu::BindingResource::TextureView(&out_view),
+                15 => work.iq.as_entire_binding(),
+                _ => work.combed.as_entire_binding(),
             }
         };
         let groups: Vec<wgpu::BindGroup> = self
@@ -333,7 +456,8 @@ impl VcrGpu {
             .collect();
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("vcr"), timestamp_writes: None });
         let per_row = rows.div_ceil(64);
-        let dispatch = [(per_row, 1), (SEGMENTS.div_ceil(64), rows), (SAMPLES_PER_LINE.div_ceil(64), rows), (SAMPLES_PER_LINE.div_ceil(64), rows), (SAMPLES_PER_LINE.div_ceil(64), rows), (per_row, 1), (1, 1), (width.div_ceil(64), rows)];
+        let per_sample = SAMPLES_PER_LINE.div_ceil(64);
+        let dispatch = [(per_row, 1), (SEGMENTS.div_ceil(64), rows), (per_sample, rows), (per_sample, rows), (per_sample, rows), (per_row, 1), (per_row, 1), (1, 1), (width.div_ceil(64), rows)];
         for (i, ((_, p, _), g)) in self.pipes.iter().zip(&groups).enumerate() {
             pass.set_pipeline(p);
             pass.set_bind_group(0, g, &[]);

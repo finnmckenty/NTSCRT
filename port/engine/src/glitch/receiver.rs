@@ -13,8 +13,9 @@ use std::f64::consts::PI;
 
 use super::deck::{DeckParams, DeckSimulator, DeckSnapshot};
 use super::params::GlitchSettings;
-use super::tape::{folds, tape_at, Fold, TapeGeometry, TapeParams, TapePosition};
-use super::vcr::{carrier_to_noise_db, channel_gain, color_under_mhz, VcrLine, SYNC_TIP_MHZ};
+use super::tape::{folds, smoothstep, tape_at, Fold, TapeGeometry, TapeParams, TapePosition};
+use super::transport::{TransportParams, TransportSimulator, TransportSnapshot};
+use super::vcr::{carrier_to_noise_db, channel_gain, color_under_mhz, VcrFieldPlan, VcrLine, SYNC_TIP_MHZ};
 
 /// NTSC line timing (SMPTE 170M), in µs.
 pub mod timing {
@@ -123,7 +124,7 @@ pub struct FieldPlan {
     pub raster: Raster,
     pub rows: Vec<Row>,
     /// The VCR's view of the field's active lines, when it is playing.
-    pub vcr: Option<super::vcr::VcrFieldPlan>,
+    pub vcr: Option<VcrFieldPlan>,
     pub chroma_phase: f32,
     pub chroma_gain: f32,
     pub killer: f32,
@@ -137,7 +138,7 @@ pub struct FieldPlan {
 // MARK: deterministic noise — keyed by position, never by call order.
 
 #[inline(always)]
-fn mix(z0: u64) -> u64 {
+pub(crate) fn mix(z0: u64) -> u64 {
     let mut z = z0.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -163,7 +164,7 @@ fn gauss(seed: u64, purpose: u64, a: i64, b: i64) -> f64 {
 }
 
 /// Smooth 1-D value noise in [−1, 1] with unit lattice spacing.
-fn value(seed: u64, purpose: u64, x: f64) -> f64 {
+pub(crate) fn value(seed: u64, purpose: u64, x: f64) -> f64 {
     let i = x.floor();
     let f = x - i;
     let a = uni(seed, purpose, i as i64) * 2.0 - 1.0;
@@ -208,10 +209,10 @@ struct Knobs {
     vcr: bool,
     tape: TapeParams,
     deck: DeckParams,
+    transport: TransportParams,
+    /// Copies the tape was dubbed through before this one (0: the original).
+    generations: i64,
     head_switch: f64,
-    jitter: f64,
-    search: f64,
-    tracking: f64,
     captions: bool,
     gate_alpha: f64,
     chroma_alpha: f64,
@@ -253,10 +254,9 @@ impl Knobs {
             vcr: settings.vcr(),
             tape: TapeParams::new(settings),
             deck: DeckParams::new(settings),
+            transport: TransportParams::new(settings),
+            generations: (settings.get("tape_generation").round() as i64).clamp(0, 3),
             head_switch: settings.get("head_switch"),
-            jitter: settings.get("timebase_jitter"),
-            search: settings.get("search_speed").max(1.0),
-            tracking: settings.get("tracking").clamp(0.0, 1.0),
             captions: settings.flag("closed_captions"),
             gate_alpha: 1.0 - (-1.0 / (6.0 * s)).exp(),
             chroma_alpha: 1.0 - (-1.0 / (4.0 * s)).exp(),
@@ -332,6 +332,7 @@ pub struct Snapshot {
     triggers: Vec<i64>,
     theta_log: Vec<f64>,
     deck: DeckSnapshot,
+    transport: TransportSnapshot,
 }
 
 pub struct Simulator {
@@ -354,6 +355,8 @@ pub struct Simulator {
     knobs: Knobs,
     /// The deck's heads as the tape plays (only while the VCR is on).
     deck: DeckSimulator,
+    /// The tape's motion past the drum (only while the VCR is on).
+    transport: TransportSimulator,
     /// Creases each recent field's track crosses.
     fold_cache: std::cell::RefCell<Vec<(i64, Vec<Fold>)>>,
     /// Within-field line where a healthy, locked set's vertical oscillator fires.
@@ -399,6 +402,7 @@ impl Simulator {
             log_cap,
             knobs: Knobs::new(&GlitchSettings::default(), &raster),
             deck: DeckSimulator::new(&GlitchSettings::default()),
+            transport: TransportSimulator::new(l, seed, &GlitchSettings::default()),
             fold_cache: Default::default(),
             nominal_trigger: 0,
         }
@@ -430,6 +434,7 @@ impl Simulator {
         self.theta_log.iter_mut().for_each(|v| *v = 0.0);
         self.gate_log.iter_mut().for_each(|v| *v = 0.0);
         self.deck.reset(0);
+        self.transport.reset();
         self.fold_cache.borrow_mut().clear();
     }
 
@@ -447,6 +452,7 @@ impl Simulator {
             triggers: self.triggers.clone(),
             theta_log: self.theta_log.clone(),
             deck: self.deck.snapshot(),
+            transport: self.transport.snapshot(),
         }
     }
 
@@ -462,17 +468,19 @@ impl Simulator {
         self.triggers = s.triggers.clone();
         self.theta_log = s.theta_log.clone();
         self.deck.restore(&s.deck);
+        self.transport.restore(&s.transport);
         self.fold_cache.borrow_mut().clear();
     }
 
     /// Run the set forward to `time` with `settings` in force since the last call.
     pub fn advance(&mut self, time: f64, settings: &GlitchSettings) {
         let k = Knobs::new(settings, &self.raster);
-        if k.tape != self.knobs.tape {
+        if k.tape != self.knobs.tape || k.transport.format != self.knobs.transport.format {
             self.fold_cache.borrow_mut().clear();
         }
         self.knobs = k;
         self.deck.update(settings);
+        self.transport.update(settings);
         let target = (time + Self::WARMUP) * self.us_per_second;
         while self.r as f64 * self.h + self.theta <= target {
             self.step();
@@ -525,6 +533,11 @@ impl Simulator {
         let seed = self.seed;
         let r = self.r;
         let tau = r as f64 * h + self.theta;
+        // The tape moves on (a few lines ahead of the scan, so everything
+        // that asks where it was finds it already there).
+        if self.knobs.vcr {
+            self.transport.advance((tau / h).round() as i64 + 3);
+        }
 
         // The signal line whose sync edge is nearest the TV's line start.
         let mut j = (tau / h).round() as i64;
@@ -764,8 +777,12 @@ impl Simulator {
         posmod(f + if jf >= switch_line { 1 } else { 0 }, 2)
     }
 
-    /// Time-base error of signal line j (µs): the deck's head switching,
-    /// flutter and search, and the tape's creases. Zero without the VCR.
+    /// Time-base error of signal line j (µs): when the deck delivers it
+    /// against when it should. The heads' placement on the drum (a jump at
+    /// each switch), the drum's speed wavering, the tape's motion (servo
+    /// error, stick-slip), its stretch against the recording (skew), its
+    /// creases — and, on a copy, the same from every deck it was dubbed
+    /// through, recorded into it. Zero without the VCR.
     fn timebase_error(&self, j: i64) -> f64 {
         let k = &self.knobs;
         if !k.vcr {
@@ -773,33 +790,56 @@ impl Simulator {
         }
         let seed = self.seed;
         let l = self.l as i64;
+        let h = self.h;
         let mut e = 0.0;
         if k.head_switch > 0.0 {
             let f = floordiv(j + self.switch_lead(), l);
             let wobble = 1.0 + 0.15 * gauss(seed, 31, f, 0);
             e += if self.head(j) == 0 { 0.5 } else { -0.5 } * k.head_switch * wobble;
         }
-        if k.jitter > 0.0 {
-            let line_scale = 1.0 / self.raster.scale();
-            let slow = value(seed, 32, j as f64 * line_scale / 40.0);
-            let fast = gauss(seed, 33, j, 0) * 0.35;
-            e += k.jitter * (slow + fast);
-        }
-        if k.search > 1.05 {
-            let crossing = self.search_at(j).1;
-            let f = floordiv(j, l);
-            e += 1.2 * gauss(seed, 36, f, crossing);
+        e += self.drum_flutter(j, k.transport.flutter, seed);
+        e += self.transport.line(j).tbe;
+        let (field, along) = self.track_place(j, 0.0);
+        if k.transport.strain() != 0.0 {
+            // Stretched further than when recorded, the tape's lines arrive
+            // later the further along the track; the next head starts on its
+            // own track's start, and the picture jumps back: skew.
+            e += k.transport.strain() * along / TapeGeometry::line_length() * h;
         }
         if k.tape.creases > 0.0 {
             // A fold shortens the track: everything after it arrives early.
-            let (field, along) = self.track_place(j, 0.0);
             for fold in self.folds(field).iter().filter(|f| f.shortening > 0.0) {
                 let x = (along - fold.along) / fold.width.max(0.05);
                 let passed = if x <= -1.0 { 0.0 } else if x >= 1.0 { 1.0 } else { 0.5 + 0.5 * (x * PI / 2.0).sin() };
                 e -= fold.shortening / TapeGeometry::WRITING_SPEED * passed;
             }
         }
+        for g in 1..=k.generations {
+            e += self.dub_error(j, g, along);
+        }
         e
+    }
+
+    /// The drum's speed wavering, as time-base error (µs): a once-a-turn
+    /// wobble (29.97 Hz), the servo hunting, the motor's cogging and bearing
+    /// noise.
+    fn drum_flutter(&self, j: i64, amount: f64, seed: u64) -> f64 {
+        if amount <= 0.0 {
+            return 0.0;
+        }
+        let t = self.field_time(j);
+        let turn = (2.0 * PI * (T::FIELD_RATE / 2.0) * t + 6.2832 * uni(seed, 40, 0)).sin();
+        amount * (0.8 * turn + 1.3 * value(seed, 41, t * 4.0) + 0.45 * value(seed, 42, t * 180.0) + 0.07 * gauss(seed, 43, j, 0))
+    }
+
+    /// An earlier generation's deck, recorded into this copy: its heads'
+    /// switching jump, its drum's flutter and a little skew.
+    fn dub_error(&self, j: i64, g: i64, along: f64) -> f64 {
+        let s = mix(self.seed ^ (g as u64).wrapping_mul(0x9E37_79B9));
+        let f = floordiv(j + self.switch_lead(), self.l as i64);
+        let jump = (0.4 + 0.8 * uni(s, 1, 0)) * if posmod(f + g, 2) == 0 { 0.5 } else { -0.5 };
+        let strain = 3e-4 * 0.2 * (2.0 * uni(s, 2, 0) - 1.0);
+        jump + strain * along / TapeGeometry::line_length() * self.h + self.drum_flutter(j, 0.12, s)
     }
 
     /// Where line j's start is read: which field's track, how far along it.
@@ -818,7 +858,7 @@ impl Simulator {
         if let Some((_, v)) = self.fold_cache.borrow().iter().find(|(g, _)| *g == f) {
             return v.clone();
         }
-        let list = folds(f, &self.knobs.tape);
+        let list = folds(f, &self.knobs.tape, self.knobs.transport.format);
         let mut c = self.fold_cache.borrow_mut();
         c.push((f, list.clone()));
         if c.len() > 8 {
@@ -827,101 +867,177 @@ impl Simulator {
         list
     }
 
-    /// How much of its own track the head reads on line j (tracking error,
-    /// picture search): 1 on track, toward 0 between tracks.
-    fn on_track(&self, j: i64) -> f64 {
+    /// How far line j's head is off its own track's center, `along` mm up
+    /// track `g` (track pitches): the tape out of place (servo, tracking
+    /// control, stick-slip), the track bent against the heads' path,
+    /// stretch turning it, and picture search sweeping across.
+    fn head_delta(&self, j: i64, along: f64, g: i64) -> f64 {
         let k = &self.knobs;
-        let mut loss: f64 = 0.0;
-        if k.search > 1.05 {
-            loss = loss.max(self.search_at(j).0);
+        let mut d = self.transport.line(j).delta + self.track_shape(along);
+        d += k.transport.strain() * along * TapeGeometry::angle().cos() / k.transport.format.advance_per_field();
+        if k.transport.searching() {
+            let (phase, rate) = self.transport.search(g);
+            d += phase + rate * along / TapeGeometry::track_length();
         }
-        if k.tracking > 0.0 {
-            loss = loss.max(self.tracking_at(j));
-        }
-        1.0 - loss.min(1.0)
+        d
     }
 
-    /// The carrier amplitude at `mhz` the playing head reads at line j, u µs in.
-    fn carrier(&self, j: i64, u: f64, mhz: f64) -> f64 {
+    /// The recorded track against the heads' path (pitches): no two decks'
+    /// tape guides are set alike, so a track bends and leans a few µm.
+    fn track_shape(&self, along: f64) -> f64 {
+        let ts = self.knobs.tape.seed as u64;
+        let lean = 4.0 * (2.0 * uni(ts, 91, 0) - 1.0);
+        let bow = 2.5 * (2.0 * uni(ts, 92, 0) - 1.0);
+        let x = 2.0 * along / TapeGeometry::track_length() - 1.0;
+        (lean * x + bow * (1.0 - x * x)) / (self.knobs.transport.format.track_pitch() * 1000.0)
+    }
+
+    /// Spacing a slack tape adds where it doesn't hug the drum, at the two
+    /// ends of the heads' sweep (µm).
+    fn slack_spacing(&self, along: f64) -> f64 {
+        let slack = (-self.knobs.transport.tension).max(0.0);
+        if slack <= 0.0 {
+            return 0.0;
+        }
+        let l = TapeGeometry::track_length();
+        let end = smoothstep(22.0, 0.0, along as f32).max(0.6 * smoothstep((l - 10.0) as f32, l as f32, along as f32)) as f64;
+        0.6 * slack * end
+    }
+
+    /// What the playing head sees at line j, u µs in, at `mhz`: the carrier
+    /// it reads off tracks of its own azimuth, and the crosstalk off the
+    /// others.
+    pub(crate) fn carrier(&self, j: i64, u: f64, mhz: f64) -> (f64, f64) {
         let (field, along) = self.track_place(j, u);
         let h = self.head(j) as usize;
         let heads = self.deck.heads(field);
         let dk = &self.knobs.deck;
-        let p = tape_at(TapeGeometry::point(field, along, 0.0), &self.knobs.tape, false);
-        let d = (p.lift + dk.wear_spacing(h) + dk.baseline_dirt(h, self.knobs.tape.seed) + heads[h].debris + p.film.max(heads[h].grease)) as f64;
-        let a = (p.output * dk.efficiency(h)) as f64 * self.on_track(j);
-        a * channel_gain(mhz, d, dk.gap(h) as f64)
+        let fmt = self.knobs.transport.format;
+        let delta = self.head_delta(j, along, field);
+        let p = tape_at(TapeGeometry::point(field, along, -delta * fmt.track_pitch(), fmt), &self.knobs.tape, false);
+        let d = (p.lift + dk.wear_spacing(h) + dk.baseline_dirt(h, self.knobs.tape.seed) + heads[h].debris + p.film.max(heads[h].grease)) as f64 + self.slack_spacing(along);
+        let a = (p.output * dk.efficiency(h)) as f64 * channel_gain(mhz, d, dk.gap(h) as f64);
+        let (center, fm, color) = fmt.read(delta);
+        let shares = if mhz < 1.0 { color } else { fm };
+        let (mut own, mut cross) = (0.0, 0.0);
+        for (t, share) in shares.iter().enumerate() {
+            if (center - 1 + t as i64) % 2 == 0 {
+                own += share;
+            } else {
+                cross += share.abs();
+            }
+        }
+        (a * own, a * cross)
     }
 
-    /// Fraction of line j's sync lost to the tape. Above the FM threshold
-    /// (~11 dB) demodulated sync stays clean; below it, it drowns in clicks.
+    /// Fraction of line j's sync lost to the tape: the FM carrier at the
+    /// sync tip against the deck's noise. Above the FM threshold (~11 dB)
+    /// demodulated sync stays clean; below it, it drowns in clicks. The
+    /// neighbors' crosstalk is another FM carrier, not noise: it brings the
+    /// threshold closer only where it beats the envelope down to own −
+    /// crosstalk (the capture effect).
     fn signal_loss(&self, j: i64) -> f64 {
         if !self.knobs.vcr {
             return 0.0;
         }
-        let a = self.carrier(j, 2.0, SYNC_TIP_MHZ);
-        let cnr = 20.0 * a.max(1e-6).log10() + carrier_to_noise_db();
+        let (own, cross) = self.carrier(j, 2.0, SYNC_TIP_MHZ);
+        let noise = 10f64.powf(-carrier_to_noise_db() / 10.0) * self.knobs.transport.format.noise_scale().powi(2);
+        let envelope = (own - cross).max(0.0);
+        let cnr = 10.0 * ((envelope * envelope).max(1e-12) / noise).log10();
         let x = ((11.0 - cnr) / 9.0).clamp(0.0, 1.0);
         x * x
     }
 
     /// The share of line j's burst the deck passes on: its color killer cuts
-    /// out once the color-under carrier is ~30 dB down.
+    /// out once the color-under carrier is ~30 dB down. Crosstalk from the
+    /// other azimuth's tracks the comb filter cancels.
     fn burst_surviving(&self, j: i64) -> f64 {
         if !self.knobs.vcr {
             return 1.0;
         }
-        let a = self.carrier(j, 6.5, color_under_mhz());
+        let a = self.carrier(j, 6.5, color_under_mhz()).0;
         let t = ((20.0 * a.max(1e-6).log10() + 34.0) / 8.0).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// The displayed field's active lines as the VCR reads them.
-    fn vcr_plan(&self, f: i64) -> super::vcr::VcrFieldPlan {
+    /// The displayed field's active lines as the VCR reads them — and, on a
+    /// copy, as each deck before read the tapes it was dubbed from.
+    fn vcr_plan(&self, f: i64) -> VcrFieldPlan {
         let k = &self.knobs;
         let l = self.l as i64;
+        let fmt = k.transport.format;
         let lines = (0..self.raster.active_lines as i64)
             .map(|y| {
                 let j = f * l + self.raster.vbi_lines as i64 + y;
                 let (field, along) = self.track_place(j, 0.0);
                 let h = self.head(j) as usize;
                 let heads = self.deck.heads(field);
-                let origin = TapePosition::new(TapeGeometry::track_origin(field), 0.0);
+                let origin = TapePosition::new(TapeGeometry::track_origin(field, fmt), 0.0);
+                let d0 = self.head_delta(j, along, field);
+                let d1 = self.head_delta(j, along + 1.0, field);
                 VcrLine {
                     origin_base: origin.base,
                     origin_offset: origin.offset,
                     along0: along as f32,
-                    spacing: k.deck.wear_spacing(h) + k.deck.baseline_dirt(h, k.tape.seed) + heads[h].debris,
+                    spacing: k.deck.wear_spacing(h) + k.deck.baseline_dirt(h, k.tape.seed) + heads[h].debris + self.slack_spacing(along) as f32,
                     grease: heads[h].grease,
-                    gain: k.deck.efficiency(h) * self.on_track(j) as f32,
+                    gain: k.deck.efficiency(h),
                     head: h as u32,
+                    delta0: d0 as f32,
+                    delta_slope: (d1 - d0) as f32,
                     pad: 0.0,
                 }
             })
             .collect();
-        super::vcr::VcrFieldPlan { lines, tape: k.tape, deck: k.deck }
+        let mut plan = VcrFieldPlan::new(lines, k.tape, k.deck, fmt);
+        if k.generations > 0 {
+            plan.earlier = (1..=k.generations).map(|g| self.dub_plan(f, g)).collect();
+            plan.linked = true;
+            plan.yc_mismatch = self.yc_mismatch(k.generations + 1);
+        }
+        plan
     }
 
-    fn tracking_at(&self, j: i64) -> f64 {
-        let e = self.knobs.tracking;
-        let pos = posmod(j, self.l as i64) as f64 / self.l as f64;
-        let wander = 0.03 * value(self.seed, 37, self.field_time(j) * 1.7);
-        let center = 1.0 - 0.55 * e + wander;
-        let width = 0.02 + 0.10 * e;
-        let mut d = (pos - center).abs();
-        d = d.min(1.0 - d);
-        ((1.0 - d / width).max(0.0) * (0.4 + e).min(1.0)).min(1.0)
+    /// How far generation g's recording deck's picture delay misses its
+    /// color delay (samples, ±100 ns).
+    fn yc_mismatch(&self, g: i64) -> i32 {
+        let s = mix(self.seed ^ (g as u64).wrapping_mul(0x9E37_79B9));
+        (6.0 * uni(s, 3, 0) - 3.0).round() as i32
     }
 
-    fn search_at(&self, j: i64) -> (f64, i64) {
-        let bars = self.knobs.search - 1.0;
-        let pos = posmod(j, self.l as i64) as f64 / self.l as f64;
-        let drift = (self.field_time(j) * 0.23) % 1.0;
-        let x = pos * bars + drift;
-        let phase = x - x.floor();
-        let d = phase.min(1.0 - phase);
-        let loss = ((1.0 - d / 0.15).max(0.0) * 1.2).min(1.0);
-        (loss, x.floor() as i64)
+    /// Generation g of the copies this tape was dubbed through (1 is the
+    /// first recording; later ones were recorded from the one before's
+    /// playback): a decent tape in a decent deck, at this tape's speed.
+    fn dub_plan(&self, f: i64, g: i64) -> VcrFieldPlan {
+        let mut settings = GlitchSettings::default();
+        for (key, v) in [("tape_seed", self.knobs.settings.get("tape_seed").round() + (1000 * g) as f64), ("tape_wear", 0.1), ("tape_dropouts", 0.05), ("head_wear", 0.1)] {
+            settings.values.insert(key.into(), v);
+        }
+        let (tape, deck) = (TapeParams::new(&settings), DeckParams::new(&settings));
+        let fmt = self.knobs.transport.format;
+        let l = self.l as i64;
+        let lines = (0..self.raster.active_lines as i64)
+            .map(|y| {
+                let j = f * l + self.raster.vbi_lines as i64 + y;
+                let (field, along) = self.track_place(j, 0.0);
+                let h = posmod(self.head(j) + g, 2) as usize;
+                let origin = TapePosition::new(TapeGeometry::track_origin(field, fmt), 0.0);
+                VcrLine {
+                    origin_base: origin.base,
+                    origin_offset: origin.offset,
+                    along0: along as f32,
+                    spacing: deck.wear_spacing(h),
+                    grease: 0.0,
+                    gain: deck.efficiency(h),
+                    head: h as u32,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut plan = VcrFieldPlan::new(lines, tape, deck, fmt);
+        plan.linked = g > 1;
+        plan.yc_mismatch = self.yc_mismatch(g);
+        plan
     }
 
     fn noise_sigma(&self, loss: f64) -> f64 {

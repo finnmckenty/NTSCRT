@@ -39,6 +39,34 @@ pub fn control(ui: &mut egui::Ui, p: &GlitchParam, values: &mut GlitchSettings) 
             });
             return changed;
         }
+        Kind::Choice(names) => {
+            // A row of buttons for a few names (the Mac's segmented
+            // control), a menu for more.
+            let current = (v.round().max(0.0) as usize).min(names.len() - 1);
+            let mut picked = current;
+            ui.horizontal(|ui| {
+                ui.label(p.label).on_hover_text(p.help);
+                if names.len() <= 3 {
+                    for (i, name) in names.iter().enumerate() {
+                        ui.selectable_value(&mut picked, i, *name).on_hover_text(p.help);
+                    }
+                } else {
+                    egui::ComboBox::from_id_salt(("choice", p.id))
+                        .selected_text(names[current])
+                        .show_ui(ui, |ui| {
+                            for (i, name) in names.iter().enumerate() {
+                                ui.selectable_value(&mut picked, i, *name);
+                            }
+                        })
+                        .response
+                        .on_hover_text(p.help);
+                }
+            });
+            if picked != current {
+                values.values.insert(p.id.to_string(), picked as f64);
+                return true;
+            }
+        }
         Kind::Slider { min, max, percent, unit } => {
             ui.label(p.label).on_hover_text(p.help);
             let (scale, suffix) = if percent { (100.0, "%".to_string()) } else { (1.0, format!(" {unit}")) };

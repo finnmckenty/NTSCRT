@@ -38,15 +38,112 @@ impl TapeGeometry {
         field_line / lines_per_field as f64 * Self::track_length() + u / T::LINE * Self::line_length()
     }
 
-    pub fn track_origin(field: i64) -> f64 {
-        field as f64 * Self::advance_per_field()
+    /// The track of field `field` starts this far along the tape (mm).
+    pub fn track_origin(field: i64, format: TapeFormat) -> f64 {
+        field as f64 * format.advance_per_field()
     }
 
-    pub fn point(field: i64, along: f64, across: f64) -> TapePosition {
+    /// The tape point `along` mm up the track of field `field`, offset
+    /// `across` mm sideways (toward the top edge).
+    pub fn point(field: i64, along: f64, across: f64, format: TapeFormat) -> TapePosition {
         let a = Self::angle();
-        let x = Self::track_origin(field) + along * a.cos() - across * a.sin();
+        let x = Self::track_origin(field, format) + along * a.cos() - across * a.sin();
         let y = Self::TRACK_START + along * a.sin() + across * a.cos();
         TapePosition::new(x, y)
+    }
+}
+
+/// The speed a tape was recorded at. The drum turns at the same rate in all
+/// three, so the tracks are as long and the signal on them the same; the
+/// tape just moves on less between fields, so the tracks are narrower and
+/// lie closer — a deck records LP and EP with narrower heads, which in EP
+/// are wider than the track and overwrite part of the one before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TapeFormat {
+    /// 0 SP (standard play), 1 LP (long play, ½ speed), 2 EP (extended, ⅓).
+    pub speed: usize,
+}
+
+impl TapeFormat {
+    pub const SP: TapeFormat = TapeFormat { speed: 0 };
+    pub const NAMES: [&'static str; 3] = ["SP", "LP", "EP"];
+
+    pub fn with_speed(speed: i64) -> Self {
+        Self { speed: speed.clamp(0, 2) as usize }
+    }
+    pub fn new(s: &super::GlitchSettings) -> Self {
+        Self::with_speed(s.get("tape_speed").round() as i64)
+    }
+
+    /// Tape transport per field, mm.
+    pub fn advance_per_field(&self) -> f64 {
+        TapeGeometry::advance_per_field() / (self.speed + 1) as f64
+    }
+    /// Neighboring tracks' spacing across the tape, mm (58, 29, 19.3 µm).
+    pub fn track_pitch(&self) -> f64 {
+        self.advance_per_field() * TapeGeometry::angle().sin()
+    }
+    /// The video heads' width, mm: full-width SP heads, and the narrow
+    /// heads of a four-head deck for LP and EP.
+    pub fn head_width(&self) -> f64 {
+        if self.speed == 0 { 0.058 } else { 0.026 }
+    }
+    /// What's left of each recorded track once the next has been written
+    /// over its edge, mm.
+    pub fn track_width(&self) -> f64 {
+        self.head_width().min(self.track_pitch())
+    }
+    /// How far a track's lines sit along from the neighboring track's, in
+    /// lines (1.5 SP, 0.75 LP, 0.5 EP).
+    pub fn track_offset_lines(&self) -> f64 {
+        self.advance_per_field() * TapeGeometry::angle().cos() / TapeGeometry::line_length()
+    }
+    /// The noise a head picks up, against an SP head's: decks make most of
+    /// a narrow track's loss back with their narrow heads (spec sheets give
+    /// much the same video S/N in every speed), leaving LP about 1.5 dB and
+    /// EP 2.5 dB of carrier-to-noise behind SP.
+    pub fn noise_scale(&self) -> f64 {
+        [1.0, 0.53, 0.445][self.speed]
+    }
+
+    /// What a head `delta` track pitches off its own track's center reads
+    /// of the three tracks nearest it (`center` − 1, `center`, `center` + 1):
+    /// each one's share of a full SP track's output for the FM carrier and
+    /// for the color-under. Tracks an odd number from its own were written
+    /// at the other azimuth, so short wavelengths cancel (azimuth loss).
+    pub fn read(&self, delta: f64) -> (i64, [f64; 3], [f64; 3]) {
+        let (p, w, tw) = (self.track_pitch() * 1000.0, self.head_width() * 1000.0, self.track_width() * 1000.0);
+        let center = delta.round() as i64;
+        let (lo, hi) = (delta * p - w / 2.0, delta * p + w / 2.0);
+        let (mut fm, mut color) = ([0.0; 3], [0.0; 3]);
+        for t in 0..3 {
+            let k = center - 1 + t as i64;
+            let o = (hi.min(k as f64 * p + tw / 2.0) - lo.max(k as f64 * p - tw / 2.0)).max(0.0);
+            let share = o / 58.0;
+            if k % 2 == 0 {
+                fm[t] = share;
+                color[t] = share;
+            } else {
+                fm[t] = share * Self::azimuth_loss(o, Self::FM_MHZ);
+                color[t] = share * Self::azimuth_loss(o, super::vcr::color_under_mhz());
+            }
+        }
+        (center, fm, color)
+    }
+
+    /// The FM carrier's frequency for azimuth loss (mid-band).
+    pub const FM_MHZ: f64 = 4.0;
+    /// tan of the 12° between the two heads' azimuths.
+    pub fn azimuth_tan() -> f64 {
+        (12.0 * std::f64::consts::PI / 180.0).tan()
+    }
+
+    /// Amplitude (signed) a head reads of a track recorded at the other
+    /// azimuth across `width` µm, at `mhz`.
+    pub fn azimuth_loss(width: f64, mhz: f64) -> f64 {
+        let lambda = TapeGeometry::WRITING_SPEED / mhz;
+        let x = std::f64::consts::PI * width * Self::azimuth_tan() / lambda;
+        if x < 1e-6 { 1.0 } else { x.sin() / x }
     }
 }
 
@@ -78,6 +175,8 @@ pub struct TapeParams {
     pub edge: f32,
     pub mold: f32,
     pub vaseline: f32,
+    /// Binder breaking down (sticky shed): the tape drags and sheds.
+    pub sticky: f32,
 }
 
 impl TapeParams {
@@ -92,6 +191,7 @@ impl TapeParams {
             edge: u("tape_edge_damage"),
             mold: u("tape_mold"),
             vaseline: u("tape_vaseline"),
+            sticky: u("tape_sticky"),
         }
     }
     pub fn remanence(&self) -> f32 {
@@ -143,7 +243,7 @@ fn smooth(t: f32) -> f32 {
 }
 
 #[inline(always)]
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -192,7 +292,9 @@ pub fn tape_at(p: TapePosition, t: &TapeParams, detail: bool) -> TapePoint {
     let mut lift = t.roughness();
     let mut out = t.remanence();
     let mut film = 0.0f32;
-    let mut shed = 0.02 * t.wear;
+    // Worn coating sheds a little everywhere; a hydrolyzed binder sheds
+    // gummy oxide all along the tape.
+    let mut shed = 0.02 * t.wear + 0.9 * t.sticky * t.sticky;
 
     {
         let (cx, fx) = cell(p, 5);
@@ -247,10 +349,16 @@ pub fn tape_at(p: TapePosition, t: &TapeParams, detail: bool) -> TapePoint {
         }
     }
 
+    // Lengthwise scratches from worn guides, along a stretch of tape. Most
+    // are narrower than a track (6–80 µm); the debris thrown up either side
+    // holds the head off a little. A scratch weaves sideways (tens of µm),
+    // and its depth and width vary, with skips.
     if detail && t.scratches > 0.0 {
         let lane = (y * 4.0).floor() as i32;
         let (sx, fx) = cell(p, 3000);
-        for l in -2..=2 {
+        let ((c80, f80), (c15, f15)) = (cell(p, 80), cell(p, 15));
+        let ((c200, f200), (c120, f120)) = (cell(p, 200), cell(p, 120));
+        for l in -1..=1 {
             let li = lane.wrapping_add(l);
             if uni(s, 31, li, sx) >= t.scratches * 0.3 {
                 continue;
@@ -259,14 +367,22 @@ pub fn tape_at(p: TapePosition, t: &TapeParams, detail: bool) -> TapePoint {
             if fx < a.min(b) * 0.6 || fx > 0.4 + a.max(b) * 0.6 {
                 continue;
             }
-            let yc = (li as f32 + 0.1 + 0.8 * uni(s, 34, li, sx)) * 0.25;
-            let w = 0.02 + 0.2 * uni(s, 35, li, sx).powi(2) * (0.5 + 0.5 * t.scratches);
+            // This scratch's own variation along the tape.
+            let ss = s ^ (li as u32).wrapping_mul(0x9E37_79B9) ^ (sx as u32).wrapping_mul(0x85EB_CA6B);
+            let weave = 0.03 * (2.0 * noise1(ss, 37, c80, f80) - 1.0) + 0.012 * (2.0 * noise1(ss, 38, c15, f15) - 1.0);
+            let yc = (li as f32 + 0.15 + 0.7 * uni(s, 34, li, sx)) * 0.25 + weave;
+            let u = uni(s, 35, li, sx);
+            let w = (0.006 + 0.074 * u * u * u) * (0.6 + 0.4 * t.scratches) * (0.5 + noise1(ss, 39, c200, f200));
+            let depth = smoothstep(0.3, 0.55, noise1(ss, 40, c120, f120));
+            if depth <= 0.0 {
+                continue;
+            }
             let dy = (y - yc).abs();
             if dy < w * 0.5 {
-                out *= 0.2 * uni(s, 36, li, sx);
-                lift += 0.4 * t.scratches;
+                out *= 1.0 - 0.95 * depth;
+                lift += 0.15 * depth * t.scratches;
             } else if dy < w * 1.5 {
-                lift += 1.0 * t.scratches * (1.0 - (dy - w * 0.5) / w);
+                lift += 0.35 * depth * t.scratches * (1.0 - (dy - w * 0.5) / w);
             }
         }
     }
@@ -390,12 +506,12 @@ pub struct Fold {
 }
 
 /// The creases track `field` crosses, in order along it.
-pub fn folds(field: i64, t: &TapeParams) -> Vec<Fold> {
+pub fn folds(field: i64, t: &TapeParams, format: TapeFormat) -> Vec<Fold> {
     if t.creases <= 0.0 {
         return Vec::new();
     }
     let s = t.seed;
-    let start = TapeGeometry::track_origin(field);
+    let start = TapeGeometry::track_origin(field, format);
     let lo = (start * 10.0 / 400.0).floor() as i32 - 1;
     let hi = ((start + TapeGeometry::track_length()) * 10.0 / 400.0).floor() as i32 + 1;
     let (c, sn) = (TapeGeometry::angle().cos(), TapeGeometry::angle().sin());

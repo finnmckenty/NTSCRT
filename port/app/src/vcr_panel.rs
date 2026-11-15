@@ -26,7 +26,14 @@ pub fn controls(ui: &mut egui::Ui, values: &mut GlitchSettings) -> bool {
                 })
                 .response
                 .on_hover_text(format!("Start from a typical {} condition, then adjust it below", label.to_lowercase()));
+            let mut section = None;
             for p in group_controls(group) {
+                // A heading where the controls' section changes.
+                if p.section.is_some() && p.section != section {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(p.section.unwrap_or_default()).small().weak());
+                }
+                section = p.section;
                 changed |= control(ui, p, values);
             }
         });

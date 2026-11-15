@@ -77,8 +77,18 @@ impl Renderer {
         let standing_still = (time - sim_time).abs() <= 2.0 * line_time;
         let jumped = time < sim_time - 2.0 * line_time || time - sim_time > Self::MAX_STEP;
         let retuned = standing_still && self.last_settings.as_ref().is_some_and(|l| l.timing() != settings.timing());
+        let past = if standing_still { None } else { frame.history.as_ref() };
         if fresh || jumped || retuned {
             self.resimulate(time, settings, frame.history.as_ref());
+        } else if let Some(h) = past.filter(|h| self.key == Some(CheckpointKey::History(h.id, h.frame_duration.to_bits()))) {
+            // A short step forward through keyframed knobs (playback, or a
+            // scrub of under a second): run it frame by frame through the
+            // keyframes, exactly as the re-run from zero would, so a moment
+            // looks the same however the playhead got there.
+            let sim = self.sim.as_mut().expect("sim");
+            let resume = sim.snapshot();
+            let settings_at = h.settings_at.clone();
+            sim.resimulate(time, h.frame_duration, &move |t| settings_at(t), Some(&resume), None);
         } else {
             let sim = self.sim.as_mut().expect("sim");
             sim.advance(time, settings);

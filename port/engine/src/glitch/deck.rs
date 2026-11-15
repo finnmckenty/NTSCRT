@@ -6,7 +6,7 @@
 //! be reproduced by playing from the start.
 
 use super::receiver::{posmod, timing as T};
-use super::tape::{tape_at, uni, TapeGeometry, TapeParams};
+use super::tape::{tape_at, uni, TapeFormat, TapeGeometry, TapeParams};
 use super::GlitchSettings;
 
 /// The heads, from the Deck knobs. Head 0 plays even fields, head 1 odd.
@@ -73,6 +73,7 @@ pub struct DeckSnapshot {
 pub struct DeckSimulator {
     pub tape: TapeParams,
     pub deck: DeckParams,
+    pub format: TapeFormat,
     /// The last field stepped through.
     field: i64,
     heads: Option<[HeadState; 2]>,
@@ -83,12 +84,13 @@ impl DeckSimulator {
     const HISTORY: usize = 12;
 
     pub fn new(s: &GlitchSettings) -> Self {
-        Self { tape: TapeParams::new(s), deck: DeckParams::new(s), field: 0, heads: None, history: Vec::new() }
+        Self { tape: TapeParams::new(s), deck: DeckParams::new(s), format: TapeFormat::new(s), field: 0, heads: None, history: Vec::new() }
     }
 
     pub fn update(&mut self, s: &GlitchSettings) {
         self.tape = TapeParams::new(s);
         self.deck = DeckParams::new(s);
+        self.format = TapeFormat::new(s);
     }
 
     pub fn reset(&mut self, field: i64) {
@@ -142,7 +144,7 @@ impl DeckSimulator {
         let (mut shed, mut film) = (0.0f32, 0.0f32);
         for i in 0..n {
             let along = (i as f64 + 0.5) / n as f64 * TapeGeometry::track_length();
-            let p = tape_at(TapeGeometry::point(f, along, 0.0), &self.tape, false);
+            let p = tape_at(TapeGeometry::point(f, along, 0.0, self.format), &self.tape, false);
             shed += p.shed;
             film += p.film;
         }

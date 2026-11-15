@@ -126,14 +126,19 @@ impl Look {
                         ntsc: object(k.get("ntsc")),
                         glitch: {
                             let g = object(k.get("glitch"));
-                            match vcr_from_legacy {
-                                Some(v) if !g.is_empty() => {
-                                    let floats: std::collections::BTreeMap<String, f64> = g.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
-                                    let mut m = crate::glitch::GlitchSettings::migrated(&floats);
-                                    m.insert(crate::glitch::VCR_ID.into(), v);
-                                    m.into_iter().map(|(k, v)| (k, Value::from(v))).collect()
+                            if g.is_empty() {
+                                g
+                            } else {
+                                // As on the Mac: every keyframe in today's
+                                // terms; one without the VCR switch takes the
+                                // look's.
+                                let floats: std::collections::BTreeMap<String, f64> = g.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
+                                let had_vcr = floats.contains_key(crate::glitch::VCR_ID);
+                                let mut m = crate::glitch::GlitchSettings::migrated(&floats);
+                                if !had_vcr {
+                                    m.insert(crate::glitch::VCR_ID.into(), vcr_from_legacy.unwrap_or_else(|| look.glitch_values.get(crate::glitch::VCR_ID)));
                                 }
-                                _ => g,
+                                m.into_iter().map(|(k, v)| (k, Value::from(v))).collect()
                             }
                         },
                         digital: {

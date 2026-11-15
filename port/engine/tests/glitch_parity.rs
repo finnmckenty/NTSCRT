@@ -56,16 +56,33 @@ fn field_plans_match_the_mac() {
         for (a, b) in c.iter().zip(ours) {
             assert!(close(a.as_f64().unwrap(), b), "{name}: chroma Mac {a}, ours {b}");
         }
-        let vcr = mac["vcr"].as_array().unwrap();
-        let lines = plan.vcr.as_ref().map(|v| v.lines.as_slice()).unwrap_or(&[]);
-        assert_eq!(vcr.len(), lines.len(), "{name}: VCR lines");
-        for (y, (m, l)) in vcr.iter().zip(lines).enumerate() {
-            let ours = [l.origin_base as f64, l.origin_offset as f64, l.along0 as f64, l.spacing as f64, l.grease as f64, l.gain as f64, l.head as f64];
-            for (i, (a, b)) in m.as_array().unwrap().iter().zip(ours).enumerate() {
-                assert!(close(a.as_f64().unwrap(), b), "{name}: VCR line {y} field {i}: Mac {a}, ours {b}");
+        let compare_lines = |what: &str, mac: &Value, lines: &[ntscrt_engine::glitch::vcr::VcrLine]| {
+            let m = mac.as_array().unwrap();
+            assert_eq!(m.len(), lines.len(), "{name}: {what} lines");
+            for (y, (m, l)) in m.iter().zip(lines).enumerate() {
+                let ours = [l.origin_base as f64, l.origin_offset as f64, l.along0 as f64, l.spacing as f64, l.grease as f64, l.gain as f64, l.head as f64,
+                            l.delta0 as f64, l.delta_slope as f64];
+                for (i, (a, b)) in m.as_array().unwrap().iter().zip(ours).enumerate() {
+                    // The head's offset is a difference of tape positions: f32 on both sides.
+                    let ok = if i >= 7 { (a.as_f64().unwrap() - b).abs() <= 1e-5 } else { close(a.as_f64().unwrap(), b) };
+                    assert!(ok, "{name}: {what} line {y} field {i}: Mac {a}, ours {b}");
+                }
             }
+        };
+        compare_lines("VCR", &mac["vcr"], plan.vcr.as_ref().map(|v| v.lines.as_slice()).unwrap_or(&[]));
+        let info = |linked: bool, yc: i32, speed: usize| [linked as i64, yc as i64, speed as i64];
+        if let Some(v) = &plan.vcr {
+            let m = &mac["vcrInfo"];
+            assert_eq!([m["linked"].as_i64().unwrap(), m["ycMismatch"].as_i64().unwrap(), m["speed"].as_i64().unwrap()], info(v.linked, v.yc_mismatch, v.format.speed), "{name}: VCR");
+        }
+        let earlier = mac["earlier"].as_array().unwrap();
+        let ours = plan.vcr.as_ref().map(|v| v.earlier.as_slice()).unwrap_or(&[]);
+        assert_eq!(earlier.len(), ours.len(), "{name}: generations");
+        for (g, (m, p)) in earlier.iter().zip(ours).enumerate() {
+            compare_lines(&format!("generation {}", g + 1), &m["lines"], &p.lines);
+            assert_eq!([m["linked"].as_i64().unwrap(), m["ycMismatch"].as_i64().unwrap(), m["speed"].as_i64().unwrap()], info(p.linked, p.yc_mismatch, p.format.speed), "{name}: generation {}", g + 1);
         }
         n += 1;
     }
-    assert!(n >= 6, "found {n} fixtures");
+    assert!(n >= 10, "found {n} fixtures");
 }

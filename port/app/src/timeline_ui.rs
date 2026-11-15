@@ -76,6 +76,7 @@ impl App {
         if !ntsc.is_empty() {
             self.ntsc_values = ntsc;
         }
+        self.glitch_off_key_edit = None;
         for (k, v) in ev.glitch(self.playhead) {
             if let Some(f) = v.as_f64() {
                 self.glitch_values.values.insert(k, f);
@@ -112,6 +113,7 @@ impl App {
     }
 
     pub(crate) fn set_key_at_playhead(&mut self) {
+        self.glitch_off_key_edit = None;
         let snap = self.snapshot(self.playhead);
         let tol = self.parked_tolerance().max(0.005);
         match self.keys.iter().position(|k| (k.t - self.playhead).abs() < tol) {

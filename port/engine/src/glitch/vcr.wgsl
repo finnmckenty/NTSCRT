@@ -16,16 +16,21 @@ struct VcrU {
     wear: f32, dropouts: f32, scratches: f32, creases: f32,
     edge: f32, mold: f32, vaseline: f32, remanence: f32,
     roughness: f32, pinhole: f32, flake: f32, burstAmp: f32,
+    pitchUM: f32, headUM: f32, trackUM: f32, rowsPerTrack: f32,
+    azF: f32, azC: f32, headW: f32, pad1: f32,
+    link: u32, lumaDelay: u32, nb0: f32, nb1: f32,
+    nb2: f32, na1: f32, na2: f32, kb0: f32,
+    kb1: f32, kb2: f32, ka1: f32, ka2: f32,
 };
 struct VcrLine {
     originBase: i32, originOffset: f32, along0: f32, spacing: f32,
-    grease: f32, gain: f32, head: u32, pad: f32,
+    grease: f32, gain: f32, head: u32, delta0: f32, deltaSlope: f32, pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: VcrU;
 @group(0) @binding(1) var<storage, read> lines: array<VcrLine>;
 @group(0) @binding(2) var<storage, read_write> rf: array<f32>;
-@group(0) @binding(3) var<storage, read_write> seg: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> seg: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> mag: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read_write> pb: array<f32>;
 @group(0) @binding(6) var<storage, read_write> zb: array<vec2<f32>>;
@@ -37,6 +42,8 @@ struct VcrLine {
 @group(0) @binding(12) var<storage, read> taps: array<vec2<f32>>;
 @group(0) @binding(13) var src: texture_2d<f32>;
 @group(0) @binding(14) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(15) var<storage, read_write> iq: array<vec2<f32>>;
+@group(0) @binding(16) var<storage, read_write> combed: array<vec2<f32>>;
 
 const SYNC_END: f32 = 4.7;
 const BURST_S: f32 = 5.3;
@@ -71,6 +78,18 @@ fn gaussn(a: u32, b: u32, c: i32, d: i32) -> f32 {
     let u2 = tuni(a ^ 0x5bd1e995u, b, c, d + 7);
     return sqrt(-2.0 * log(u1)) * cos(TAU * u2);
 }
+// (cos, sin) of an angle a turned on by q quarter turns.
+fn quarter(c: f32, s: f32, q: i32) -> vec2<f32> {
+    let r = q & 3;
+    if (r == 0) { return vec2<f32>(c, s); }
+    if (r == 1) { return vec2<f32>(-s, c); }
+    if (r == 2) { return vec2<f32>(-c, -s); }
+    return vec2<f32>(s, -c);
+}
+// The color-under's phase on line `row` of a track recorded by a head
+// turning it `sense` (±1) quarter turns a line.
+fn turns(sense: i32, row: i32) -> i32 { return sense * row; }
+fn sincf(x: f32) -> f32 { return select(sin(x) / x, 1.0, abs(x) < 1e-4); }
 fn sm(t: f32) -> f32 { return t * t * (3.0 - 2.0 * t); }
 fn sstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
@@ -157,21 +176,29 @@ fn tape_at(p: TPos) -> TPt {
     if (U.scratches > 0.0) {
         let lane = i32(floor(y * 4.0));
         let sx = tcell(p, 3000);
-        for (var l = -2; l <= 2; l++) {
+        let c80 = tcell(p, 80);
+        let c15 = tcell(p, 15);
+        let c200 = tcell(p, 200);
+        let c120 = tcell(p, 120);
+        for (var l = -1; l <= 1; l++) {
             let li = lane + l;
             if (tuni(s, 31u, li, sx.c) >= U.scratches * 0.3) { continue; }
             let a = tuni(s, 32u, li, sx.c);
             let b = tuni(s, 33u, li, sx.c);
             if (sx.f < min(a, b) * 0.6 || sx.f > 0.4 + max(a, b) * 0.6) { continue; }
-            let yc = (f32(li) + 0.1 + 0.8 * tuni(s, 34u, li, sx.c)) * 0.25;
+            let ss = s ^ (bitcast<u32>(li) * 0x9E3779B9u) ^ (bitcast<u32>(sx.c) * 0x85EBCA6Bu);
+            let weave = 0.03 * (2.0 * noise1(ss, 37u, c80.c, c80.f) - 1.0) + 0.012 * (2.0 * noise1(ss, 38u, c15.c, c15.f) - 1.0);
+            let yc = (f32(li) + 0.15 + 0.7 * tuni(s, 34u, li, sx.c)) * 0.25 + weave;
             let su = tuni(s, 35u, li, sx.c);
-            let w = 0.02 + 0.2 * su * su * (0.5 + 0.5 * U.scratches);
+            let w = (0.006 + 0.074 * su * su * su) * (0.6 + 0.4 * U.scratches) * (0.5 + noise1(ss, 39u, c200.c, c200.f));
+            let depth = sstep(0.3, 0.55, noise1(ss, 40u, c120.c, c120.f));
+            if (depth <= 0.0) { continue; }
             let dy = abs(y - yc);
             if (dy < w * 0.5) {
-                outp *= 0.2 * tuni(s, 36u, li, sx.c);
-                lift += 0.4 * U.scratches;
+                outp *= 1.0 - 0.95 * depth;
+                lift += 0.15 * depth * U.scratches;
             } else if (dy < w * 1.5) {
-                lift += 1.0 * U.scratches * (1.0 - (dy - w * 0.5) / w);
+                lift += 0.35 * depth * U.scratches * (1.0 - (dy - w * 0.5) / w);
             }
         }
     }
@@ -263,16 +290,28 @@ fn tape_at(p: TPos) -> TPt {
 }
 
 // ---- 1: record each line (one thread per row, along the line) ----
+// First the signal arriving at the deck (IRE into rf, chroma into iq),
+// then, in place, what the deck records of it.
 @compute @workgroup_size(64)
 fn vcr_record(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = gid.x;
     if (y >= U.rows) { return; }
     let w = i32(U.width);
-    var phase = TAU * tuni(U.seed ^ 0xA5A5u, U.field, i32(y), 1);
-    var xPrev = 0.0;
-    var ePrev = 0.0;
-    for (var i = 0u; i < U.n; i++) {
-        let u = (f32(i) + 0.5) * U.dt;
+    let row = y * U.n;
+    // A copy: the deck's composite input (see vcr.rs INPUT_TRAP).
+    var sTrap = vec4<f32>(-40.0);
+    var sI1 = vec4<f32>(0.0);
+    var sI2 = vec4<f32>(0.0);
+    var sQ1 = vec4<f32>(0.0);
+    var sQ2 = vec4<f32>(0.0);
+    var ring: array<f32, 32>;
+    for (var k = 0; k < 32; k++) { ring[k] = -40.0; }
+    // The color filters lag by `lag`; the deck delays the picture to match
+    // (lumaDelay, which misses by a little), and everything is timed from
+    // sync, so the lag itself goes.
+    let lag = select(0u, 13u, U.link != 0u);
+    for (var i = 0u; i < U.n + lag; i++) {
+        let u = (f32(min(i, U.n - 1u)) + 0.5) * U.dt;
         var ire = 0.0;
         var c = vec2<f32>(0.0);
         if (u < SYNC_END) {
@@ -290,6 +329,33 @@ fn vcr_record(@builtin(global_invocation_id) gid: vec3<u32>) {
             ire = 7.5 + 92.5 * q.x;
             c = q.yz;
         }
+        if (U.link != 0u) {
+            // One composite signal, color on the 3.58 MHz subcarrier
+            // (inverted line to line): the picture is what a trap at the
+            // subcarrier lets through, the color what demodulating there
+            // finds, picture detail included (cross-color).
+            let th = 0.78539816 * f32(i & 7u) + 3.14159265 * f32(y & 1u);
+            let cs = cos(th);
+            let sn = sin(th);
+            let comp = ire + 92.5 * (c.x * cs + c.y * sn);
+            let l = biquad(&sTrap, comp, U.nb0, U.nb1, U.nb2, U.na1, U.na2);
+            var d = (2.0 / 92.5) * comp * vec2<f32>(cs, sn);
+            d.x = biquad(&sI2, biquad(&sI1, d.x, U.kb0, U.kb1, U.kb2, U.ka1, U.ka2), U.kb0, U.kb1, U.kb2, U.ka1, U.ka2);
+            d.y = biquad(&sQ2, biquad(&sQ1, d.y, U.kb0, U.kb1, U.kb2, U.ka1, U.ka2), U.kb0, U.kb1, U.kb2, U.ka1, U.ka2);
+            ring[i & 31u] = l;
+            if (i < lag) { continue; }
+            rf[row + i - lag] = ring[(i + 32u - U.lumaDelay) & 31u];
+            iq[row + i - lag] = d;
+        } else {
+            rf[row + i] = ire;
+            iq[row + i] = c;
+        }
+    }
+    var phase = TAU * tuni(U.seed ^ 0xA5A5u, U.field, i32(y), 1);
+    var xPrev = rf[row];
+    var ePrev = rf[row];
+    for (var i = 0u; i < U.n; i++) {
+        let ire = rf[row + i];
         let e = U.emB0 * ire + U.emB1 * xPrev - U.emA1 * ePrev;
         xPrev = ire;
         ePrev = e;
@@ -297,24 +363,28 @@ fn vcr_record(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mhz = 3.4 + (ec + 40.0) / 140.0;
         phase += TAU * mhz * U.dt;
         phase -= TAU * floor(phase / TAU);
-        let ang = U.cuStep * f32(i);
-        let under = U.chromaLevel * (c.x * cos(ang) - c.y * sin(ang));
-        rf[y * U.n + i] = cos(phase) + under;
+        // The FM; the chroma goes under it as each track's head writes it
+        // (vcr_magnet).
+        rf[row + i] = cos(phase);
     }
 }
 
 // ---- 2: the tape under each segment, across the head's width ----
+// And which tracks the head is over: its center track and the two beside
+// it, each one's share of a full SP track's output — at the other azimuth,
+// after azimuth loss — for the FM and for the color-under.
 @compute @workgroup_size(64)
 fn vcr_tape(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= U.segs || gid.y >= U.rows) { return; }
     let L = lines[gid.y];
     let u = (f32(gid.x) + 0.5) * 16.0 * U.dt;
     let along = L.along0 + u / U.lineUS * U.lineLength;
+    let delta = L.delta0 + L.deltaSlope * (along - L.along0);
     var lift = 0.0;
     var film = 0.0;
     var outp = 0.0;
     for (var k = 0; k < 4; k++) {
-        let across = (f32(k) - 1.5) * 0.25 * U.pitch;
+        let across = -delta * U.pitch + (f32(k) - 1.5) * 0.25 * U.headW;
         let p = TPos(L.originBase, L.originOffset + (along * U.cosA - across * U.sinA) * 10.0,
                      U.trackStart + along * U.sinA + across * U.cosA);
         let t = tape_at(p);
@@ -326,22 +396,69 @@ fn vcr_tape(@builtin(global_invocation_id) gid: vec3<u32>) {
     film *= 0.25;
     outp *= 0.25;
     let d = lift + L.spacing + max(film, L.grease);
-    seg[gid.y * U.segs + gid.x] = vec2<f32>(d, outp * L.gain);
+    let g = outp * L.gain;
+    let kc = i32(floor(delta + 0.5));
+    let lo = delta * U.pitchUM - 0.5 * U.headUM;
+    let hi = delta * U.pitchUM + 0.5 * U.headUM;
+    var gF = array<f32, 3>(0.0, 0.0, 0.0);
+    var gC = array<f32, 3>(0.0, 0.0, 0.0);
+    for (var t = 0; t < 3; t++) {
+        let k = kc - 1 + t;
+        let c = f32(k) * U.pitchUM;
+        let o = max(0.0, min(hi, c + 0.5 * U.trackUM) - max(lo, c - 0.5 * U.trackUM));
+        let share = o / 58.0 * g;
+        let same = (k & 1) == 0;
+        gF[t] = select(share * sincf(U.azF * o), share, same);
+        gC[t] = select(share * sincf(U.azC * o), share, same);
+    }
+    let i = (gid.y * U.segs + gid.x) * 2u;
+    seg[i] = vec4<f32>(d, f32(kc), gF[0], gC[0]);
+    seg[i + 1u] = vec4<f32>(gF[1], gC[1], gF[2], gC[2]);
 }
 
 // ---- 3: what is magnetized under the head, and how far away ----
+// Each track's FM, and its chroma turned the way its own head turned it,
+// mixed in the head's shares of them. A neighbor's lines sit 1.5 lines
+// along (SP) from the head's own: that line's signal, aligned.
 @compute @workgroup_size(64)
 fn vcr_magnet(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= U.n || gid.y >= U.rows) { return; }
     let sf = (f32(gid.x) + 0.5) / 16.0 - 0.5;
     let i0 = clamp(i32(floor(sf)), 0, i32(U.segs) - 1);
     let i1 = min(i0 + 1, i32(U.segs) - 1);
-    let t = clamp(sf - f32(i0), 0.0, 1.0);
-    let a = seg[gid.y * U.segs + u32(i0)];
-    let b = seg[gid.y * U.segs + u32(i1)];
-    let v = mix(a, b, t);
-    let k = gid.y * U.n + gid.x;
-    mag[k] = vec2<f32>(rf[k] * v.y, v.x);
+    var t = clamp(sf - f32(i0), 0.0, 1.0);
+    let b0 = (gid.y * U.segs + u32(i0)) * 2u;
+    let b1 = (gid.y * U.segs + u32(i1)) * 2u;
+    let a0 = seg[b0];
+    let c0 = seg[b0 + 1u];
+    let a1 = seg[b1];
+    let c1 = seg[b1 + 1u];
+    // Across a change of center track the shares belong to different
+    // tracks: take the nearer segment's.
+    if (a0.y != a1.y) { t = select(1.0, 0.0, t < 0.5); }
+    let a = mix(a0, a1, t);
+    let c = mix(c0, c1, t);
+    let kc = i32(select(a1.y, a0.y, t < 0.5));
+    var gF = array<f32, 3>(a.z, c.x, c.z);
+    var gC = array<f32, 3>(a.w, c.y, c.w);
+    let own = select(-1, 1, lines[gid.y].head == 0u);
+    let ang = U.cuStep * f32(gid.x);
+    let ca = cos(ang);
+    let sa = sin(ang);
+    var acc = 0.0;
+    for (var k3 = 0; k3 < 3; k3++) {
+        if (gF[k3] == 0.0 && gC[k3] == 0.0) { continue; }
+        let k = kc - 1 + k3;
+        let m = i32(floor(f32(kc - k) * U.rowsPerTrack + 0.5));
+        let row = clamp(i32(gid.y) + m, 0, i32(U.rows) - 1);
+        let s = u32(row) * U.n + gid.x;
+        let sense = select(-own, own, (k & 1) == 0);
+        let cs = quarter(ca, sa, turns(sense, row));
+        let c2 = iq[s];
+        let under = U.chromaLevel * (c2.x * cs.x - c2.y * cs.y);
+        acc += gF[k3] * rf[s] + gC[k3] * under;
+    }
+    mag[gid.y * U.n + gid.x] = vec2<f32>(acc, a.x);
 }
 
 // ---- 4: the head reads it: spacing and gap losses, plus noise ----
@@ -415,8 +532,10 @@ fn vcr_line(@builtin(global_invocation_id) gid: vec3<u32>) {
         luma[row + i] = (mhz - 3.4) * 140.0 - 40.0;
         env += 0.12 * (length(c) - env);
         refl = select(refl * 0.99885, refl + 0.05 * (env - refl), env > refl);
-        let on = max(0.02, U.docOn * refl);
-        let off = max(0.03, U.docOff * refl);
+        // Floors against the head's own noise (a narrow LP or EP head's
+        // carrier and noise are both lower): below them it is noise.
+        let on = max(0.9 * U.noise, U.docOn * refl);
+        let off = max(1.36 * U.noise, U.docOff * refl);
         if (flagged) {
             if (env > off) { hold -= 1; if (hold <= 0) { flagged = false; } } else { hold = 14; }
         } else if (env < on) { flagged = true; hold = 14; }
@@ -436,9 +555,13 @@ fn vcr_line(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Flagged samples are stored as v + 10000 (decoded in vcr_out).
         luma[row + i] = select(v, v + 10000.0, chroma[row + i].x > 0.5);
     }
+    // Color-under: mix down, turning this line's phase back the way the
+    // head's own track turned it, then zero-phase low-pass twice.
+    let q = turns(select(-1, 1, lines[y].head == 0u), i32(y));
     for (var i = 0u; i < N; i++) {
         let a = U.cuStep * f32(i);
-        chroma[row + i] = pb[row + i] * vec2<f32>(cos(a), -sin(a));
+        let cs = quarter(cos(a), sin(a), q);
+        chroma[row + i] = pb[row + i] * vec2<f32>(cs.x, -cs.y);
     }
     for (var round = 0; round < 2; round++) {
         var sr = vec4<f32>(0.0);
@@ -456,13 +579,28 @@ fn vcr_line(@builtin(global_invocation_id) gid: vec3<u32>) {
                                              biquad(&si, c.y, U.cb0, U.cb1, U.cb2, U.ca1, U.ca2));
         }
     }
+    // Mixing halves the amplitude; recover chroma units.
     let k = 2.0 / U.chromaLevel;
+    for (var i = 0u; i < N; i++) { chroma[row + i] *= k; }
+}
+
+// ---- 6b: the comb filter ----
+// Each line's color averaged with the line before through a one-line delay.
+// The head's own color comes back the same on both; color picked up off a
+// neighboring track (turned the other way when recorded) comes back
+// reversed on alternate lines, and cancels.
+@compute @workgroup_size(64)
+fn vcr_comb(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let y = gid.x;
+    if (y >= U.rows) { return; }
+    let row = y * U.n;
+    let prev = select(y, y - 1u, y > 0u) * U.n;
     var b = vec2<f32>(0.0);
     var cnt = 0;
-    for (var i = 0u; i < N; i++) {
+    for (var i = 0u; i < U.n; i++) {
+        let c = 0.5 * (chroma[row + i] + chroma[prev + i]);
+        combed[row + i] = c;
         let u = (f32(i) + 0.5) * U.dt;
-        let c = chroma[row + i] * k;
-        chroma[row + i] = c;
         if (u >= BURST_S + 0.3 && u < BURST_E - 0.3) { b += c; cnt++; }
     }
     burst[y] = b / f32(max(cnt, 1));
@@ -518,7 +656,7 @@ fn vcr_out(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         ire += v;
-        c += chroma[gid.y * U.n + u32(i)];
+        c += combed[gid.y * U.n + u32(i)];
     }
     let cnt = f32(n1 - n0);
     ire /= cnt;

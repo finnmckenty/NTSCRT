@@ -188,6 +188,10 @@ struct App {
     timeline_fps: u32,
     playhead: f64,
     timeline_playing: Option<(Instant, f64)>,
+    /// The VCR and Glitch knobs as the user set them between keyframes,
+    /// while they still are: the preview runs on them rather than on the
+    /// keyframes, as every other panel's edits show until the next scrub.
+    glitch_off_key_edit: Option<ntscrt_engine::glitch::GlitchSettings>,
     selected_key: Option<usize>,
     key_drag: Option<usize>,
     export_job: Option<(Arc<export::Progress>, Receiver<Result<String, String>>)>,
@@ -291,6 +295,7 @@ impl App {
             timeline_fps: 30,
             playhead: 0.0,
             timeline_playing: None,
+            glitch_off_key_edit: None,
             selected_key: None,
             key_drag: None,
             export_job: None,
@@ -778,7 +783,7 @@ impl App {
     /// How the knobs vary over the timeline, so a jump re-simulates the
     /// history an export would run through (None without keyframes).
     fn glitch_history(&self) -> Option<ntscrt_engine::glitch::GlitchHistory> {
-        if !self.timeline_open || self.keys.is_empty() {
+        if !self.timeline_open || self.keys.is_empty() || self.glitch_off_key_edit.as_ref() == Some(&self.glitch_values) {
             return None;
         }
         let ev = Arc::new(ntscrt_engine::timeline::Evaluator::new(&self.keys, HashMap::new(), &self.ntsc_settings)?);
@@ -1712,6 +1717,10 @@ impl eframe::App for App {
         let before = (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone(), self.digital_values.clone());
         egui::Panel::left("sidebar").resizable(false).exact_size(SIDEBAR_WIDTH).show(ui, |ui| self.sidebar(ui));
         if (self.shader_values.get(&self.shader).cloned(), self.ntsc_values.clone(), self.glitch_values.clone(), self.digital_values.clone()) != before {
+            let playing = self.timeline_playing.is_some() || self.playing.is_some();
+            if self.glitch_values != before.2 && self.timeline_open && !self.keys.is_empty() && (self.parked_key().is_none() || playing) {
+                self.glitch_off_key_edit = Some(self.glitch_values.clone());
+            }
             self.auto_key();
         }
         if self.timeline_open {

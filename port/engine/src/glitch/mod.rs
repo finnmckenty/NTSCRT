@@ -9,6 +9,7 @@ pub mod params;
 pub mod receiver;
 pub mod stage;
 pub mod tape;
+pub mod transport;
 pub mod vcr;
 
 pub use params::{controls, GlitchParam, GlitchSettings, Group, Kind, VcrCondition, DECKS, DECK_KEYS, PARAMS, TAPES, TAPE_KEYS, VCR_ID};
