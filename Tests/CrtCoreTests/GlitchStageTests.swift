@@ -271,4 +271,58 @@ final class GlitchCheckpointTests: XCTestCase {
         XCTAssertEqual(scrubbed.rows, fresh.rows)
         XCTAssertEqual(scrubbed.vcr?.lines, fresh.vcr?.lines)
     }
+
+    /// Waits on the main run loop for a background re-run to land.
+    private func settle(_ r: GlitchRenderer) {
+        var settled = false
+        r.onSettled = { settled = true }
+        let deadline = Date().addingTimeInterval(30)
+        while !settled && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertTrue(settled, "background re-run never landed")
+    }
+
+    /// A timing knob turned on a paused frame far into a clip: the preview
+    /// shows something at once, and once the background re-run lands the
+    /// frame is exactly what a full re-run on the main thread gives.
+    func testBackgroundRerunAfterRetuneMatchesAFullRerun() throws {
+        var values: [String: Double] = ["vcr": 1, "tracking_offset": 0.3, "back_tension": 0.2,
+                                        "tape_sticky": 0.5, "dirt_buildup": 0.6, "tape_mold": 0.4]
+        let preview = try GlitchRenderer(context: context)
+        preview.rerunsInBackground = true
+        _ = try plan(preview, 6.0, GlitchSettings(values: values))
+        settle(preview)
+        values["back_tension"] = 0.6                      // turned while paused
+        let s = GlitchSettings(values: values)
+        let meanwhile = try plan(preview, 6.0, s)
+        XCTAssertFalse(meanwhile.rows.isEmpty)
+        settle(preview)
+        let settled = try plan(preview, 6.0, s)
+        let fresh = try plan(try GlitchRenderer(context: context), 6.0, s)
+        XCTAssertEqual(settled.rows, fresh.rows)
+        XCTAssertEqual(settled.vcr?.lines, fresh.vcr?.lines)
+        XCTAssertEqual(settled.chromaPhase, fresh.chromaPhase)
+        // Its checkpoints are good for seeking back, too.
+        let back = try plan(preview, 3.5, s)
+        let freshBack = try plan(try GlitchRenderer(context: context), 3.5, s)
+        XCTAssertEqual(back.rows, freshBack.rows)
+    }
+
+    func testBackgroundRerunAfterAJumpMatchesAFullRerunWithKeyframedSettings() throws {
+        let history = GlitchHistory(frameDuration: 1.0 / 24, id: 9) { t in
+            GlitchSettings(values: ["vcr": 1, "tracking_offset": min(0.6, t / 5),
+                                    "back_tension": t > 2.3 ? 0.6 : 0, "tape_sticky": min(1, t / 3),
+                                    "vertical_hold": min(0.9, t / 6)])
+        }
+        let preview = try GlitchRenderer(context: context)
+        preview.rerunsInBackground = true
+        let t = 130.0 / 24
+        _ = try plan(preview, t, history.settingsAt(t), history)   // a far jump from nothing
+        settle(preview)
+        let settled = try plan(preview, t, history.settingsAt(t), history)
+        let fresh = try plan(try GlitchRenderer(context: context), t, history.settingsAt(t), history)
+        XCTAssertEqual(settled.rows, fresh.rows)
+        XCTAssertEqual(settled.vcr?.lines, fresh.vcr?.lines)
+    }
 }

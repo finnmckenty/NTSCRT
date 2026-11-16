@@ -13,10 +13,15 @@ public struct DigitalFrameInput {
     public var history: DigitalHistory?
     /// Earlier frames, for re-running from a keyframe; nil for a still.
     public var earlier: DigitalFrameVisitor?
+    /// Makes another `earlier` with a reader of its own, for a re-run on
+    /// another thread (the preview's background re-runs).
+    public var makeEarlier: (() -> DigitalFrameVisitor?)?
 
     public init(frameIndex: Int, captureSize: (width: Int, height: Int), sourceFPS: Double,
                 settings: DigitalSettings, history: DigitalHistory? = nil,
-                earlier: DigitalFrameVisitor? = nil) {
+                earlier: DigitalFrameVisitor? = nil,
+                makeEarlier: (() -> DigitalFrameVisitor?)? = nil) {
+        self.makeEarlier = makeEarlier
         self.frameIndex = frameIndex
         self.captureSize = captureSize
         self.sourceFPS = sourceFPS
@@ -72,7 +77,7 @@ public struct DigitalExport {
 /// Same storage rules as NtscStage (managed + synchronize on discrete GPUs).
 /// One per thread.
 public final class DigitalStage {
-    public let renderer = DigitalVideoRenderer()
+    public private(set) var renderer = DigitalVideoRenderer()
     private var roundTrip: MTLTexture?
     private var cleanBytes: [UInt8] = []
     private var cleanVersion: Int?
@@ -80,10 +85,91 @@ public final class DigitalStage {
 
     public init() {}
 
+    /// Re-runs longer than this many captures (~10 ms each, with the earlier
+    /// frames to decode) go to a background thread when `rerunsInBackground`
+    /// is on. A Digital knob turned on a paused clip re-runs from the last
+    /// keyframe — up to 10 s of captures — which on the main thread froze
+    /// the app for every tick of the drag.
+    public static let backgroundRerunAbove = 6
+
+    /// The preview turns this on: a long re-run happens off the main thread
+    /// while the frame shows coded on its own under the new settings, and
+    /// `onSettled` (main thread) asks for a redraw when the exact stream is
+    /// ready. Exports leave it off.
+    public var rerunsInBackground = false
+    public var onSettled: (() -> Void)?
+
+    /// What a frame was asked for: a background re-run lands only if the
+    /// preview still wants this stream, at this frame or a later one.
+    private struct Request {
+        let frame: Int
+        let captureSize: (width: Int, height: Int)
+        let sourceFPS: Double
+        let settings: DigitalSettings
+        let history: Int?
+        init(_ i: DigitalFrameInput) {
+            frame = i.frameIndex; captureSize = i.captureSize; sourceFPS = i.sourceFPS
+            settings = i.settings; history = i.history?.id
+        }
+        func continues(_ earlier: Request) -> Bool {
+            frame >= earlier.frame && captureSize == earlier.captureSize && sourceFPS == earlier.sourceFPS
+                && settings == earlier.settings && history == earlier.history
+        }
+    }
+    private final class Rerun: @unchecked Sendable {
+        let request: Request
+        private let lock = NSLock()
+        private var _cancelled = false
+        init(_ r: Request) { request = r }
+        var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+        func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
+    }
+    private var rerun: Rerun?
+    private var latest: Request?
+
     /// The codec as an NtscStage prefilter.
     public func prefilter(_ input: DigitalFrameInput) -> NtscStage.Prefilter {
-        let renderer = self.renderer
-        return { pixels, w, h, rb in input.apply(renderer, pixels: pixels, width: w, height: h, rowBytes: rb) }
+        { [self] pixels, w, h, rb in run(input, pixels: pixels, width: w, height: h, rowBytes: rb) }
+    }
+
+    /// Run the codec on pixels in place — deferring a long re-run to a
+    /// background thread when that's on and possible.
+    private func run(_ input: DigitalFrameInput, pixels: UnsafeMutableRawPointer,
+                     width w: Int, height h: Int, rowBytes rb: Int) {
+        let request = Request(input)
+        latest = request
+        // Off the main thread needs a reader of its own for a clip.
+        let canDefer = rerunsInBackground && (input.earlier == nil || input.makeEarlier != nil)
+        renderer.process(frame: input.frameIndex, pixels: pixels, width: w, height: h, rowBytes: rb,
+                         captureSize: input.captureSize, sourceFPS: input.sourceFPS,
+                         settings: input.settings, history: input.history, earlier: input.earlier,
+                         deferRerunAbove: canDefer ? Self.backgroundRerunAbove : nil)
+        guard let source = renderer.takeDeferredPixels() else { return }
+        rerun?.cancel()
+        let job = Rerun(request)
+        rerun = job
+        nonisolated(unsafe) let input = input
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let exact = DigitalVideoRenderer()
+            exact.isCancelled = { job.cancelled }
+            let earlier = input.earlier == nil ? nil : input.makeEarlier?()
+            var px = source
+            px.withUnsafeMutableBytes {
+                exact.process(frame: input.frameIndex, pixels: $0.baseAddress!, width: w, height: h,
+                              rowBytes: rb, captureSize: input.captureSize, sourceFPS: input.sourceFPS,
+                              settings: input.settings, history: input.history, earlier: earlier)
+            }
+            exact.isCancelled = nil
+            guard !job.cancelled else { return }
+            nonisolated(unsafe) let done = exact
+            DispatchQueue.main.async {
+                guard let self, self.rerun === job, !job.cancelled else { return }
+                self.rerun = nil
+                guard let latest = self.latest, latest.continues(job.request) else { return }
+                self.renderer = done
+                self.onSettled?()
+            }
+        }
     }
 
     /// Apply the stage to `input`; the returned texture is reused by the
@@ -125,7 +211,7 @@ public final class DigitalStage {
         }
         bytes = cleanBytes
         bytes.withUnsafeMutableBytes {
-            frame.apply(renderer, pixels: $0.baseAddress!, width: w, height: h, rowBytes: rowBytes)
+            run(frame, pixels: $0.baseAddress!, width: w, height: h, rowBytes: rowBytes)
         }
         tex.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
         return tex

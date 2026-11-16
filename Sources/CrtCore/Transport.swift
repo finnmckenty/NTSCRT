@@ -86,7 +86,12 @@ final class TransportSimulator {
         var breakAt = [8.0, 6.0, 5.0]   // lag at which each tears loose, µm
         var phase = 0.0                 // search: heads' offset at this field's start
         var rate = 0.0                  // search: pitches crossed per field
+        /// The last `cap` lines, as a ring: once full, `oldest` is where the
+        /// next line goes. (Shifting an array down by one per line cost a
+        /// 17 KB memmove for each of ~15,700 lines a second — most of a
+        /// re-simulation.)
         var lines: [Line] = []
+        var oldest = 0
         var fields: [(field: Int64, phase: Double, rate: Double)] = []
     }
     private var s = State()
@@ -127,7 +132,7 @@ final class TransportSimulator {
         if s.lines.isEmpty { return Line(delta: 0, tbe: 0) }
         let n = Int64(s.lines.count)
         let i = back >= n ? 0 : n - 1 - back
-        return s.lines[Int(i)]
+        return s.lines[(s.oldest + Int(i)) % s.lines.count]
     }
 
     /// Picture search: how far off its own track a head starts sweeping
@@ -204,8 +209,12 @@ final class TransportSimulator {
         // Measured from the nearest track of the heads' own azimuth: a tape
         // a whole frame out (servo lost, drifting) is back on a track.
         let tbe = NTSCTiming.line * 0.45 * tanh(alpha * wrap2(delta) / 0.45)
-        if s.lines.count >= cap { s.lines.removeFirst(s.lines.count - cap + 1) }
-        s.lines.append(Line(delta: delta, tbe: tbe))
+        if s.lines.count < cap {
+            s.lines.append(Line(delta: delta, tbe: tbe))
+        } else {
+            s.lines[s.oldest] = Line(delta: delta, tbe: tbe)
+            s.oldest = (s.oldest + 1) % cap
+        }
         s.line = j
     }
 

@@ -127,8 +127,16 @@ struct PreviewView: NSViewRepresentable {
         // MARK: MTKViewDelegate
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+            lastPresented = nil
             view.setNeedsDisplay(view.bounds)
         }
+
+        /// What the last presented frame showed, during playback. The
+        /// playback link fires at the display's rate (up to 120 Hz) but a
+        /// clip has 24–30 new frames a second; a tick with nothing new
+        /// skips the draw instead of waiting for a drawable and compositing
+        /// the same picture again.
+        private var lastPresented: (chain: Int, view: Int)?
 
         func draw(in view: MTKView) {
             // Everything here runs on the main thread (librashader's Metal
@@ -155,11 +163,16 @@ struct PreviewView: NSViewRepresentable {
                     }
                 }
             }
+            // Pull-model playback: fetch whichever frame is due right now,
+            // and draw only if it (or an edit, zoom or pan) changed anything.
+            if state.isPipelinedPlayback {
+                state.consumePipelinedFrame()
+                if let last = lastPresented, last.chain == state.chainTick, last.view == state.viewTick {
+                    return
+                }
+            }
             guard let drawable = view.currentDrawable,
                   let cb = state.context.queue.makeCommandBuffer() else { return }
-
-            // Pull-model playback: fetch whichever frame is due right now.
-            if state.isPipelinedPlayback { state.consumePipelinedFrame() }
             if Self.perfLog {
                 let now = DispatchTime.now().uptimeNanoseconds
                 if Self.lastDrawAt != 0 {
@@ -312,6 +325,8 @@ struct PreviewView: NSViewRepresentable {
             }
 
             cb.present(drawable)
+            // An incomplete render (lastRenderedChainTick nil) must try again.
+            lastPresented = lastRenderedChainTick == nil ? nil : (state.chainTick, state.viewTick)
             // CRT_COMPOSITE_DUMP=<path.png>: write the drawable's actual
             // pixels once things settle — ground truth for scanline checks.
             // `screencapture -l` returns a 1x image of a 2x window, which

@@ -44,7 +44,7 @@ struct HowlaroundPanel: View {
                 }
             }
         }
-        .onChange(of: state.sourceTexture != nil || state.videoSource != nil) { _, hasSource in
+        .onChange(of: state.hasSourcePicture || state.videoSource != nil) { _, hasSource in
             if hasSource { state.scheduleHowlaroundDraft(delay: .zero) }
         }
         .onDisappear {

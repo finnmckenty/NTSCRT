@@ -1,5 +1,6 @@
 import XCTest
 @testable import CrtCodec
+import CrtCore
 
 /// The Digital video stage: a real block codec, so the tests check codec
 /// behavior — transforms, timing, the encoder/decoder split behind smearing
@@ -203,6 +204,40 @@ final class DigitalVideoTests: XCTestCase {
             return s
         }
         checkJumpsMatchPlaying(base, history: history, "keyframes")
+    }
+
+    /// The preview's long re-runs (a jump far into a clip, a knob turned on
+    /// a paused frame) happen off the main thread; once one lands the frame
+    /// is exactly what a straight re-run gives.
+    func testBackgroundReRunsLandOnTheExactFrame() {
+        var s = DigitalSettings(values: ["frame_rate": 30, "keyframe_interval": 2, "quality": 0.4,
+                                         "data_loss": 0.4, "datamosh": 0.3, "sensor_noise": 0.2])
+        let stage = DigitalStage()
+        stage.rerunsInBackground = true
+        var settled = false
+        stage.onSettled = { settled = true }
+        let n = 50
+        func shown() -> [UInt8] {
+            let input = DigitalFrameInput(frameIndex: n, captureSize: capture, sourceFPS: 30, settings: s,
+                                          earlier: visitor(), makeEarlier: { [self] in visitor() })
+            let codec = stage.prefilter(input)
+            var px = frame(n)
+            px.withUnsafeMutableBytes { codec($0.baseAddress!, size.width, size.height, size.width * 4) }
+            return px
+        }
+        func settle() {
+            let deadline = Date().addingTimeInterval(30)
+            while !settled && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            XCTAssertTrue(settled, "background re-run never landed")
+            settled = false
+        }
+        for change in [nil, ("quality", 0.15), ("data_loss", 0.7)] {
+            if let (k, v) = change { s.values[k] = v }      // turned while paused
+            _ = shown()                                     // meanwhile: coded on its own
+            XCTAssertLessThanOrEqual(stage.renderer.lastRunLength, 1)
+            settle()
+            XCTAssertEqual(shown(), render(DigitalVideoRenderer(), n, s), "\(String(describing: change))")
+        }
     }
 
     func testDatamoshCheckpointsSpareTheReRun() {

@@ -31,7 +31,7 @@ struct SourcePanel: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 // The file's own size — the Crop panel shows what's left of it.
-                if state.sourceTexture != nil, let size = state.sourcePixelSize {
+                if state.hasSourcePicture, let size = state.sourcePixelSize {
                     let frames = state.videoSource.map { "  ·  \($0.totalFrames) frames" } ?? ""
                     Text("\(size.width) × \(size.height) px\(frames)")
                         .font(.caption).foregroundStyle(.secondary)

@@ -326,7 +326,8 @@ public final class ReceiverSimulator {
     public func resimulate(to time: Double, frameDuration: Double,
                            settingsAt: (Double) -> GlitchSettings,
                            resumeFrom: Snapshot? = nil,
-                           checkpoint: ((Snapshot) -> Void)? = nil) {
+                           checkpoint: ((Snapshot) -> Void)? = nil,
+                           isCancelled: (() -> Bool)? = nil) {
         var k = 1
         if let snap = resumeFrom, frameDuration > 0 {
             restore(snap)
@@ -338,6 +339,7 @@ public final class ReceiverSimulator {
         guard time > 0, frameDuration > 0 else { return }
         var nextCheckpoint = (self.time + 1).rounded(.down)
         while true {
+            if let isCancelled, k % 30 == 0, isCancelled() { return }
             let t = min(time, Double(k) * frameDuration)
             advance(to: t, settings: settingsAt(t))
             if t >= time { break }

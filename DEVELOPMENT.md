@@ -181,6 +181,9 @@ For iteration and headless/screenshot verification:
 - `CRT_FRONT=1` — activate the app at launch
 - `CRT_DUMP_TOOLTIPS=1` — print every NSView carrying tooltip text, plus what a click at its center hits, then exit
 - `CRT_HOVER_LOG=1` — log preview hover events and the palette's measured frame
+- `CRT_PRESET_CYCLE=<seconds>` — load every bundled look in turn (`CRT_PRESET_CYCLE_PLAY=1` plays the source video meanwhile; `CRT_PRESET_CYCLE_ONLY="A|B"` picks looks) and print, per look, the longest main-thread stall, frames shown per second and process/GPU memory; then load each look after four different ones and report any setting that depends on the previous look (`CARRY-NONE` = none; skip with `CRT_PRESET_CYCLE_NO_CARRY=1`). `CRT_STALL_SAMPLE_DIR=<dir>` runs `sample(1)` on the app while the main thread is stuck over 0.4 s (run it outside the sandbox). **Keep the display awake** (`caffeinate -u`): with it asleep the preview never draws and every number is meaningless
+- `CRT_EDIT_BENCH=<look name>` — load that look (paused; `CRT_EDIT_BENCH_FRAME=<n>` seeks first) and report the main-thread stall one knob change causes in each panel. A VCR knob 55 s into a clip was ~2 s before the receiver's long re-runs moved off the main thread; `CRT_RERUN_LOG=1` logs those background re-runs starting, cancelling and landing
+- `CRT_CHAIN_BENCH=1` — time picking each CRT shader, first (compile) and again (cached)
 
 **Verifying hover/tooltip behavior:** `CGWarpMouseCursorPosition` moves the cursor *without* posting events, so it cannot drive SwiftUI's `.onHover`/`.onContinuousHover` (AppKit's tooltip manager polls the cursor, so tooltips *do* appear that way — an easy false positive). Real synthetic movement needs `CGEventPost`, which needs Accessibility. Use `CRT_DUMP_TOOLTIPS`/`CRT_HOVER_LOG` for ground truth instead of screenshots.
 

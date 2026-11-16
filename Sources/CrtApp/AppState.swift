@@ -36,11 +36,26 @@ final class AppState {
         }
     }
     private(set) var sourceKind: SourceKind?
+    /// The picture on screen. Not observed: playback replaces it every
+    /// frame, and a view reading it (even through `sourceAspect`) would
+    /// rebuild with it — the whole window, 24–30 times a second. Views
+    /// observe `sourceShape` instead, which changes only with the size; the
+    /// preview redraws on `chainTick`.
+    @ObservationIgnored
     private(set) var sourceTexture: MTLTexture? {
-        didSet { sourceVersion &+= 1 }
+        didSet {
+            sourceVersion &+= 1
+            let shape = sourceTexture.map { SourceShape(width: $0.width, height: $0.height) }
+            if shape != sourceShape { sourceShape = shape }
+        }
     }
+    struct SourceShape: Equatable { let width: Int; let height: Int }
+    /// The source picture's size; nil = no picture yet.
+    private(set) var sourceShape: SourceShape?
+    var hasSourcePicture: Bool { sourceShape != nil }
     /// Bumped whenever the source pixels change (load, scrub, playback), so
     /// the NTSC stage knows when its cached readback is still good.
+    @ObservationIgnored
     private(set) var sourceVersion: Int = 0
     private(set) var sourceError: String?
 
@@ -77,11 +92,13 @@ final class AppState {
     /// PlaybackPipeline for the measured rationale.
     private var playbackPipeline: PlaybackPipeline?
     /// Last frame consumed from the pipeline (retains its pixel buffer).
+    @ObservationIgnored
     private var pipelineOutput: PlaybackPipeline.Output?
     /// Source texture with the NTSC stage already baked in, when playback is
     /// pipelined. The preview uses it as the chain input directly (still
     /// downscaled on the GPU); the compare split keeps using the clean
     /// `sourceTexture`. nil = process normally on the main thread.
+    @ObservationIgnored
     private(set) var processedSourceTexture: MTLTexture?
     /// Bumped on any edit upstream of the shader chain — NTSC settings, the
     /// NTSC toggle, downscale settings, the timeline; queued pipeline frames
@@ -96,6 +113,7 @@ final class AppState {
     static let frameCacheOff = ProcessInfo.processInfo.environment["CRT_FRAME_CACHE_OFF"] == "1"
     /// Chain input for the current video frame when it came from the cache
     /// (NTSC + downscale already applied); nil = not cached this frame.
+    @ObservationIgnored
     private(set) var cachedChainInput: MTLTexture?
     var currentCacheStamp: ChainInputCache.Stamp {
         .init(generation: ntscGeneration, downscale: downscaleSpec)
@@ -104,8 +122,10 @@ final class AppState {
     /// at most a few times a second so it doesn't invalidate views per frame.
     private(set) var cachedRanges: [Range<Int>] = []
     private var cachedRangesUpdatedAt = ContinuousClock.now
+    @ObservationIgnored
     private(set) var playbackCacheHits = 0
     /// Loop wraps since play was pressed.
+    @ObservationIgnored
     private(set) var playbackLoops = 0
 
     /// CRT_CACHE_CHECK: dump the composite when playback shows `frame` on or
@@ -143,6 +163,7 @@ final class AppState {
         cachedRanges = chainInputCache.cachedRanges(stamp: currentCacheStamp)
     }
     /// Dropped-frame count for the current playback run (CRT_PERF_LOG).
+    @ObservationIgnored
     private(set) var playbackDropped: Int = 0
 
     /// Something upstream of the shader chain changed (NTSC settings or
@@ -243,6 +264,7 @@ final class AppState {
     private var playbackClockStart: ContinuousClock.Instant?
     private var playbackScheduleBase = 0
     private var playbackFPS = 24.0
+    @ObservationIgnored
     private(set) var playbackDisplayed = 0
     private var playbackLogStart = ContinuousClock.now
 
@@ -470,8 +492,8 @@ final class AppState {
     /// to letterbox/pillarbox the MTKView so the source isn't stretched, and
     /// by the exporter to derive height from a chosen long edge.
     var sourceAspect: CGFloat {
-        if let tex = sourceTexture, tex.height > 0 {
-            return CGFloat(tex.width) / CGFloat(tex.height)
+        if let shape = sourceShape, shape.height > 0 {
+            return CGFloat(shape.width) / CGFloat(shape.height)
         }
         if let size = sourcePixelSize, size.height > 0 {
             let r = activeCrop?.rect(width: size.width, height: size.height) ?? (0, 0, size.width, size.height)
@@ -688,7 +710,16 @@ final class AppState {
     /// default (a healthy set, clean signal) the output is byte-identical to
     /// having the stage off — off, it isn't run at all.
     var glitchEnabled: Bool = true { didSet { markChainDirty() } }
-    private(set) var glitchValues: [String: Double] = GlitchParam.defaultValues
+    // Values live in an unobserved store; views observe `glitchRevision`, which an
+    // edit bumps at once and timeline playback/scrubbing at most ten times a
+    // second (see refreshPanels) — otherwise every row of the panel rebuilds
+    // on every played frame.
+    @ObservationIgnored private var glitchValuesStore: [String: Double] = GlitchParam.defaultValues
+    private var glitchRevision: Int = 0
+    private(set) var glitchValues: [String: Double] {
+        get { _ = glitchRevision; return glitchValuesStore }
+        set { glitchValuesStore = newValue; glitchRevision &+= 1 }
+    }
     var glitchSettings: GlitchSettings { GlitchSettings(values: glitchValues) }
 
     /// The VCR panel's switch (kept with the glitch knobs, so it is saved
@@ -717,13 +748,29 @@ final class AppState {
     /// it runs. The first time it's switched on, its format is applied —
     /// resolution (the Downscale) included.
     var digitalEnabled: Bool = false { didSet { markChainDirty(); noteChainInputEdited() } }
-    private(set) var digitalValues: [String: Double] = DigitalParam.startingValues
+    // Values live in an unobserved store; views observe `digitalRevision`, which an
+    // edit bumps at once and timeline playback/scrubbing at most ten times a
+    // second (see refreshPanels) — otherwise every row of the panel rebuilds
+    // on every played frame.
+    @ObservationIgnored private var digitalValuesStore: [String: Double] = DigitalParam.startingValues
+    private var digitalRevision: Int = 0
+    private(set) var digitalValues: [String: Double] {
+        get { _ = digitalRevision; return digitalValuesStore }
+        set { digitalValuesStore = newValue; digitalRevision &+= 1 }
+    }
     var digitalSettings: DigitalSettings { DigitalSettings(values: digitalValues) }
     /// Whether a format (or a look's settings) has been applied, so
     /// switching the stage on doesn't reset what's been chosen.
     @ObservationIgnored private var digitalFormatApplied = false
     /// The preview's codec (main thread). Playback and exports run their own.
-    @ObservationIgnored private(set) lazy var digitalStage = DigitalStage()
+    @ObservationIgnored private(set) lazy var digitalStage: DigitalStage = {
+        let stage = DigitalStage()
+        // Long re-runs from a keyframe (a knob turned on a paused clip, a
+        // jump) happen off the main thread; redraw when done.
+        stage.rerunsInBackground = true
+        stage.onSettled = { [weak self] in self?.markChainDirty() }
+        return stage
+    }()
     /// A clip's earlier frames for the preview's re-runs.
     @ObservationIgnored private var digitalClipFrames: (key: String, frames: DigitalClipFrames)?
 
@@ -812,14 +859,6 @@ final class AppState {
         glitchEdited()
     }
 
-    /// Timeline scrub/playback: merge keyed values without auto-keying.
-    private func applyGlitchValues(_ values: [String: Double]) {
-        glitchOffKeyEdit = nil
-        guard !values.isEmpty else { return }
-        glitchValues = glitchValues.merging(values) { _, new in new }
-        markChainDirty()
-    }
-
     func setDigitalValue(_ id: String, _ value: Double) {
         digitalValues[id] = value
         autoKeyIfParked()
@@ -851,16 +890,6 @@ final class AppState {
     var digitalFormat: DigitalFormat? {
         guard downscaleEnabled else { return nil }
         return DigitalFormat.matching(values: digitalValues, width: downscaleWidth)
-    }
-
-    /// Timeline scrub/playback: merge keyed values without auto-keying. The
-    /// frame cache stays — it was baked with the same keyframes.
-    private func applyDigitalValues(_ values: [String: Double]) {
-        guard !values.isEmpty else { return }
-        let merged = digitalValues.merging(values) { _, new in new }
-        guard merged != digitalValues else { return }
-        digitalValues = merged
-        markChainDirty()
     }
 
     /// The frame number the Digital stage gets for what's on screen: a
@@ -903,18 +932,21 @@ final class AppState {
     func previewDigitalFrame(width: Int, height: Int) -> (stage: DigitalStage, input: DigitalFrameInput)? {
         guard digitalEnabled else { return nil }
         var earlier: DigitalFrameVisitor?
+        var makeEarlier: (() -> DigitalFrameVisitor?)?
         if let vs = videoSource {
             let key = "\(ObjectIdentifier(vs).hashValue)-\(String(describing: activeCrop))"
             if digitalClipFrames?.key != key {
                 digitalClipFrames = (key, DigitalClipFrames(source: vs, crop: activeCrop))
             }
             earlier = digitalClipFrames?.frames.visitor
+            let crop = activeCrop
+            makeEarlier = { DigitalClipFrames(source: vs, crop: crop).visitor }
         }
         let input = DigitalFrameInput(
             frameIndex: digitalFrameIndex,
             captureSize: DigitalFrameInput.captureSize(width: width, height: height, downscale: downscaleSpec),
             sourceFPS: digitalSourceFPS, settings: digitalSettings, history: digitalHistory,
-            earlier: earlier)
+            earlier: earlier, makeEarlier: makeEarlier)
         return (digitalStage, input)
     }
 
@@ -936,7 +968,14 @@ final class AppState {
 
     /// The preview's receiver. Exports run their own from time zero; PNG
     /// export reuses this one so a still is exactly what's on screen.
-    @ObservationIgnored private(set) lazy var glitchRenderer: GlitchRenderer? = try? GlitchRenderer(context: context)
+    @ObservationIgnored private(set) lazy var glitchRenderer: GlitchRenderer? = {
+        let r = try? GlitchRenderer(context: context)
+        // Long exact re-runs (a VCR knob turned on a paused clip a minute
+        // in, a far scrub) happen off the main thread; redraw when done.
+        r?.rerunsInBackground = true
+        r?.onSettled = { [weak self] in self?.markChainDirty() }
+        return r
+    }()
 
     /// The receiver's clock for the frame on screen: a video's own time, the
     /// timeline's playhead on a still, or wall-clock time while Animate runs
@@ -986,7 +1025,13 @@ final class AppState {
         var hasher = Hasher()
         hasher.combine(ntscGeneration)
         hasher.combine(total)
-        for k in base.keys.sorted() { hasher.combine(k); hasher.combine(base[k]) }
+        // As digitalHistory: the base only matters for keyframes saved
+        // without glitch values. Hashing it otherwise gave every playhead
+        // position a new id (the playhead writes keyed values into the
+        // base), so each scrub step re-ran the receiver from time zero.
+        if timelineKeys.contains(where: { $0.glitchValues.isEmpty }) {
+            for k in base.keys.sorted() { hasher.combine(k); hasher.combine(base[k]) }
+        }
         hasher.combine(receptionOn)
         return GlitchHistory(frameDuration: 1 / fps, id: hasher.finalize()) { t in
             let frame = (t * fps).rounded()
@@ -1057,8 +1102,8 @@ final class AppState {
 
     /// Resolution the shader actually renders from.
     var chainInputSize: (width: Int, height: Int) {
-        ScanlineGrid.chainInputSize(width: sourceTexture?.width ?? 0,
-                                    height: sourceTexture?.height ?? 0,
+        ScanlineGrid.chainInputSize(width: sourceShape?.width ?? 0,
+                                    height: sourceShape?.height ?? 0,
                                     downscale: downscaleSpec)
     }
 
@@ -1134,12 +1179,53 @@ final class AppState {
     private func applyTimeline(atFrame index: Int) {
         playheadT = normalizedTime(forFrame: index)
         guard timelineEnabled, let ev = makeTimelineEvaluator() else { return }
-        withAutoKeySuppressed {
-            setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
-            applyNtscValues(ev.ntscValues(at: playheadT))
-            applyGlitchValues(ev.glitchValues(at: playheadT))
-            applyDigitalValues(ev.digitalValues(at: playheadT))
+        applyTimelineValues(ev, at: playheadT)
+    }
+
+    /// The keyed values at `t`, into the render state at once and into the
+    /// panels at most ten times a second: playback and scrubbing apply them
+    /// every frame, and a panel rebuilding all its rows that often is what
+    /// stalled the window. Only changed shader parameters go to the chain.
+    private func applyTimelineValues(_ ev: TimelineEvaluator, at t: Double) {
+        let previousSuppress = suppressAutoKey
+        suppressAutoKey = true
+        defer { suppressAutoKey = previousSuppress }
+        let shader = paramValuesStore.merging(ev.shaderParams(at: t)) { _, new in new }
+        for (name, value) in shader where paramValuesStore[name] != value { applyOne(name, value) }
+        paramValuesStore = shader
+        ntscValuesStore = ev.ntscValues(at: t)
+        pushNtscSettings()
+        if glitchOffKeyEdit != nil { glitchOffKeyEdit = nil }
+        let glitch = ev.glitchValues(at: t)
+        if !glitch.isEmpty { glitchValuesStore.merge(glitch) { _, new in new } }
+        let digital = ev.digitalValues(at: t)
+        if !digital.isEmpty { digitalValuesStore.merge(digital) { _, new in new } }
+        markChainDirty()
+        schedulePanelRefresh()
+    }
+
+    static let panelRefreshInterval = Duration.milliseconds(100)
+    @ObservationIgnored private var panelRefreshPending = false
+    @ObservationIgnored private var lastPanelRefresh = ContinuousClock.now
+
+    private func schedulePanelRefresh() {
+        guard !panelRefreshPending else { return }
+        let since = lastPanelRefresh.duration(to: .now)
+        if since >= Self.panelRefreshInterval { refreshPanels(); return }
+        panelRefreshPending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.panelRefreshInterval - since)
+            self?.refreshPanels()
         }
+    }
+
+    private func refreshPanels() {
+        panelRefreshPending = false
+        lastPanelRefresh = .now
+        paramRevision &+= 1
+        ntscRevision &+= 1
+        glitchRevision &+= 1
+        digitalRevision &+= 1
     }
 
     /// Keep the playhead in step when the transport moves the frame by other
@@ -1205,12 +1291,7 @@ final class AppState {
         playheadT = target
         guard timelineEnabled, let ev = makeTimelineEvaluator() else { return }
         // Applying interpolated values must never look like a user edit.
-        withAutoKeySuppressed {
-            setAllParams(paramValues.merging(ev.shaderParams(at: playheadT)) { _, new in new })
-            applyNtscValues(ev.ntscValues(at: playheadT))
-            applyGlitchValues(ev.glitchValues(at: playheadT))
-            applyDigitalValues(ev.digitalValues(at: playheadT))
-        }
+        applyTimelineValues(ev, at: playheadT)
     }
 
     // MARK: - auto-keying
@@ -1323,7 +1404,16 @@ final class AppState {
     private(set) var ntscDescriptors: [NtscSetting] = []
     private(set) var ntscDefaults: [String: Any] = [:]
     /// Flat values in ntsc-rs preset-JSON form (includes "version").
-    private(set) var ntscValues: [String: Any] = [:]
+    // Values live in an unobserved store; views observe `ntscRevision`, which an
+    // edit bumps at once and timeline playback/scrubbing at most ten times a
+    // second (see refreshPanels) — otherwise every row of the panel rebuilds
+    // on every played frame.
+    @ObservationIgnored private var ntscValuesStore: [String: Any] = [:]
+    private var ntscRevision: Int = 0
+    private(set) var ntscValues: [String: Any] {
+        get { _ = ntscRevision; return ntscValuesStore }
+        set { ntscValuesStore = newValue; ntscRevision &+= 1 }
+    }
     var ntscEnabled: Bool = true {
         didSet { noteChainInputEdited(); markChainDirty() }
     }
@@ -1454,7 +1544,16 @@ final class AppState {
     private(set) var chain: LRShaderChain?
     private(set) var chainError: String?
     private(set) var paramDescriptors: [LRShaderParam] = []
-    private(set) var paramValues: [String: Float] = [:]
+    // Values live in an unobserved store; views observe `paramRevision`, which an
+    // edit bumps at once and timeline playback/scrubbing at most ten times a
+    // second (see refreshPanels) — otherwise every row of the panel rebuilds
+    // on every played frame.
+    @ObservationIgnored private var paramValuesStore: [String: Float] = [:]
+    private var paramRevision: Int = 0
+    private(set) var paramValues: [String: Float] {
+        get { _ = paramRevision; return paramValuesStore }
+        set { paramValuesStore = newValue; paramRevision &+= 1 }
+    }
 
     /// Compiled chains kept around so flipping back to a preset is instant.
     /// librashader's Metal runtime does not use the on-disk shader cache, so
@@ -1618,6 +1717,13 @@ final class AppState {
         // the same every time. A still's follows the preview.
         let seed = videoSource != nil ? currentFrameIndex + 1 : frameCounter
         do {
+            // A still export is exact: no background re-runs for it.
+            glitchRenderer?.rerunsInBackground = false
+            digitalStage.rerunsInBackground = false
+            defer {
+                glitchRenderer?.rerunsInBackground = true
+                digitalStage.rerunsInBackground = true
+            }
             var input = source
             var spec = downscaleSpec
             let digital = previewDigitalFrame(width: source.width, height: source.height)
@@ -1692,6 +1798,7 @@ final class AppState {
     /// not thread-safe — the preview suspends animation for the duration.
     var exportInProgress: Bool = false { didSet { markChainDirty() } }
 
+    @ObservationIgnored
     private(set) var frameCounter: Int = 0
     func tickFrame() { frameCounter &+= 1 }
     /// The command line's PNG of a still at a time: the noise seed an
@@ -1742,7 +1849,7 @@ final class AppState {
     /// (interlacing) only activate above a threshold height.
     var chainInputHeight: Int? {
         if let d = downscaleSpec { return d.height }
-        return sourceTexture?.height
+        return sourceShape?.height
     }
 
     // MARK: - mutations
@@ -2074,8 +2181,14 @@ final class AppState {
             digitalFormatApplied = true
             digitalEnabled = (d["enabled"] as? Bool) ?? false
         } else {
+            // Not the last look's values behind a switched-off stage.
+            digitalValues = DigitalParam.startingValues
+            digitalFormatApplied = false
             digitalEnabled = false
         }
+        // The receiver starts over under the new look rather than carrying
+        // the last one's state (a rolling picture, lost tracking) into it.
+        glitchRenderer?.restart()
         noteChainInputEdited()
         if let v = dict["view"] as? [String: Any] {
             if let b = v["integerScale"] as? Bool { integerScale = b }

@@ -46,6 +46,38 @@ public final class GlitchRenderer {
     /// Forward jumps longer than this re-simulate instead of stepping.
     public static let maxStep = 1.0
 
+    /// Re-runs longer than this (simulated seconds from where one can
+    /// resume) go to a background thread when `rerunsInBackground` is on.
+    /// A second of simulation is ~35 ms; a minute is ~2 s, which on the
+    /// main thread froze the app for every tick of a VCR knob dragged on a
+    /// paused clip.
+    public static let backgroundRerunAbove = 1.5
+
+    /// The preview turns this on: a long exact re-run happens off the main
+    /// thread while the preview shows the knobs applied to the state it
+    /// has, and `onSettled` (main thread) asks for a redraw when the exact
+    /// state is ready. Exports leave it off — every frame they draw is exact.
+    public var rerunsInBackground = false
+    public var onSettled: (() -> Void)?
+
+    /// The background re-run in flight.
+    private final class Rerun: @unchecked Sendable {
+        let key: CheckpointKey
+        let time: Double
+        let raster: ReceiverRaster
+        private let lock = NSLock()
+        private var _cancelled = false
+        init(key: CheckpointKey, time: Double, raster: ReceiverRaster) {
+            self.key = key; self.time = time; self.raster = raster
+        }
+        var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+        func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
+    }
+    private var rerun: Rerun?
+    /// CRT_RERUN_LOG=1: report background re-runs landing.
+    private static let logReruns = ProcessInfo.processInfo.environment["CRT_RERUN_LOG"] != nil
+    private func cancelRerun() { rerun?.cancel(); rerun = nil }
+
     public init(context: MetalContext) throws {
         self.context = context
         stage = try GlitchStage(device: context.device)
@@ -68,6 +100,7 @@ public final class GlitchRenderer {
             sim = ReceiverSimulator(raster: raster)
             simulator = sim
             fresh = true
+            cancelRerun()
             checkpoints = []
             checkpointKey = nil
         }
@@ -79,7 +112,23 @@ public final class GlitchRenderer {
         let retuned = standingStill && lastSettings != nil && lastSettings?.timing != settings.timing
         let past = standingStill ? nil : history()
         if fresh || jumped || retuned {
-            resimulate(sim, to: time, settings: settings, history: past ?? history())
+            let h = past ?? history()
+            let key: CheckpointKey = h.map { .history($0.id, $0.frameDuration) } ?? .constant(settings.timing)
+            let resumeAt = key == checkpointKey ? checkpoints.last(where: { $0.time <= time })?.time : nil
+            let span = time - (resumeAt ?? -ReceiverSimulator.warmup)
+            if rerunsInBackground, span > Self.backgroundRerunAbove {
+                if let r = rerun, r.key == key, r.raster == raster, r.time <= time + 2 * lineTime {
+                    // Already on its way to here, or to a moment before it
+                    // (playing on, or scrubbing forward): keep showing what
+                    // we have; from where it lands, the rest is a short step.
+                } else {
+                    showMeanwhile(sim, at: time, settings: settings, retuned: retuned, fresh: fresh)
+                    startRerun(key: key, to: time, settings: settings, history: h, raster: raster)
+                }
+            } else {
+                cancelRerun()
+                resimulate(sim, to: time, settings: settings, history: h)
+            }
         } else if let past, checkpointKey == .history(past.id, past.frameDuration) {
             // A short step forward through keyframed knobs (playback, or a
             // scrub of under a second): run it frame by frame through the
@@ -100,6 +149,82 @@ public final class GlitchRenderer {
         let plan = sim.plan()
         lastPlan = plan
         return try render(into: cb, chainInput: chainInput, plan: plan)
+    }
+
+    /// Forget the simulation: the next frame starts from a freshly
+    /// simulated set at its time, as if these settings had always been on.
+    /// (A new look must not inherit the last one's rolling picture or lost
+    /// tracking, which turning a knob mid-play rightly would.)
+    public func restart() {
+        cancelRerun()
+        simulator = nil
+        checkpoints = []
+        checkpointKey = nil
+        lastSettings = nil
+    }
+
+    /// While a background re-run works: the knobs applied to the state the
+    /// simulation has (a knob turned on a paused frame), a checkpoint within
+    /// a second of a jump stepped on to it, or a fresh set's first moment.
+    private func showMeanwhile(_ sim: ReceiverSimulator, at time: Double,
+                               settings: GlitchSettings, retuned: Bool, fresh: Bool) {
+        if retuned {
+            sim.advance(to: sim.time, settings: settings)
+        } else if let c = checkpoints.last(where: { $0.time <= time && time - $0.time <= Self.maxStep }) {
+            sim.restore(c)
+            sim.advance(to: time, settings: settings)
+        } else if fresh {
+            sim.advance(to: 0, settings: settings)
+        }
+    }
+
+    /// The exact re-run on a fresh simulator off the main thread, adopted
+    /// (with its checkpoints) if nothing has superseded it by the time it
+    /// finishes.
+    private func startRerun(key: CheckpointKey, to time: Double, settings: GlitchSettings,
+                            history: GlitchHistory?, raster: ReceiverRaster) {
+        cancelRerun()
+        if Self.logReruns { fputs(String(format: "RERUN start to %.2f s\n", time), stderr) }
+        let job = Rerun(key: key, time: time, raster: raster)
+        rerun = job
+        let kept = key == checkpointKey ? checkpoints : []
+        let resume = kept.last(where: { $0.time <= time })
+        nonisolated(unsafe) let history = history
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let sim = ReceiverSimulator(raster: raster)
+            var taken: [ReceiverSimulator.Snapshot] = []
+            if let history {
+                sim.resimulate(to: time, frameDuration: history.frameDuration,
+                               settingsAt: history.settingsAt, resumeFrom: resume,
+                               checkpoint: { taken.append($0) }, isCancelled: { job.cancelled })
+            } else {
+                if let resume { sim.restore(resume) }
+                var next = max(1, ((resume?.time ?? 0) + 1).rounded(.down))
+                while next < time, !job.cancelled {
+                    sim.advance(to: next, settings: settings)
+                    taken.append(sim.snapshot())
+                    next += 1
+                }
+                if !job.cancelled { sim.advance(to: time, settings: settings) }
+            }
+            guard !job.cancelled else {
+                if Self.logReruns { fputs("RERUN cancelled\n", stderr) }
+                return
+            }
+            nonisolated(unsafe) let done = (sim, taken)
+            DispatchQueue.main.async {
+                guard let self, self.rerun === job, !job.cancelled else { return }
+                self.rerun = nil
+                self.simulator = done.0
+                self.checkpointKey = key
+                var all = kept.filter { $0.time <= (resume?.time ?? -.infinity) }
+                for snap in done.1 where snap.time > (all.last?.time ?? -.infinity) { all.append(snap) }
+                self.checkpoints = all
+                self.lastSettings = settings
+                if Self.logReruns { fputs(String(format: "RERUN landed at %.2f s\n", time), stderr) }
+                self.onSettled?()
+            }
+        }
     }
 
     /// Deterministic re-run to `time`, resuming from the latest checkpoint

@@ -104,6 +104,19 @@ public final class DigitalVideoRenderer {
     /// Captures re-run since the last call (for tests and the perf log).
     public private(set) var lastRunLength = 0
 
+    /// Checked once a capture during a re-run; true abandons it (the
+    /// renderer is left mid-stream, so only a throwaway one should be
+    /// cancelled).
+    public var isCancelled: (() -> Bool)?
+
+    /// After a `process` that deferred its re-run: the frame's pixels as
+    /// they came in, for running it exactly elsewhere.
+    public private(set) var deferredPixels: [UInt8]?
+    public func takeDeferredPixels() -> [UInt8]? {
+        defer { deferredPixels = nil }
+        return deferredPixels
+    }
+
     public init() {}
 
     /// The capture size for a picture of `width` × `height` at a capture
@@ -131,7 +144,9 @@ public final class DigitalVideoRenderer {
                         sourceFPS: Double,
                         settings: DigitalSettings,
                         history: DigitalHistory? = nil,
-                        earlier: DigitalFrameVisitor? = nil) {
+                        earlier: DigitalFrameVisitor? = nil,
+                        deferRerunAbove: Int? = nil) {
+        deferredPixels = nil
         let structure = settings
         let timing = DigitalTiming(sourceFPS: sourceFPS, settings: structure)
         let geometry = CodecGeometry(width: captureSize.width, height: captureSize.height,
@@ -158,6 +173,7 @@ public final class DigitalVideoRenderer {
         let current = Self.scale(pixels, width: width, height: height, rowBytes: rowBytes, to: captureSize,
                                  optics: structure)
 
+        var deferred = false
         if let last = lastCapture, state != nil, last == c, lastSettings == now {
             // Same frame, same settings: what's shown already.
         } else if let last = lastCapture, state != nil, c > last, c - last <= max(2, 2 * timing.keyframeEvery) {
@@ -171,13 +187,18 @@ public final class DigitalVideoRenderer {
                 advance(capture: k, source: src, geometry: geometry, timing: timing,
                         settings: settingsFor(capture: k), key: key, history: history)
             }
-            if !ok { rerun(to: c, frame: n, current: current, geometry: geometry, timing: timing, key: key,
-                           history: history, earlier: earlier, settingsFor: settingsFor) }
+            if !ok { deferred = rerun(to: c, frame: n, current: current, geometry: geometry, timing: timing, key: key,
+                                      history: history, earlier: earlier, settingsFor: settingsFor,
+                                      deferAbove: deferRerunAbove) }
         } else {
-            rerun(to: c, frame: n, current: current, geometry: geometry, timing: timing, key: key,
-                  history: history, earlier: earlier, settingsFor: settingsFor)
+            deferred = rerun(to: c, frame: n, current: current, geometry: geometry, timing: timing, key: key,
+                             history: history, earlier: earlier, settingsFor: settingsFor,
+                             deferAbove: deferRerunAbove)
         }
         lastSettings = now
+        if deferred {
+            deferredPixels = Array(UnsafeRawBufferPointer(start: pixels, count: rowBytes * height))
+        }
 
         Self.upscale(shown, size: captureSize, into: pixels, width: width, height: height, rowBytes: rowBytes)
     }
@@ -186,9 +207,15 @@ public final class DigitalVideoRenderer {
 
     /// Re-run from the last point the decoder's picture is known: a keyframe
     /// it received, or a checkpoint at one it lost.
+    ///
+    /// With `deferAbove`, a re-run of more captures than that isn't done:
+    /// the frame is coded on its own instead (a keyframe under the new
+    /// settings — no smear or datamosh from before it) and the call returns
+    /// true, for the caller to run the exact re-run elsewhere.
+    @discardableResult
     private func rerun(to c: Int, frame n: Int, current: [UInt8], geometry: CodecGeometry, timing: DigitalTiming,
                        key: StreamKey, history: DigitalHistory?, earlier: DigitalFrameVisitor?,
-                       settingsFor: (Int) -> DigitalSettings) {
+                       settingsFor: (Int) -> DigitalSettings, deferAbove: Int? = nil) -> Bool {
         let g = timing.keyframeEvery
         let checkpointSettings: DigitalSettings? = history == nil ? settingsFor(c) : nil
         var start: Int
@@ -208,6 +235,13 @@ public final class DigitalVideoRenderer {
             }
             start = b
         }
+        if let deferAbove, c - start > deferAbove {
+            state = CodecState(geometry: geometry)
+            runSettings = .none                  // not fit to checkpoint
+            advance(capture: c, source: current, geometry: geometry, timing: timing,
+                    settings: settingsFor(c), key: key, history: history)
+            return true
+        }
         state = restored ?? CodecState(geometry: geometry)
         runSettings = .some(checkpointSettings)
         let first = restored == nil ? start : start + 1
@@ -218,9 +252,10 @@ public final class DigitalVideoRenderer {
                                 step: DigitalCodec.Steps(quality: settingsFor(c)["quality"], squeeze: 1).inter)
             shownSize = (geometry.width, geometry.height)
             lastCapture = c
-            return
+            return false
         }
         for k in first...c {
+            if let isCancelled, isCancelled() { return false }
             // The camera took capture k at its first frame; `current` is
             // frame n, which may be a later repeat of it.
             let src = timing.frame(ofCapture: k) == n ? current
@@ -229,6 +264,7 @@ public final class DigitalVideoRenderer {
             advance(capture: k, source: src, geometry: geometry, timing: timing,
                     settings: settingsFor(k), key: key, history: history)
         }
+        return false
     }
 
     /// The capture-size picture for capture `k`, from an earlier frame —

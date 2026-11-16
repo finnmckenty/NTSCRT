@@ -154,7 +154,7 @@ struct ContentView: View {
                 || env["CRT_FEEDBACK_PRESET_CHECK"] != nil
                 || env["CRT_FIELD_FOCUS_CHECK"] != nil || env["CRT_PAD_E2E"] != nil
                 || env["CRT_VIDEO_PNG_CHECK"] != nil || env["CRT_VIEWPORT_CHECK"] != nil
-                || env["CRT_DIGITAL_CHECK"] != nil else { return }
+                || env["CRT_DIGITAL_CHECK"] != nil || env["CRT_PRESET_CYCLE"] != nil || env["CRT_EDIT_BENCH"] != nil || env["CRT_CHAIN_BENCH"] != nil else { return }
         var tries = 0
         while tries < 100 && !((state.sourceTexture != nil) && state.chain != nil) {
             try? await Task.sleep(for: .milliseconds(100))
@@ -1934,6 +1934,13 @@ struct ContentView: View {
             let ok = served == !AppState.frameCacheOff
             print("CACHECHK \(ok ? "PASS" : "FAIL") frame \(target) loop \(state.playbackLoops) servedFromCache=\(served.map(String.init) ?? "never-dumped") cacheOff=\(AppState.frameCacheOff)")
             exit(ok ? 0 : 1)
+        }
+        if env["CRT_CHAIN_BENCH"] != nil { await ChainBench.run(state: state) }
+        if let preset = env["CRT_EDIT_BENCH"] {
+            await EditBench.run(state: state, preset: preset)
+        }
+        if let secs = env["CRT_PRESET_CYCLE"].flatMap(Double.init) {
+            await PresetCycleCheck.run(state: state, seconds: secs, play: env["CRT_PRESET_CYCLE_PLAY"] == "1")
         }
         // CRT_PLAY_BENCH=<seconds>: play the loaded video and report the
         // frame rate actually achieved.

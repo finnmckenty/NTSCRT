@@ -50,7 +50,7 @@ struct ExportPopover: View {
             // the playhead.
             HStack(spacing: 8) {
                 Button(state.exportWorking ? "Exporting…" : "Export PNG…") { exportPNG() }
-                    .disabled(state.sourceTexture == nil || state.chain == nil || state.exportWorking)
+                    .disabled(!state.hasSourcePicture || state.chain == nil || state.exportWorking)
                 if isVideo {
                     Text("This frame (\(frameTime))")
                         .font(.caption).foregroundStyle(.secondary)
@@ -82,7 +82,7 @@ struct ExportPopover: View {
             Button(buttonLabel) {
                 exportMovie()
             }
-            .disabled(state.sourceTexture == nil || state.chain == nil || state.exportWorking)
+            .disabled(!state.hasSourcePicture || state.chain == nil || state.exportWorking)
 
             Divider()
 
@@ -91,7 +91,7 @@ struct ExportPopover: View {
             Text("The viewport").font(.caption).bold()
             HStack(spacing: 8) {
                 Button("Export viewport…") { exportViewport() }
-                    .disabled(state.sourceTexture == nil || state.exportWorking)
+                    .disabled(!state.hasSourcePicture || state.exportWorking)
                 Text(viewportCaption)
                     .font(.caption).foregroundStyle(.secondary)
             }
