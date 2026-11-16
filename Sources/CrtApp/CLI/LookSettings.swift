@@ -68,7 +68,7 @@ enum Session {
 struct LookSettings {
     var warnings: [String] = []
 
-    static let stageOrder = ["look", "crop", "downscale", "digital", "ntsc", "glitch", "vcr", "crt", "timeline"]
+    static let stageOrder = ["look", "crop", "downscale", "digital", "ntsc", "glitch", "vcr", "crt", "timeline", "keyframes"]
 
     mutating func apply(_ settings: [String: Any], to state: AppState) async throws {
         let unknown = Set(settings.keys).subtracting(Self.stageOrder)
@@ -85,6 +85,9 @@ struct LookSettings {
         if let v = settings["crt"] { try applyCrt(v, state) }
         if let v = settings["timeline"] { try applyTimeline(v, state) }
         try await Session.waitForChain(state)
+        if let v = settings["keyframes"] {
+            try applyKeyframes(v, explicitDuration: (settings["timeline"] as? [String: Any])?["duration"] != nil, state)
+        }
     }
 
     // MARK: looks
@@ -191,7 +194,15 @@ struct LookSettings {
             }
             state.applyDigitalFormat(format)
         }
-        for (key, raw) in (dict["values"] as? [String: Any]) ?? [:] {
+        try setDigitalValues(dict["values"], state)
+        let enabled = (dict["enabled"] as? Bool) ?? true
+        state.setDigitalEnabled(enabled)
+    }
+
+    private mutating func setDigitalValues(_ raw: Any?, _ state: AppState) throws {
+        guard let raw else { return }
+        guard let values = raw as? [String: Any] else { throw CLIError(message: "Digital video \"values\" is an object of control: value.") }
+        for (key, raw) in values {
             guard let p = DigitalParam.byID[key] else {
                 throw CLIError(message: "No Digital video control \"\(key)\". Controls: \(DigitalParam.all.map(\.id).joined(separator: ", ")).")
             }
@@ -204,8 +215,6 @@ struct LookSettings {
             }
             state.setDigitalValue(key, value)
         }
-        let enabled = (dict["enabled"] as? Bool) ?? true
-        state.setDigitalEnabled(enabled)
     }
 
     // MARK: NTSC (ntsc-rs)
@@ -235,7 +244,14 @@ struct LookSettings {
             return
         }
         guard let d = v as? [String: Any] else { throw CLIError(message: "\"ntsc\" takes \"on\", \"off\", or {enabled, settings}.") }
-        if let settings = d["settings"] as? [String: Any], !settings.isEmpty {
+        try setNtscSettings(d["settings"], state)
+        state.ntscEnabled = (d["enabled"] as? Bool) ?? state.ntscEnabled
+    }
+
+    private mutating func setNtscSettings(_ raw: Any?, _ state: AppState) throws {
+        guard let raw else { return }
+        guard let settings = raw as? [String: Any] else { throw CLIError(message: "NTSC \"settings\" is an object of setting: value.") }
+        if !settings.isEmpty {
             guard state.ntscAvailable else { throw CLIError(message: "The NTSC stage isn't available (ntscrs_capi.dylib not found).", code: 1) }
             let known = Self.ntscSettings(state)
             for (key, raw) in settings {
@@ -248,7 +264,6 @@ struct LookSettings {
                 state.setNtscValue(key, try ntscValue(raw, s))
             }
         }
-        state.ntscEnabled = (d["enabled"] as? Bool) ?? state.ntscEnabled
     }
 
     static func retiredNtscKeys(_ state: AppState) -> Set<String> {
@@ -376,7 +391,14 @@ struct LookSettings {
             }
             state.selectedPreset = preset
         }
-        if let params = dict["params"] as? [String: Any], !params.isEmpty {
+        try setCrtParams(dict["params"], state)
+        state.shaderEnabled = (dict["enabled"] as? Bool) ?? true
+    }
+
+    private mutating func setCrtParams(_ raw: Any?, _ state: AppState) throws {
+        guard let raw else { return }
+        guard let params = raw as? [String: Any] else { throw CLIError(message: "CRT \"params\" is an object of parameter: value.") }
+        if !params.isEmpty {
             guard state.chain != nil else { throw CLIError(message: "The CRT shader failed to compile: \(state.chainError ?? "unknown error")", code: 1) }
             let byName = Dictionary(state.paramDescriptors.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
             for (key, raw) in params {
@@ -392,7 +414,120 @@ struct LookSettings {
                 state.setParam(key, Float(value))
             }
         }
-        state.shaderEnabled = (dict["enabled"] as? Bool) ?? true
+    }
+
+    // MARK: keyframes (animation)
+
+    static let keyStages = ["glitch", "vcr", "digital", "ntsc", "crt"]
+
+    static func easing(_ name: String) -> KeyEasing? {
+        let squashed = name.lowercased().filter(\.isLetter)
+        return KeyEasing.allCases.first { $0.rawValue.lowercased().filter(\.isLetter) == squashed }
+    }
+
+    /// `"keyframes": [{"time": 0, "glitch": {"values": {…}}}, {"time": 2.5,
+    /// "easing": "ease-in-out", "vcr": {"tape": "Chewed"}}, …]`. Each key is
+    /// the look above it with these values changed; between keys values
+    /// blend (whole-number controls step), as the app's timeline does. They
+    /// replace any keyframes the look brought. A key at 0 holding the look
+    /// itself is added when there isn't one.
+    private mutating func applyKeyframes(_ v: Any, explicitDuration: Bool, _ state: AppState) throws {
+        guard let list = v as? [[String: Any]] else {
+            throw CLIError(message: "\"keyframes\" is a list of {time, easing, glitch, vcr, digital, ntsc, crt}.")
+        }
+        // Capture with the timeline off, so no edit lands in an old key.
+        state.timelineEnabled = false
+        state.timelineKeys = []
+        if list.isEmpty { return }
+
+        var timed: [(time: Double, key: [String: Any])] = []
+        for key in list {
+            guard let time = Self.number(key["time"]), time >= 0 else {
+                throw CLIError(message: "Each keyframe needs a \"time\" in seconds (0 or more).")
+            }
+            let extra = Set(key.keys).subtracting(["time", "easing"] + Self.keyStages)
+            if !extra.isEmpty {
+                throw CLIError(message: "A keyframe can change \(Self.keyStages.joined(separator: ", ")) (not \(extra.sorted().joined(separator: ", "))): crop, downscale and the CRT preset hold for the whole video.")
+            }
+            timed.append((time, key))
+        }
+        timed.sort { $0.time < $1.time }
+
+        // Times are seconds; the timeline stores them as 0…1 of its length.
+        let last = timed.last!.time
+        var duration = state.effectiveTimelineDuration
+        if state.videoSource == nil, !explicitDuration, last > duration {
+            state.timelineDuration = last
+            duration = last
+        }
+        if last > duration + 1e-6 {
+            warnings.append("Keyframes after \(Self.fmt(duration)) s are past the end of the video; they land at the end.")
+        }
+
+        let baseParams = state.paramValues, baseNtsc = state.ntscValues
+        let baseGlitch = state.glitchValues, baseDigital = state.digitalValues
+        func restore() {
+            state.setAllParams(baseParams)
+            state.applyNtscValues(baseNtsc)
+            for (k, v) in baseGlitch { state.setGlitchValue(k, v) }
+            for (k, v) in baseDigital { state.setDigitalValue(k, v) }
+        }
+        func snapshot(_ t: Double, _ easing: KeyEasing) -> Keyframe {
+            Keyframe(t: t, easing: easing, shaderParams: state.paramValues, ntscValues: state.ntscValues,
+                     glitchValues: state.glitchValues, digitalValues: state.digitalValues)
+        }
+
+        var keys: [Keyframe] = []
+        var touched = Set<String>()
+        if timed[0].time > 1e-6 { keys.append(snapshot(0, .linear)) }
+        for (time, key) in timed {
+            restore()
+            var easing = KeyEasing.linear
+            if let e = key["easing"] as? String {
+                guard let parsed = Self.easing(e) else {
+                    throw CLIError(message: "Easing \"\(e)\": use linear, ease-in, ease-out, ease-in-out or hold.")
+                }
+                easing = parsed
+            }
+            for stage in Self.keyStages where key[stage] != nil {
+                touched.insert(stage)
+                guard let d = key[stage] as? [String: Any] else {
+                    if stage == "vcr", let s = key[stage] as? String, Self.isOn(s) || Self.isOff(s) {
+                        state.vcrEnabled = Self.isOn(s); continue
+                    }
+                    throw CLIError(message: "In a keyframe, \"\(stage)\" is an object, as in the look (e.g. {\"values\": {…}}).")
+                }
+                switch stage {
+                case "glitch": try setGlitchValues(d["values"], groups: [.reception], panel: "Glitch", state)
+                case "vcr":
+                    if let t = d["tape"] as? String {
+                        guard let c = Self.vcrCondition(t, in: VcrCondition.tapes) else { throw CLIError(message: "No tape \"\(t)\".") }
+                        state.applyVcrCondition(c, keys: VcrCondition.tapeKeys)
+                    }
+                    if let k = d["deck"] as? String {
+                        guard let c = Self.vcrCondition(k, in: VcrCondition.decks) else { throw CLIError(message: "No deck \"\(k)\".") }
+                        state.applyVcrCondition(c, keys: VcrCondition.deckKeys)
+                    }
+                    try setGlitchValues(d["values"], groups: [.tape, .deck], panel: "VCR", state)
+                    if let on = d["enabled"].flatMap(Self.bool) { state.vcrEnabled = on }
+                case "digital": try setDigitalValues(d["values"], state)
+                case "ntsc": try setNtscSettings(d["settings"], state)
+                case "crt": try setCrtParams(d["params"], state)
+                default: break
+                }
+            }
+            keys.append(snapshot(duration > 0 ? min(1, time / duration) : 0, easing))
+        }
+        restore()
+
+        // A stage a keyframe animates has to be running to show it.
+        if touched.contains("glitch") { state.glitchEnabled = true }
+        if touched.contains("digital"), !state.digitalEnabled { state.setDigitalEnabled(true) }
+        if touched.contains("ntsc") { state.ntscEnabled = true }
+        if touched.contains("crt") { state.shaderEnabled = true }
+        state.timelineKeys = keys
+        state.timelineEnabled = true
+        state.scrubTimeline(to: 0)
     }
 
     // MARK: timeline (a still's video length)

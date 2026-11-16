@@ -159,6 +159,7 @@ NTSCRT can act as an MCP server: a background helper that gives an AI app new to
 
 - Give Claude the file's **path**, not an attachment: NTSCRT reads the file from your Mac. In Finder, select the file and press **⌥⌘C** to copy its path.
 - Then describe what you want: "Make /Users/me/Movies/skate.mp4 look like a moldy rental tape in a dirty VCR, played on an old TV." Claude previews a few frames, adjusts, and renders.
+- It can animate too: "clean for two seconds, then the picture starts to roll and the tape gets chewed". It sets keyframes, as on the app's timeline, and saved looks open with them.
 - Claude asks before using each tool the first time; allow it.
 - Videos go to `~/Movies/NTSCRT` unless you say where; saved presets go to `~/Movies/NTSCRT/Looks` and open with **Preset > Load Preset…**.
 - Mac only for now.

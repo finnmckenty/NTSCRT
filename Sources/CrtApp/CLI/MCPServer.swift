@@ -77,6 +77,7 @@ enum MCPServer {
     2. Preview with ntscrt_preview before rendering, and look at the images. The VCR has history — clogs build up, the tracking hunts, creases sweep through over seconds — so preview several times (e.g. 0.5, 2, 4 s), not just the first frame.
     3. Adjust and preview again, then ntscrt_render the full video. Renders run in the background: if one isn't finished when the call returns, poll ntscrt_render_status.
     4. Offer ntscrt_save_look so the user can open the look in the NTSCRT app.
+    Things that happen over time — the picture starting to roll, the signal fading out, a tape getting chewed partway through — are keyframes: add "keyframes" to the settings, then preview at times before, during and after each change.
     Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name.
     """
 }
@@ -87,7 +88,7 @@ enum MCPServer {
 enum Tools {
     static let settingsSchema: [String: Any] = [
         "type": "object",
-        "description": "The look, keyed by stage, applied in this order: look (a built-in look name or a .json look path), crop, downscale, digital, ntsc, glitch, vcr, crt, timeline. Each stage takes \"on\"/\"off\" or an object — e.g. {\"vcr\": {\"tape\": \"Moldy\", \"deck\": \"Dirty heads\", \"values\": {\"tape_speed\": \"EP\"}}, \"crt\": {\"preset\": \"royale\", \"params\": {}}, \"digital\": {\"format\": \"minidv\"}, \"downscale\": {\"width\": 320, \"method\": \"chunky\"}, \"crop\": \"9:16\"}. See ntscrt_describe for every control.",
+        "description": "The look, keyed by stage, applied in this order: look (a built-in look name or a .json look path), crop, downscale, digital, ntsc, glitch, vcr, crt, timeline ({duration, fps} for a still), keyframes. Each stage takes \"on\"/\"off\" or an object — e.g. {\"vcr\": {\"tape\": \"Moldy\", \"deck\": \"Dirty heads\", \"values\": {\"tape_speed\": \"EP\"}}, \"crt\": {\"preset\": \"royale\", \"params\": {}}, \"digital\": {\"format\": \"minidv\"}, \"downscale\": {\"width\": 320, \"method\": \"chunky\"}, \"crop\": \"9:16\"}. To animate, add \"keyframes\": [{\"time\": 0}, {\"time\": 2, \"easing\": \"ease-in\", \"glitch\": {\"values\": {\"vertical_hold\": 0.5}}}, {\"time\": 4, \"vcr\": {\"tape\": \"Chewed\"}}] — each key is the look with those values changed at that many seconds, blending between keys (glitch, vcr, digital, ntsc and crt values only). See ntscrt_describe for every control and the keyframe rules.",
         "additionalProperties": true,
     ]
 
