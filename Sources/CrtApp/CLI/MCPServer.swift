@@ -1,0 +1,552 @@
+import Foundation
+import ImageIO
+import UniformTypeIdentifiers
+
+/// `NTSCRT mcp`: a Model Context Protocol server on stdin/stdout, so an AI
+/// app (Claude Desktop, Claude Code, …) can make looks and render with
+/// NTSCRT. Every tool runs this same executable's `render`/`describe`/
+/// `looks` as a child process — a render that fails takes nothing down,
+/// and the server itself never touches the GPU.
+@MainActor
+enum MCPServer {
+    static let serverVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    static let supportedProtocols = ["2025-06-18", "2025-03-26", "2024-11-05"]
+
+    static func run(_ args: [String]) async -> Int32 {
+        let lines = AsyncStream<String> { continuation in
+            Thread.detachNewThread {
+                while let line = readLine(strippingNewline: true) { continuation.yield(line) }
+                continuation.finish()
+            }
+        }
+        CLI.log("NTSCRT MCP server \(serverVersion) ready on stdio.")
+        for await line in lines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            guard let data = line.data(using: .utf8),
+                  let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                send(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error"]])
+                continue
+            }
+            Task { await handle(message) }
+        }
+        Jobs.shared.cancelAll()
+        return 0
+    }
+
+    // MARK: - JSON-RPC
+
+    static func send(_ message: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message, options: [.withoutEscapingSlashes]) else { return }
+        CLI.resultOut.write(data + Data("\n".utf8))
+    }
+
+    static func handle(_ message: [String: Any]) async {
+        let id = message["id"]
+        guard let method = message["method"] as? String else { return }  // a response: none expected
+        let params = message["params"] as? [String: Any] ?? [:]
+        func reply(_ result: [String: Any]) {
+            if let id { send(["jsonrpc": "2.0", "id": id, "result": result]) }
+        }
+        func fail(_ code: Int, _ text: String) {
+            if let id { send(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": text]]) }
+        }
+        switch method {
+        case "initialize":
+            let asked = params["protocolVersion"] as? String ?? supportedProtocols[0]
+            reply(["protocolVersion": supportedProtocols.contains(asked) ? asked : supportedProtocols[0],
+                   "capabilities": ["tools": ["listChanged": false]],
+                   "serverInfo": ["name": "ntscrt", "title": "NTSCRT", "version": serverVersion],
+                   "instructions": instructions])
+        case "ping":
+            reply([:])
+        case "tools/list":
+            reply(["tools": Tools.list])
+        case "tools/call":
+            guard let name = params["name"] as? String else { return fail(-32602, "tools/call needs a name") }
+            let arguments = params["arguments"] as? [String: Any] ?? [:]
+            reply(await Tools.call(name, arguments))
+        case let m where m.hasPrefix("notifications/"):
+            break
+        default:
+            fail(-32601, "Method not found: \(method)")
+        }
+    }
+
+    static let instructions = """
+    NTSCRT renders images and video through simulated analog video gear: a camera and codec (Digital video), an NTSC composite signal, a VHS tape in a VCR, a TV receiver (Glitch), and a CRT screen. Work like this:
+    1. If the user names a mood rather than settings, start from ntscrt_list_looks: a built-in look, or a VCR tape and deck condition, is usually the closest starting point. ntscrt_describe gives every control with its range and what it does physically; read the stages you will change.
+    2. Preview with ntscrt_preview before rendering, and look at the images. The VCR has history — clogs build up, the tracking hunts, creases sweep through over seconds — so preview several times (e.g. 0.5, 2, 4 s), not just the first frame.
+    3. Adjust and preview again, then ntscrt_render the full video. Renders run in the background: if one isn't finished when the call returns, poll ntscrt_render_status.
+    4. Offer ntscrt_save_look so the user can open the look in the NTSCRT app.
+    Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name.
+    """
+}
+
+// MARK: - tools
+
+@MainActor
+enum Tools {
+    static let settingsSchema: [String: Any] = [
+        "type": "object",
+        "description": "The look, keyed by stage, applied in this order: look (a built-in look name or a .json look path), crop, downscale, digital, ntsc, glitch, vcr, crt, timeline. Each stage takes \"on\"/\"off\" or an object — e.g. {\"vcr\": {\"tape\": \"Moldy\", \"deck\": \"Dirty heads\", \"values\": {\"tape_speed\": \"EP\"}}, \"crt\": {\"preset\": \"royale\", \"params\": {}}, \"digital\": {\"format\": \"minidv\"}, \"downscale\": {\"width\": 320, \"method\": \"chunky\"}, \"crop\": \"9:16\"}. See ntscrt_describe for every control.",
+        "additionalProperties": true,
+    ]
+
+    static let list: [[String: Any]] = [
+        [
+            "name": "ntscrt_list_looks",
+            "title": "List looks",
+            "description": "Named starting points: NTSCRT's built-in looks (with the stages each uses), the VCR's Tape and Deck conditions, Digital video formats and CRT presets.",
+            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
+            "annotations": ["readOnlyHint": true],
+        ],
+        [
+            "name": "ntscrt_describe",
+            "title": "Describe controls",
+            "description": "Every control of the stages asked for: id, kind (slider, toggle, choice, seed, integer), range, default, and what it does. Stages: crop, downscale, digital, ntsc, glitch, vcr, crt, output. CRT parameters depend on the preset; pass crt_preset for one other than the default (glow_gauss).",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "stages": ["type": "array", "items": ["type": "string", "enum": DescribeCommand.stages],
+                               "description": "Stages to describe (default: all)."],
+                    "crt_preset": ["type": "string", "description": "A CRT preset id, or \"all\"."],
+                ] as [String: Any],
+            ],
+            "annotations": ["readOnlyHint": true],
+        ],
+        [
+            "name": "ntscrt_preview",
+            "title": "Preview a look",
+            "description": "Render a few frames of the source with the settings and return them as images, to check a look before rendering the whole video. Times are seconds into the clip (or into the video a still becomes); the VCR and Glitch stages change over time, so ask for several.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "source": ["type": "string", "description": "Absolute path of an image (PNG, JPEG, HEIC) or video (MP4, MOV)."],
+                    "settings": settingsSchema,
+                    "times": ["type": "array", "items": ["type": "number"], "description": "Seconds (default [0.5, 2, 4])."],
+                    "long_edge": ["type": "integer", "description": "Preview size in pixels (default 640)."],
+                ] as [String: Any],
+                "required": ["source"],
+            ],
+            "annotations": ["readOnlyHint": true],
+        ],
+        [
+            "name": "ntscrt_render",
+            "title": "Render a video",
+            "description": "Render the source with the settings to a file: a clip in full, or a still as a video of `duration` seconds. Waits up to wait_seconds (default 45) and returns the result, or a job id to poll with ntscrt_render_status. Renders run one at a time.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "source": ["type": "string", "description": "Absolute path of an image or video."],
+                    "settings": settingsSchema,
+                    "output": ["type": "string", "description": "Where to write it (.mp4, .mov, .gif or .png). Default: ~/Movies/NTSCRT/<source name> <time>.mp4."],
+                    "format": ["type": "string", "enum": ["h264", "hevc", "prores", "prores-hq", "gif"], "description": "Default: from the output's extension, else h264."],
+                    "duration": ["type": "number", "description": "A still's video length in seconds (default 5, or the look's)."],
+                    "fps": ["type": "integer", "description": "A still's frame rate (default 30)."],
+                    "long_edge": ["type": "integer", "description": "Output long edge in pixels (default 1920)."],
+                    "quality": ["type": "string", "enum": ["standard", "high", "very-high", "maximum"]],
+                    "loops": ["type": "integer", "description": "Repeat the content this many times in the file."],
+                    "gif_width": ["type": "integer"], "gif_fps": ["type": "integer"],
+                    "wait_seconds": ["type": "number", "description": "How long to wait for it to finish (0–100, default 45)."],
+                ] as [String: Any],
+                "required": ["source"],
+            ],
+        ],
+        [
+            "name": "ntscrt_render_status",
+            "title": "Render status",
+            "description": "A render's progress, time left, and — when done — its output file. Waits up to wait_seconds (default 30) for it to finish.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "job_id": ["type": "string"],
+                    "wait_seconds": ["type": "number"],
+                ] as [String: Any],
+                "required": ["job_id"],
+            ],
+            "annotations": ["readOnlyHint": true],
+        ],
+        [
+            "name": "ntscrt_save_look",
+            "title": "Save a look",
+            "description": "Save the settings as an NTSCRT look file, which the app opens with Preset > Load Preset….",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "settings": settingsSchema,
+                    "path": ["type": "string", "description": "Where to save it (.json). Default: ~/Movies/NTSCRT/Looks/<name>.json."],
+                    "name": ["type": "string", "description": "The look's name, for the default path."],
+                ] as [String: Any],
+                "required": ["settings"],
+            ],
+        ],
+    ]
+
+    static func call(_ name: String, _ a: [String: Any]) async -> [String: Any] {
+        do {
+            switch name {
+            case "ntscrt_list_looks":
+                return text(try await Child.run(["looks"]).stdout)
+            case "ntscrt_describe":
+                var args = ["describe"] + ((a["stages"] as? [String]) ?? [])
+                if let p = a["crt_preset"] as? String { args += ["--crt", p] }
+                let r = try await Child.run(args)
+                return r.status == 0 ? text(r.stdout) : error(r.stdout)
+            case "ntscrt_preview":
+                return try await preview(a)
+            case "ntscrt_render":
+                return try await render(a)
+            case "ntscrt_render_status":
+                guard let id = a["job_id"] as? String, let job = Jobs.shared.jobs[id] else {
+                    return error("No render with that job_id.")
+                }
+                await job.wait(seconds: wait(a, 30))
+                return json(job.status)
+            case "ntscrt_save_look":
+                return try await saveLook(a)
+            default:
+                return error("Unknown tool \(name).")
+            }
+        } catch {
+            return self.error(error.localizedDescription)
+        }
+    }
+
+    // MARK: tool bodies
+
+    static func preview(_ a: [String: Any]) async throws -> [String: Any] {
+        let source = try path(a["source"], "source")
+        let times = (a["times"] as? [Any])?.compactMap { LookSettings.number($0) } ?? [0.5, 2, 4]
+        let longEdge = Int(LookSettings.number(a["long_edge"]) ?? 640)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ntscrt-mcp/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var args = ["render", source, "-o", dir.appendingPathComponent("preview.png").path,
+                    "--time", times.map { String($0) }.joined(separator: ","),
+                    "--long-edge", String(min(1600, max(128, longEdge)))]
+        args += try settingsArgs(a["settings"], in: dir)
+        let r = try await Child.run(args)
+        guard r.status == 0, var result = r.result, let outputs = result["outputs"] as? [[String: Any]] else {
+            return error(r.errorText)
+        }
+        var content: [[String: Any]] = []
+        for o in outputs {
+            guard let p = o["path"] as? String, let jpeg = jpegData(p) else { continue }
+            content.append(["type": "text", "text": "t = \(o["time"] ?? 0) s"])
+            content.append(["type": "image", "data": jpeg.base64EncodedString(), "mimeType": "image/jpeg"])
+        }
+        result.removeValue(forKey: "outputs")
+        result.removeValue(forKey: "plan")
+        result.removeValue(forKey: "elapsed")
+        content.insert(["type": "text", "text": CLI.prettyJSON(result)], at: 0)
+        return ["content": content]
+    }
+
+    static func render(_ a: [String: Any]) async throws -> [String: Any] {
+        let source = try path(a["source"], "source")
+        let format = a["format"] as? String
+        var output: String
+        if let o = a["output"] as? String {
+            output = (o as NSString).expandingTildeInPath
+        } else {
+            let ext = format == "gif" ? "gif" : (format?.hasPrefix("prores") == true ? "mov" : "mp4")
+            let stamp = { () -> String in let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH.mm.ss"; return f.string(from: Date()) }()
+            let stem = URL(fileURLWithPath: source).deletingPathExtension().lastPathComponent
+            output = moviesFolder.appendingPathComponent("\(stem) \(stamp).\(ext)").path
+        }
+        guard output.hasPrefix("/") else { return error("output must be an absolute path.") }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ntscrt-mcp/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var args = ["render", source, "-o", output]
+        if let format { args += ["--format", format] }
+        for (key, flag) in [("long_edge", "--long-edge"), ("fps", "--fps"), ("loops", "--loops"),
+                            ("gif_width", "--gif-width"), ("gif_fps", "--gif-fps")] {
+            if let n = LookSettings.number(a[key]) { args += [flag, String(Int(n))] }
+        }
+        if let d = LookSettings.number(a["duration"]) { args += ["--duration", String(d)] }
+        if let q = a["quality"] as? String { args += ["--quality", q] }
+        args += try settingsArgs(a["settings"], in: dir)
+
+        // Check it first (bad settings, the size and length) without the wait.
+        let dry = try await Child.run(args + ["--dry-run"])
+        guard dry.status == 0 else { try? FileManager.default.removeItem(at: dir); return error(dry.errorText) }
+        let job = Jobs.shared.start(args: args, output: output, plan: dry.result?["plan"], cleanup: dir)
+        await job.wait(seconds: wait(a, 45))
+        return json(job.status)
+    }
+
+    static func saveLook(_ a: [String: Any]) async throws -> [String: Any] {
+        var target: String
+        if let p = a["path"] as? String {
+            target = (p as NSString).expandingTildeInPath
+        } else {
+            let name = (a["name"] as? String)?.replacingOccurrences(of: "/", with: "-") ?? "NTSCRT look"
+            target = moviesFolder.appendingPathComponent("Looks/\(name).json").path
+        }
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: target).deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ntscrt-mcp/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = try await Child.run(["render", "--save-look", target] + (try settingsArgs(a["settings"], in: dir)))
+        return r.status == 0 ? json(r.result ?? [:]) : error(r.errorText)
+    }
+
+    // MARK: helpers
+
+    static var moviesFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/NTSCRT")
+    }
+
+    static func path(_ v: Any?, _ name: String) throws -> String {
+        guard let s = v as? String, !s.isEmpty else { throw CLIError(message: "\(name) is required.") }
+        let p = (s as NSString).expandingTildeInPath
+        guard p.hasPrefix("/") else { throw CLIError(message: "\(name) must be an absolute path (got \(s)).") }
+        return p
+    }
+
+    /// The settings as a file for `--settings @file` (arguments have a
+    /// length limit; a look's keyframes don't).
+    static func settingsArgs(_ v: Any?, in dir: URL) throws -> [String] {
+        guard let v else { return [] }
+        let settings: [String: Any]
+        if let d = v as? [String: Any] {
+            settings = d
+        } else if let s = v as? String, let d = try? JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any] {
+            settings = d
+        } else {
+            throw CLIError(message: "settings must be a JSON object keyed by stage.")
+        }
+        if settings.isEmpty { return [] }
+        let file = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: settings).write(to: file)
+        return ["--settings", "@" + file.path]
+    }
+
+    static func wait(_ a: [String: Any], _ def: Double) -> Double {
+        min(100, max(0, LookSettings.number(a["wait_seconds"]) ?? def))
+    }
+
+    static func jpegData(_ path: String) -> Data? {
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(dest) ? data as Data : nil
+    }
+
+    static func text(_ s: String) -> [String: Any] { ["content": [["type": "text", "text": s]]] }
+    static func json(_ o: [String: Any]) -> [String: Any] {
+        ["content": [["type": "text", "text": CLI.prettyJSON(o)]], "structuredContent": o]
+    }
+    static func error(_ s: String) -> [String: Any] { ["content": [["type": "text", "text": s]], "isError": true] }
+}
+
+// MARK: - child processes
+
+/// This executable run as a command.
+struct Child {
+    var status: Int32
+    var stdout: String
+    var stderr: String
+
+    /// The result JSON (the last line of stdout).
+    var result: [String: Any]? {
+        guard let line = stdout.split(separator: "\n").last,
+              let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
+        return obj
+    }
+
+    var errorText: String {
+        if let e = result?["error"] as? String { return e }
+        let tail = stderr.split(separator: "\n").suffix(5).joined(separator: "\n")
+        return tail.isEmpty ? "NTSCRT exited with status \(status)." : tail
+    }
+
+    static var executable: URL {
+        Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+    }
+
+    static func run(_ args: [String]) async throws -> Child {
+        let p = Process()
+        p.executableURL = executable
+        p.arguments = args
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        p.standardInput = FileHandle.nullDevice
+        let outData = Collector(out.fileHandleForReading)
+        let errData = Collector(err.fileHandleForReading)
+        let status: Int32 = try await withCheckedThrowingContinuation { c in
+            p.terminationHandler = { c.resume(returning: $0.terminationStatus) }
+            do { try p.run() } catch { c.resume(throwing: error) }
+        }
+        return Child(status: status, stdout: outData.finish(), stderr: errData.finish())
+    }
+}
+
+/// Reads a pipe to the end on its own thread, so a child never blocks on a
+/// full pipe.
+final class Collector: @unchecked Sendable {
+    private var data = Data()
+    private let done = DispatchSemaphore(value: 0)
+    private let onLine: (@Sendable (String) -> Void)?
+
+    init(_ handle: FileHandle, onLine: (@Sendable (String) -> Void)? = nil) {
+        self.onLine = onLine
+        Thread.detachNewThread { [self] in
+            var pending = Data()
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                data.append(chunk)
+                if let onLine {
+                    pending.append(chunk)
+                    while let nl = pending.firstIndex(of: 0x0A) {
+                        onLine(String(decoding: pending[pending.startIndex..<nl], as: UTF8.self))
+                        pending.removeSubrange(pending.startIndex...nl)
+                    }
+                }
+            }
+            done.signal()
+        }
+    }
+
+    func finish() -> String {
+        done.wait()
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+// MARK: - render jobs
+
+@MainActor
+final class Jobs {
+    static let shared = Jobs()
+    private(set) var jobs: [String: Job] = [:]
+    /// Renders run one at a time: each uses the GPU flat out.
+    private var queue: [Job] = []
+    private var running: Job?
+
+    func start(args: [String], output: String, plan: Any?, cleanup: URL) -> Job {
+        let job = Job(id: String(UUID().uuidString.prefix(8)).lowercased(), args: args,
+                      output: output, plan: plan, cleanup: cleanup)
+        jobs[job.id] = job
+        queue.append(job)
+        next()
+        return job
+    }
+
+    private func next() {
+        guard running == nil, !queue.isEmpty else { return }
+        let job = queue.removeFirst()
+        running = job
+        Task {
+            await job.run()
+            running = nil
+            next()
+        }
+    }
+
+    func cancelAll() {
+        for j in jobs.values { j.process?.terminate() }
+    }
+}
+
+@MainActor
+final class Job {
+    let id: String
+    let args: [String]
+    let output: String
+    let plan: Any?
+    let cleanup: URL
+    var state = "queued"
+    var progress: Double = 0
+    var eta: Double?
+    var result: [String: Any]?
+    var errorText: String?
+    var process: Process?
+    let started = Date()
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    init(id: String, args: [String], output: String, plan: Any?, cleanup: URL) {
+        self.id = id; self.args = args; self.output = output; self.plan = plan; self.cleanup = cleanup
+    }
+
+    var finished: Bool { state == "done" || state == "failed" }
+
+    var status: [String: Any] {
+        var s: [String: Any] = ["job_id": id, "state": state, "output": output]
+        if let plan { s["plan"] = plan }
+        switch state {
+        case "running":
+            s["progress"] = CLI.decimal(progress)
+            if let eta { s["seconds_left"] = CLI.decimal(eta, places: 0) }
+            s["next"] = "Call ntscrt_render_status with this job_id to wait for it."
+        case "queued":
+            s["next"] = "Waiting for another render to finish; call ntscrt_render_status to wait."
+        case "done":
+            if let r = result {
+                s["outputs"] = r["outputs"]
+                s["look"] = r["look"]
+                if let w = r["warnings"] { s["warnings"] = w }
+                if let e = LookSettings.number(r["elapsed"]) { s["elapsed"] = CLI.decimal(e, places: 1) }
+            }
+        default:
+            s["error"] = errorText ?? "The render failed."
+        }
+        return s
+    }
+
+    func run() async {
+        state = "running"
+        let p = Process()
+        p.executableURL = Child.executable
+        p.arguments = args
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        p.standardInput = FileHandle.nullDevice
+        process = p
+        let outData = Collector(out.fileHandleForReading)
+        let errData = Collector(err.fileHandleForReading) { [weak self] line in
+            guard line.hasPrefix("{\"eta\"") || line.hasPrefix("{\"progress\""),
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
+            let progress = LookSettings.number(obj["progress"])
+            let eta = LookSettings.number(obj["eta"])
+            Task { @MainActor in
+                if let progress { self?.progress = progress }
+                if let eta { self?.eta = eta }
+            }
+        }
+        let status: Int32 = await withCheckedContinuation { c in
+            p.terminationHandler = { c.resume(returning: $0.terminationStatus) }
+            do { try p.run() } catch { c.resume(returning: -1) }
+        }
+        let child = Child(status: status, stdout: outData.finish(), stderr: errData.finish())
+        try? FileManager.default.removeItem(at: cleanup)
+        if status == 0, let r = child.result {
+            result = r
+            progress = 1
+            state = "done"
+        } else {
+            errorText = child.errorText
+            state = "failed"
+        }
+        for w in waiters.values { w.resume() }
+        waiters = [:]
+    }
+
+    /// Wait until it finishes, or `seconds` pass.
+    func wait(seconds: Double) async {
+        guard !finished, seconds > 0 else { return }
+        let key = UUID()
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            waiters[key] = c
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                waiters.removeValue(forKey: key)?.resume()
+            }
+        }
+    }
+}

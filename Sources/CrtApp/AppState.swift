@@ -1694,6 +1694,9 @@ final class AppState {
 
     private(set) var frameCounter: Int = 0
     func tickFrame() { frameCounter &+= 1 }
+    /// The command line's PNG of a still at a time: the noise seed an
+    /// export gives that frame.
+    func setFrameCounter(_ n: Int) { frameCounter = n }
 
     // MARK: - init
 

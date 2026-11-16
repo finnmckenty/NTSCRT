@@ -254,6 +254,18 @@ In order:
 
 The bare CLI relies on (2). The wrapped `.app` baked-in `LSEnvironment` makes (1) work regardless of cwd.
 
+## Command line (`NTSCRT render`) and the MCP server
+
+The app binary doubles as a command-line tool. `Sources/CrtApp/CLI/Launch.swift` is the `@main`: when the first argument is `render`, `describe`, `looks`, `mcp` or `help` it runs that without a window (activation policy `.prohibited`, `RunLoop.main`); anything else calls `CrtAppApp.main()`. In dev: `.build/debug/crt-app render …`.
+
+- **Same code as the buttons**: `render` builds a real `AppState`, loads the source, applies the settings, and calls `AppState.exportMovie` / `exportPNG` (`AppState+Export.swift`), which the Export popover calls too. Nothing is reimplemented, so a CLI render is what the button would have written.
+- **stdout is the result**: `CLI.start` points fd 1 at stderr and keeps the real stdout for one JSON line (`{"ok":…,"outputs":[…],"look":{…},"plan":{…}}`). App `print`s and progress (`{"progress":0.4,"eta":12}`) go to stderr. Exit 0 ok, 1 render failed, 2 bad command.
+- **Settings**: `LookSettings` applies one JSON object keyed by stage (`look`, `crop`, `downscale`, `digital`, `ntsc`, `glitch`, `vcr`, `crt`, `timeline`), in that order; the flags are turned into the same object (flags win over `--settings`, field by field). It validates ids against `GlitchParam`/`DigitalParam`/the ntsc-rs descriptors/the chain's parameters, takes choices by name or index, clamps sliders with a warning, and rejects ntsc-rs's retired VHS settings (`NtscSetting.retiredVHS`) so they can't stack with the VCR.
+- **Time**: `--time` PNGs seek like the timeline. A still gets the timeline switched on (stretched to the time if it has no keys) and the frame seed an export gives that frame, so the VCR/Glitch history is simulated up to it.
+- **`describe`** is generated from the same definitions as the panels (help texts included), plus notes for the controls that aren't plain 0–1 amounts (Tracking's curve, signed Back tension, the cassette seed, choices). CRT parameters come from compiling the preset (`--crt id|all`).
+- **`mcp`** (`MCPServer.swift`): newline-delimited JSON-RPC on stdio, protocol 2024-11-05 to 2025-06-18, tools only. Each tool runs this executable as a child (`render`, `describe`, `looks`), so the server never touches the GPU and a crashed render is just a failed job. Previews come back as JPEG images. Renders are jobs, one at a time: `ntscrt_render` checks the settings with `--dry-run` first, then waits up to `wait_seconds` and returns the result or a job id for `ntscrt_render_status`. Settings go to the child as `--settings @file`.
+- **Testing the server**: pipe JSON-RPC lines in, e.g. `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | .build/debug/crt-app mcp`.
+
 ## CLI usage
 
 ```sh

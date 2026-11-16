@@ -3,7 +3,6 @@ import AppKit
 import CrtAppBridge
 import CrtCore
 
-@main
 struct CrtAppApp: App {
 
     init() {

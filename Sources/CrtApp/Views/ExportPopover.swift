@@ -33,7 +33,6 @@ struct ExportPopover: View {
     private var isVideo: Bool { state.videoSource != nil }
 
     // Sizes and bitrate come from AppState, shared with the Howlaround panel.
-    private var computedBitrate: Int { state.exportBitrate(for: outputSize) }
     private var outputSize: (width: Int, height: Int) { state.exportVideoSize }
 
 
@@ -81,9 +80,7 @@ struct ExportPopover: View {
                                                       : state.timelineDuration)
 
             Button(buttonLabel) {
-                if state.exportFormat.isGIF { exportGIF() }
-                else if isVideo { exportMP4() }
-                else { exportStillVideo() }
+                exportMovie()
             }
             .disabled(state.sourceTexture == nil || state.chain == nil || state.exportWorking)
 
@@ -127,39 +124,13 @@ struct ExportPopover: View {
         return f.string(from: Date())
     }
 
-    private var hasKeyframes: Bool {
-        state.timelineEnabled && !state.timelineKeys.isEmpty
-    }
-
-    /// Per-frame keyframe values for a video export, or nil when nothing is
-    /// keyed (then the whole clip uses the current settings, as before).
-    private var videoFrameParams: FrameParams? {
-        guard hasKeyframes, let ev = state.makeTimelineEvaluator() else { return nil }
-        let glitchBase = state.glitchValues
-        let receptionOn = state.glitchEnabled
-        return { i, total in
-            let t = total > 1 ? Double(i) / Double(total - 1) : 0
-            return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                    glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
-        }
-    }
+    private var hasKeyframes: Bool { state.hasTimelineKeys }
 
     private var buttonLabel: String {
         if state.exportWorking { return "Exporting…" }
         let name = state.exportFormat.buttonName
         if state.exportFormat.isGIF { return "Export GIF…" }
         return isVideo ? "Export \(name)…" : "Export video (\(name))…"
-    }
-
-    /// GIF output size: chosen width, height from the source aspect, both even.
-    private var gifSize: (width: Int, height: Int) { state.exportGifSize }
-
-    private var gifFrameCount: Int {
-        if let vs = state.videoSource {
-            let seconds = Double(vs.totalFrames) / Double(max(1, vs.frameRate))
-            return max(1, Int((seconds * Double(state.gifFPS)).rounded(.down)))
-        }
-        return max(1, Int((state.timelineDuration * Double(state.gifFPS)).rounded()))
     }
 
     // MARK: - PNG (an image, or a clip's current frame)
@@ -195,212 +166,18 @@ struct ExportPopover: View {
         state.exportViewport(to: url)
     }
 
-    // MARK: - GIF (still or video source)
+    // MARK: - GIF, a clip, or a video from a still
 
-    private func exportGIF() {
-        guard let source = state.sourceTexture, state.chain != nil else { return }
-
+    /// The movie button: pick a file, then AppState's export (shared with
+    /// `NTSCRT render`) does the rest.
+    private func exportMovie() {
+        guard state.sourceTexture != nil, state.chain != nil else { return }
+        let gif = state.exportFormat.isGIF
+        let ext = gif ? "gif" : (state.exportFormat.codec ?? .h264).fileExtension
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.gif]
-        panel.nameFieldStringValue = "crt export \(exportTimestamp).gif"
-        guard panel.runModal() == .OK, let outURL = panel.url else { return }
-
-        let size = gifSize
-        state.exportWorking = true
-        state.exportProgress = 0
-        state.exportStatus = "Encoding GIF…"
-        state.stopPlayback()
-        state.stopTimelinePreview()
-        state.exportInProgress = true
-
-        let exporter = GifExporter(context: state.context)
-        let settings = state.gifExportSettings(outputURL: outURL, size: size)
-        let params = state.paramValues
-        let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
-            ? state.ntscStage?.settingsJSON()
-            : nil
-        let videoSource = state.videoSource
-        // GIFs loop forever by themselves, so the animation spans the whole
-        // file rather than repeating in passes.
-        let totalFrames = gifFrameCount
-        let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
-        let glitchBase = state.glitchValues
-        let receptionOn = state.glitchEnabled
-        let frameParams: FrameParams? =
-            evaluator.map { ev in
-                { i, total in
-                    let t = total > 1 ? Double(i) / Double(total - 1) : 0
-                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                            glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
-                }
-            }
-        let state = state
-
-        Task {
-            do {
-                if let vs = videoSource {
-                    try await exporter.exportVideo(source: vs, paramValues: params,
-                                                   settings: settings,
-                                                   ntscSettingsJSON: ntscJSON,
-                                                   frameParams: videoFrameParams) { p in
-                        Task { @MainActor in state.exportProgress = p }
-                    }
-                } else {
-                    try await exporter.exportStill(source: source,
-                                                   totalFrames: totalFrames,
-                                                   paramValues: params,
-                                                   settings: settings,
-                                                   ntscSettingsJSON: ntscJSON,
-                                                   frameParams: frameParams) { p in
-                        Task { @MainActor in state.exportProgress = p }
-                    }
-                }
-                let bytes = (try? FileManager.default
-                    .attributesOfItem(atPath: outURL.path)[.size] as? Int) ?? 0
-                let sizeText = ByteCountFormatter.string(fromByteCount: Int64(bytes ?? 0),
-                                                         countStyle: .file)
-                await MainActor.run {
-                    state.exportStatus = "Wrote \(outURL.lastPathComponent) (\(size.width) × \(size.height), \(sizeText))"
-                    state.exportWorking = false
-                    state.exportProgress = 1
-                    state.exportInProgress = false
-                }
-            } catch {
-                await MainActor.run {
-                    state.exportStatus = "GIF export failed: \(error.localizedDescription)"
-                    state.exportWorking = false
-                    state.exportInProgress = false
-                }
-            }
-        }
-    }
-
-    // MARK: - video from a still (VHS motion / keyframe animation)
-
-    private func exportStillVideo() {
-        guard let source = state.sourceTexture, state.chain != nil else { return }
-        let codec = state.exportFormat.codec ?? .h264
-
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [codec.isProRes ? .quickTimeMovie : .mpeg4Movie]
-        panel.nameFieldStringValue = "crt export \(exportTimestamp).\(codec.fileExtension)"
-        guard panel.runModal() == .OK, let outURL = panel.url else { return }
-
-        let size = outputSize
-        state.exportWorking = true
-        state.exportProgress = 0
-        state.exportStatus = "Encoding…"
-        state.stopTimelinePreview()
-        state.exportInProgress = true
-
-        let exporter = Mp4Exporter(context: state.context)
-        let settings = state.mp4ExportSettings(route: .still, outputURL: outURL, size: size,
-                                               bitrate: computedBitrate, codec: codec)
-        let params = state.paramValues
-        let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
-            ? state.ntscStage?.settingsJSON()
-            : nil
-        let baseFrames = state.timelineTotalFrames
-        let loops = max(1, state.exportLoopCount)
-        let totalFrames = baseFrames * loops
-        let fps = state.timelineFPS
-
-        // Keyframes drive per-frame parameters; without keys the params hold
-        // and only the frame-seeded VHS noise animates.
-        let evaluator = hasKeyframes ? state.makeTimelineEvaluator() : nil
-        let glitchBase = state.glitchValues
-        let receptionOn = state.glitchEnabled
-        let frameParams: FrameParams? =
-            evaluator.map { ev in
-                { i, _ in
-                    // Phase within the pass, so each loop replays the
-                    // animation instead of stretching it across all passes.
-                    let within = i % baseFrames
-                    let t = baseFrames > 1 ? Double(within) / Double(baseFrames - 1) : 0
-                    return (shader: ev.shaderParams(at: t), ntscJSON: ev.ntscJSON(at: t),
-                            glitch: ev.glitchSettings(at: t, base: glitchBase, receptionOn: receptionOn))
-                }
-            }
-        let state = state
-
-        Task {
-            do {
-                try await exporter.exportStill(source: source,
-                                               totalFrames: totalFrames,
-                                               fps: fps,
-                                               paramValues: params,
-                                               settings: settings,
-                                               ntscSettingsJSON: ntscJSON,
-                                               frameParams: frameParams) { p in
-                    Task { @MainActor in state.exportProgress = p }
-                }
-                await MainActor.run {
-                    state.exportStatus = "Wrote \(outURL.lastPathComponent) (\(size.width) × \(size.height))"
-                    state.exportWorking = false
-                    state.exportProgress = 1
-                    state.exportInProgress = false
-                }
-            } catch {
-                await MainActor.run {
-                    state.exportStatus = "Export failed: \(error.localizedDescription)"
-                    state.exportWorking = false
-                    state.exportInProgress = false
-                }
-            }
-        }
-    }
-
-    // MARK: - MP4 (video source)
-
-    private func exportMP4() {
-        guard let vs = state.videoSource else { return }
-        let codec = state.exportFormat.codec ?? .h264
-
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [codec.isProRes ? .quickTimeMovie : .mpeg4Movie]
-        panel.nameFieldStringValue = "crt export \(exportTimestamp).\(codec.fileExtension)"
-        guard panel.runModal() == .OK, let outURL = panel.url else { return }
-
-        let size = outputSize
-        state.exportWorking = true
-        state.exportProgress = 0
-        state.exportStatus = "Encoding…"
-        // Suspend preview animation and playback for the duration: the
-        // exporter drives the same Metal queue from its own loop and
-        // librashader's Metal runtime is not thread-safe.
-        state.stopPlayback()
-        state.exportInProgress = true
-
-        let exporter = Mp4Exporter(context: state.context)
-        let settings = state.mp4ExportSettings(route: .video, outputURL: outURL, size: size,
-                                               bitrate: computedBitrate, codec: codec)
-        let params = state.paramValues
-        let ntscJSON: String? = (state.ntscEnabled && state.ntscAvailable)
-            ? state.ntscStage?.settingsJSON()
-            : nil
-        let state = state
-
-        Task {
-            do {
-                try await exporter.export(source: vs, paramValues: params,
-                                          settings: settings,
-                                          ntscSettingsJSON: ntscJSON,
-                                          frameParams: videoFrameParams) { p in
-                    Task { @MainActor in state.exportProgress = p }
-                }
-                await MainActor.run {
-                    state.exportStatus = "Wrote \(outURL.lastPathComponent) (\(size.width) × \(size.height))"
-                    state.exportWorking = false
-                    state.exportProgress = 1
-                    state.exportInProgress = false
-                }
-            } catch {
-                await MainActor.run {
-                    state.exportStatus = "Export failed: \(error.localizedDescription)"
-                    state.exportWorking = false
-                    state.exportInProgress = false
-                }
-            }
-        }
+        panel.allowedContentTypes = [gif ? .gif : (state.exportFormat.isProRes ? .quickTimeMovie : .mpeg4Movie)]
+        panel.nameFieldStringValue = "crt export \(exportTimestamp).\(ext)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        state.runMovieExport(to: url)
     }
 }

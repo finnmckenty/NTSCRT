@@ -116,6 +116,23 @@ Video feedback, the analog way: a camcorder filming a TV that shows the camcorde
 - A preset saved with a crop brings it back. One without a crop leaves yours alone.
 - Presets from older versions open looking the way they did, even where a control has since changed.
 
+### Command line and AI tools
+
+- **`NTSCRT render`** renders without opening the window. Run it from inside the app bundle:
+  ```sh
+  /Applications/NTSCRT.app/Contents/MacOS/NTSCRT render clip.mp4 -o out.mp4 --look "90s VHS bootleg"
+  ```
+- **Every section has flags**: `--look`, `--crop`, `--downscale`, `--digital`, `--ntsc`, `--glitch`, `--vcr`, `--tape`, `--deck`, `--crt`, each with a `-set key=value` partner (`--vcr-set tape_speed=EP,tracking_offset=0.4`). `NTSCRT help` lists them.
+- **Output** follows the file name: .mp4, .mov (ProRes), .gif, or .png. `--time 1,3,5` saves the frames at those times; a still becomes a video of `--duration` seconds.
+- **`NTSCRT describe`** lists every control as JSON, with its range and what it does. **`NTSCRT looks`** lists the presets, tapes, decks and formats.
+- **AI apps**: `NTSCRT mcp` lets Claude (or any app that supports MCP servers) preview looks, render, and save presets. Ask for "a moldy tape in a dirty deck, played on an old TV", and it previews frames, adjusts, then renders.
+  - **Claude Code**: `claude mcp add ntscrt -- /Applications/NTSCRT.app/Contents/MacOS/NTSCRT mcp`
+  - **Claude Desktop**: in Settings > Developer > Edit Config, add:
+    ```json
+    {"mcpServers": {"ntscrt": {"command": "/Applications/NTSCRT.app/Contents/MacOS/NTSCRT", "args": ["mcp"]}}}
+    ```
+  - Videos go to `~/Movies/NTSCRT` unless you name a file; saved presets to `~/Movies/NTSCRT/Looks`.
+
 ### Tips
 
 - Every number next to a slider is a text field: click it and type.
