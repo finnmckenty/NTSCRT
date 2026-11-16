@@ -6,6 +6,9 @@ import AppKit
 @main
 enum Launch {
     static func main() {
+        if let out = ProcessInfo.processInfo.environment["CRT_CONNECT_SELFTEST"] {
+            ConnectSelfTest.run(snapshot: out)
+        }
         let args = Array(CommandLine.arguments.dropFirst())
         if let command = args.first, CLI.commands.contains(command) {
             CLI.start(command: command, arguments: Array(args.dropFirst()))

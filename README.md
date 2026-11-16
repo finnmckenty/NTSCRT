@@ -131,7 +131,9 @@ Video feedback, the analog way: a camcorder filming a TV that shows the camcorde
 
 NTSCRT can act as an MCP server: a background helper that gives an AI app new tools. Claude can then preview looks, adjust them, render videos and save presets for the app. Rendering happens on your Mac; Claude sees only the preview frames it asks for.
 
-**Claude Desktop**
+**The easy way**: put NTSCRT in your Applications folder, open it, and choose **NTSCRT > Connect to Claude…**. Click **Connect** next to Claude Desktop or Claude Code, then quit and reopen Claude Desktop (**⌘Q**). NTSCRT backs up Claude's settings first and leaves your other servers alone.
+
+**Claude Desktop, by hand**
 
 1. Put NTSCRT in your Applications folder.
 2. In Claude, open **Settings > Developer** and click **Edit Config**. Finder shows a file called `claude_desktop_config.json`; open it in TextEdit.

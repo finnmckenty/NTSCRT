@@ -46,8 +46,15 @@ struct CrtAppApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { UpdateChecker.shared.checkNow() }
                 Toggle("Check for Updates Automatically", isOn: $checkForUpdatesAutomatically)
+                Divider()
+                ConnectClaudeMenuItem()
             }
         }
+
+        Window("Connect to Claude", id: ConnectClaudeMenuItem.windowID) {
+            ConnectClaudeView()
+        }
+        .windowResizability(.contentSize)
     }
 
     private func bootstrap() async {
@@ -132,5 +139,14 @@ private struct BootstrapErrorView: View {
         }
         .padding(24)
         .frame(minWidth: 600, minHeight: 200, alignment: .topLeading)
+    }
+}
+
+/// NTSCRT › Connect to Claude…
+private struct ConnectClaudeMenuItem: View {
+    static let windowID = "connect-claude"
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Connect to Claude…") { openWindow(id: Self.windowID) }
     }
 }
