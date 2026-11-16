@@ -124,14 +124,42 @@ Video feedback, the analog way: a camcorder filming a TV that shows the camcorde
   ```
 - **Every section has flags**: `--look`, `--crop`, `--downscale`, `--digital`, `--ntsc`, `--glitch`, `--vcr`, `--tape`, `--deck`, `--crt`, each with a `-set key=value` partner (`--vcr-set tape_speed=EP,tracking_offset=0.4`). `NTSCRT help` lists them.
 - **Output** follows the file name: .mp4, .mov (ProRes), .gif, or .png. `--time 1,3,5` saves the frames at those times; a still becomes a video of `--duration` seconds.
-- **`NTSCRT describe`** lists every control as JSON, with its range and what it does. **`NTSCRT looks`** lists the presets, tapes, decks and formats.
-- **AI apps**: `NTSCRT mcp` lets Claude (or any app that supports MCP servers) preview looks, render, and save presets. Ask for "a moldy tape in a dirty deck, played on an old TV", and it previews frames, adjusts, then renders.
-  - **Claude Code**: `claude mcp add ntscrt -- /Applications/NTSCRT.app/Contents/MacOS/NTSCRT mcp`
-  - **Claude Desktop**: in Settings > Developer > Edit Config, add:
-    ```json
-    {"mcpServers": {"ntscrt": {"command": "/Applications/NTSCRT.app/Contents/MacOS/NTSCRT", "args": ["mcp"]}}}
-    ```
-  - Videos go to `~/Movies/NTSCRT` unless you name a file; saved presets to `~/Movies/NTSCRT/Looks`.
+- **`NTSCRT describe`** lists every control as JSON, with its range and what it does.
+- **`NTSCRT looks`** lists the presets, tapes, decks and formats.
+
+### Using NTSCRT from Claude (MCP)
+
+NTSCRT can act as an MCP server: a background helper that gives an AI app new tools. Claude can then preview looks, adjust them, render videos and save presets for the app. Rendering happens on your Mac; Claude sees only the preview frames it asks for.
+
+**Claude Desktop**
+
+1. Put NTSCRT in your Applications folder.
+2. In Claude, open **Settings > Developer** and click **Edit Config**. Finder shows a file called `claude_desktop_config.json`; open it in TextEdit.
+3. If the file is empty or only `{}`, replace everything with:
+   ```json
+   {
+     "mcpServers": {
+       "ntscrt": {
+         "command": "/Applications/NTSCRT.app/Contents/MacOS/NTSCRT",
+         "args": ["mcp"]
+       }
+     }
+   }
+   ```
+   If it already has an `"mcpServers"` section, add the `"ntscrt": {…}` entry inside it, with a comma after the entry before it.
+4. Save, quit Claude completely (**⌘Q**), and open it again. NTSCRT now shows in the chat's tools menu.
+
+**Claude Code**: run `claude mcp add --scope user ntscrt -- /Applications/NTSCRT.app/Contents/MacOS/NTSCRT mcp`.
+
+**Other apps** that support MCP servers (Cursor, Windsurf, …) take the same command and `mcp` argument in their settings. ChatGPT can't: it only connects to servers on the internet.
+
+**Using it**
+
+- Give Claude the file's **path**, not an attachment: NTSCRT reads the file from your Mac. In Finder, select the file and press **⌥⌘C** to copy its path.
+- Then describe what you want: "Make /Users/me/Movies/skate.mp4 look like a moldy rental tape in a dirty VCR, played on an old TV." Claude previews a few frames, adjusts, and renders.
+- Claude asks before using each tool the first time; allow it.
+- Videos go to `~/Movies/NTSCRT` unless you say where; saved presets go to `~/Movies/NTSCRT/Looks` and open with **Preset > Load Preset…**.
+- Mac only for now.
 
 ### Tips
 
