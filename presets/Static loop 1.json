@@ -1,4 +1,5 @@
 {
+  "description" : "Waves of static and smear washing over the picture, color fading in and out. CRT on. Loops in 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

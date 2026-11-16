@@ -1,4 +1,5 @@
 {
+  "description" : "The picture rolls up the screen and jumps as the TV loses vertical hold, with clogged heads. CRT on. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

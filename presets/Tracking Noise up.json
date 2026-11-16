@@ -1,4 +1,5 @@
 {
+  "description" : "A band of tracking noise at the bottom of the picture that rises and pulses, with waving edges and fading color. CRT on. Loops in 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

@@ -1,4 +1,5 @@
 {
+  "description" : "Light VHS and a sharper CRT, tuned to keep text and interfaces legible.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

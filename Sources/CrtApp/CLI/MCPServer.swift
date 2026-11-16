@@ -72,13 +72,30 @@ enum MCPServer {
     }
 
     static let instructions = """
-    NTSCRT renders images and video through simulated analog video gear: a camera and codec (Digital video), an NTSC composite signal, a VHS tape in a VCR, a TV receiver (Glitch), and a CRT screen. Work like this:
-    1. If the user names a mood rather than settings, start from ntscrt_list_looks: a built-in look, or a VCR tape and deck condition, is usually the closest starting point. ntscrt_describe gives every control with its range and what it does physically; read the stages you will change.
-    2. Preview with ntscrt_preview before rendering, and look at the images. The VCR has history — clogs build up, the tracking hunts, creases sweep through over seconds — so preview several times (e.g. 0.5, 2, 4 s), not just the first frame.
-    3. Adjust and preview again, then ntscrt_render the full video. Renders run in the background: if one isn't finished when the call returns, poll ntscrt_render_status.
-    4. Offer ntscrt_save_look so the user can open the look in the NTSCRT app.
-    Things that happen over time — the picture starting to roll, the signal fading out, a tape getting chewed partway through — are keyframes: add "keyframes" to the settings, then preview at times before, during and after each change.
-    Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name.
+    NTSCRT renders images and video through simulated analog video gear: a camera and codec (Digital video), an NTSC composite signal, a VHS tape in a VCR, a TV receiver (Glitch), and a CRT screen. Each is simulated physically, so effects combine the way real ones did.
+
+    How to work:
+    1. Start from ntscrt_list_looks. Each built-in look has a description; when one is close to what the user asked for, start there. Otherwise build from the stages below. Read ntscrt_describe for the stages you will change (it lists every control's range and what it does).
+    2. Preview with ntscrt_preview and look at the images before rendering. The VCR and Glitch stages change over time (clogs build up, the tracking hunts, creases pass), so preview several times, e.g. 0.5, 2 and 4 s.
+    3. Adjust and preview again until it matches, then ntscrt_render. If the render isn't finished when the call returns, poll ntscrt_render_status. Tell the user where the file is.
+    4. Offer ntscrt_save_look, with a one-line description, so the user can open the look in the NTSCRT app.
+
+    Which stage for which words:
+    - VHS, tape, VCR, rental, bootleg, dub, tracking, worn or moldy tape, head clog: the vcr stage. Pick a tape and a deck condition first (they're balanced combinations), then adjust its values. Generation makes copies of copies; tape_speed EP is lower quality. Don't use the ntsc stage's old VHS settings (they're retired).
+    - Softness, color bleeding sideways, composite noise, dot crawl: the ntsc stage (on by default with a mild house setting).
+    - Old TV, CRT, scanlines, arcade, retro game: the crt stage. glow_gauss is the default; royale shows a detailed shadow mask; hyllian and easymode are sharper, for games. "crt": "off" for footage that should look like a digitized tape rather than a screen.
+    - Broadcast, antenna, bad reception, snow, rolling, picture slipping sideways, ghosting, hum bars: the glitch stage (signal_strength, vertical_hold, horizontal_hold, ghost_level, hum).
+    - Webcam, video call, camcorder, MiniDV, skate video, early internet video, CD-ROM, compression, blocks, datamosh: the digital stage; start from a format.
+    - Resolution: downscale width. 320 is a typical TV picture; lower is chunkier, 640 is sharp. Portrait video: crop "9:16" and a lower width.
+
+    How strong:
+    - Start moderate and go further only when asked. "A bit of", "subtle", "slightly": values around 0.1–0.3. "Worn", "old": 0.4–0.6. "Destroyed", "barely watchable": 0.8 and up.
+    - Damage compounds: several high values together quickly make the picture unrecognizable. Raise one or two at a time and preview.
+    - The VCR switched on with a Brand new tape and Clean heads already looks like VHS; damage is optional.
+
+    Over time: anything that happens partway through (the picture starts to roll, the signal fades, a tape gets chewed) is keyframes. Add "keyframes" to the settings and preview before, during and after each change. A still becomes a video of 5 seconds unless you set timeline.duration; ask how long when the user hasn't said.
+
+    Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name. Sources and outputs are absolute file paths on the user's Mac; if the user attaches a file instead of giving a path, ask for the path (in Finder: select it and press Option-Command-C).
     """
 }
 
@@ -96,7 +113,7 @@ enum Tools {
         [
             "name": "ntscrt_list_looks",
             "title": "List looks",
-            "description": "Named starting points: NTSCRT's built-in looks (with the stages each uses), the VCR's Tape and Deck conditions, Digital video formats and CRT presets.",
+            "description": "Named starting points: NTSCRT's built-in looks (each with a description of what it looks like and the stages it uses), the VCR's Tape and Deck conditions, Digital video formats and CRT presets.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
             "annotations": ["readOnlyHint": true],
         ],
@@ -176,6 +193,7 @@ enum Tools {
                     "settings": settingsSchema,
                     "path": ["type": "string", "description": "Where to save it (.json). Default: ~/Movies/NTSCRT/Looks/<name>.json."],
                     "name": ["type": "string", "description": "The look's name, for the default path."],
+                    "description": ["type": "string", "description": "One line on what it looks like, kept in the file (shown as the look's tooltip in the app)."],
                 ] as [String: Any],
                 "required": ["settings"],
             ],
@@ -288,7 +306,9 @@ enum Tools {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ntscrt-mcp/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let r = try await Child.run(["render", "--save-look", target] + (try settingsArgs(a["settings"], in: dir)))
+        var settings = (a["settings"] as? [String: Any]) ?? [:]
+        if let d = a["description"] as? String { settings["description"] = d }
+        let r = try await Child.run(["render", "--save-look", target] + (try settingsArgs(settings.isEmpty ? nil : settings, in: dir)))
         return r.status == 0 ? json(r.result ?? [:]) : error(r.errorText)
     }
 

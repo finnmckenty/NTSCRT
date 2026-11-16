@@ -1,4 +1,5 @@
 {
+  "description" : "Very low-resolution VHS on a CRT: big soft pixels, scanlines and color bleed.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

@@ -1,4 +1,5 @@
 {
+  "description" : "A rapid run of TV failures, changing every few frames: the picture rolls, tears sideways, doubles into ghosts, loses signal, and shows fast-forward search bars. CRT on. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

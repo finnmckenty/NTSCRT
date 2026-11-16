@@ -2032,6 +2032,10 @@ final class AppState {
         }
     }
 
+    /// The loaded look's one-line description (bundled looks have one; the
+    /// MCP server's save_look can write one), kept when it's saved again.
+    var lookDescription: String?
+
     func lookDictionary() -> [String: Any] {
         var look: [String: Any] = [
             // 2: Digital video's Quality on its even curve (0.19).
@@ -2083,6 +2087,7 @@ final class AppState {
         // Only a crop that's on travels with a look: loading a look saved
         // without one leaves the current crop alone (every look made before
         // the crop existed would otherwise switch yours off).
+        if let d = lookDescription, !d.isEmpty { look["description"] = d }
         if cropEnabled {
             look["crop"] = ["ratio": cropRatio.label, "x": cropX, "y": cropY, "scale": cropScale] as [String: Any]
         }
@@ -2108,6 +2113,7 @@ final class AppState {
         }
         let lookVersion = dict["version"] as? Int ?? 1
         if dict["kind"] as? String == FeedbackPresets.kind { throw LookError.feedbackPreset }
+        lookDescription = dict["description"] as? String
         if let c = dict["crop"] as? [String: Any],
            let label = c["ratio"] as? String, let ratio = SourceCrop.Ratio(label: label) {
             // Looks from before the crop could zoom have one position, for

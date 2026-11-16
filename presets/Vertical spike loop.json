@@ -1,4 +1,5 @@
 {
+  "description" : "A VHS picture on a CRT with color smeared vertically in spikes and bursts of vertical blur. Loops in 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

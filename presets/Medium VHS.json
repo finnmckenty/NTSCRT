@@ -1,4 +1,5 @@
 {
+  "description" : "A typical worn VHS on a CRT: soft, noisy, some color bleed. A good middle setting.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

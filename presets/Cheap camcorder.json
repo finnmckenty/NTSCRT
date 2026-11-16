@@ -1,4 +1,5 @@
 {
+  "description" : "A cheap digital camcorder: soft, a little grainy, milky blacks, muted color and mild compression. Digital only: no tape, no CRT.",
   "digital" : {
     "enabled" : true,
     "values" : {

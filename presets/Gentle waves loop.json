@@ -1,4 +1,5 @@
 {
+  "description" : "A soft VHS picture on a CRT whose edges ripple gently. Loops in 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

@@ -2476,6 +2476,7 @@ struct ContentView: View {
                     Divider()
                     ForEach(builtInPresets) { preset in
                         Button(preset.name) { load(preset.url) }
+                            .help(preset.description ?? "")
                     }
                 }
                 Divider()

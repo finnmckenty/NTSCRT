@@ -1,4 +1,5 @@
 {
+  "description" : "Gentle: a soft VHS picture on a CRT that now and then rolls, bends at the edges and bleeds color, then settles. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

@@ -1,4 +1,5 @@
 {
+  "description" : "A clean picture on a CRT: hard pixels, scanlines and glow, no signal noise. Good for game footage.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

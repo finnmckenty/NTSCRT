@@ -1,4 +1,5 @@
 {
+  "description" : "A head-switching tear at the bottom of the picture that swings sideways, with color noise and tracking noise. CRT on. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

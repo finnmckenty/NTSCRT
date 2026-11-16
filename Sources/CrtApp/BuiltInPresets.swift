@@ -10,6 +10,12 @@ struct BuiltInPreset: Identifiable, Hashable {
     /// Shown in the menu: the filename without its extension ("Glitch 1").
     let name: String
     let url: URL
+    /// The file's "description", for the menu's tooltip and the MCP server.
+    var description: String? {
+        guard let data = FileManager.default.contents(atPath: url.path),
+              let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return d["description"] as? String
+    }
 
     var id: String { url.path }
 

@@ -1,4 +1,5 @@
 {
+  "description" : "A decent tape played well: soft, slightly noisy, color bleeding to the right, no damage. No CRT.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

@@ -1,4 +1,5 @@
 {
+  "description" : "Short pops of blur, color loss and wavy edges on a soft VHS picture, back to normal between them. CRT on. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

@@ -4,7 +4,9 @@
 
 **Make any image or video look like it's playing on a 1980s TV.** NTSCRT runs your media through an optional digital camera and codec (webcam, video call, MiniDV), an analog signal emulation ([ntsc-rs](https://github.com/ntsc-rs/ntsc-rs): composite artifacts, chroma bleed, noise), a simulated VHS tape and deck, a simulated TV for the dramatic glitches, and the CRT shaders RetroArch uses (via [librashader](https://github.com/SnowflakePowered/librashader): scanlines, phosphor masks, glow).
 
-Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Digital video, VCR and Glitch stages, Screen Loop video feedback, cropping, a keyframe timeline, and video and GIF export.
+Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Digital video, VCR and Glitch stages, Screen Loop video feedback, cropping, a keyframe timeline, video and GIF export, a command-line renderer, and an MCP server for AI apps.
+
+**Works with Claude and other AI apps (MCP).** NTSCRT includes a built-in [MCP](https://modelcontextprotocol.io) server, so Claude Desktop, Claude Code, Cursor and other MCP clients can make analog video looks for you. Describe "a moldy rental tape in a dirty VCR, played on an old TV", and the AI previews frames, adjusts the VHS, CRT and glitch settings, animates them if you ask, and renders the video on your Mac. One click sets it up: **NTSCRT > Connect to Claude…**. See [Using NTSCRT from Claude](#using-ntscrt-from-claude-mcp).
 
 ```
 your image/video → crop → digital camera + codec → NTSC/VHS signal (full res) → downscale to retro resolution → VHS tape and deck → TV glitches → CRT shader → screen
@@ -19,7 +21,7 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 **Windows (preview):** the same release has `NTSCRT-<version>-windows-x64.zip`.
 - Unzip it anywhere and run `ntscrt.exe`. 64-bit Windows 10 or 11.
 - It isn't code-signed yet, so Windows may warn about it: click **More info**, then **Run anyway**.
-- Every feature of the Mac app except ProRes export. Looks and presets are the same files on both.
+- Every feature of the Mac app except ProRes export, the command line and the MCP server. Looks and presets are the same files on both.
 - It's a preview: please open an issue if something misbehaves.
 
 **Updates:** NTSCRT checks GitHub for a newer version once a day and offers to open its download page. Check for Updates… is in the NTSCRT menu on the Mac and the Help menu on Windows, where the daily check can be turned off. The check only asks GitHub for the latest version number.

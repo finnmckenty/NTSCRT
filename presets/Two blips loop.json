@@ -1,4 +1,5 @@
 {
+  "description" : "A calm VHS picture on a CRT with two short blips of wavy blur. Loops in 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

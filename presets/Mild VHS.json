@@ -1,4 +1,5 @@
 {
+  "description" : "Light VHS on a CRT: a little softness and noise; the picture stays clear.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

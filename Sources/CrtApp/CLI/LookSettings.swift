@@ -68,7 +68,7 @@ enum Session {
 struct LookSettings {
     var warnings: [String] = []
 
-    static let stageOrder = ["look", "crop", "downscale", "digital", "ntsc", "glitch", "vcr", "crt", "timeline", "keyframes"]
+    static let stageOrder = ["look", "crop", "downscale", "digital", "ntsc", "glitch", "vcr", "crt", "timeline", "keyframes", "description"]
 
     mutating func apply(_ settings: [String: Any], to state: AppState) async throws {
         let unknown = Set(settings.keys).subtracting(Self.stageOrder)
@@ -76,6 +76,9 @@ struct LookSettings {
             throw CLIError(message: "Unknown setting \(unknown.sorted().joined(separator: ", ")). Known: \(Self.stageOrder.joined(separator: ", ")).")
         }
         if let look = settings["look"] { try applyLook(look, state) }
+        // A look's description no longer fits once it's been changed.
+        if !Set(settings.keys).subtracting(["look", "description", "timeline"]).isEmpty { state.lookDescription = nil }
+        if let d = settings["description"] as? String { state.lookDescription = d }
         if let v = settings["crop"] { try applyCrop(v, state) }
         if let v = settings["downscale"] { try applyDownscale(v, state) }
         if let v = settings["digital"] { try applyDigital(v, state) }

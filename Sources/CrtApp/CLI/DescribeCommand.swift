@@ -271,6 +271,7 @@ enum DescribeCommand {
             var o: [String: Any] = ["name": look.name]
             if let data = FileManager.default.contents(atPath: look.url.path),
                let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let text = d["description"] as? String { o["description"] = text }
                 o["stages"] = lookStages(d)
             }
             return o

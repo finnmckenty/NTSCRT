@@ -1,4 +1,5 @@
 {
+  "description" : "Bursts of heavy static and snow, with tracking noise at the bottom and colored noise, at a very low resolution. CRT on. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

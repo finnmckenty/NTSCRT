@@ -1,4 +1,5 @@
 {
+  "description" : "Video for Windows off a 90s CD-ROM: 240 pixels wide, flat two-tone blocks, banded 15-bit color and a low frame rate. Digital only: no tape, no CRT.",
   "digital" : {
     "enabled" : true,
     "values" : {

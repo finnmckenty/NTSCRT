@@ -1,4 +1,5 @@
 {
+  "description" : "A low-quality webcam: a low frame rate, blocky compression, washed-out color with a cool cast, and moiré. Digital only: no tape, no CRT.",
   "digital" : {
     "enabled" : true,
     "values" : {

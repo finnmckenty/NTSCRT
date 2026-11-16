@@ -1,4 +1,5 @@
 {
+  "description" : "Destroyed: very soft and smeared, colors bleeding far to the side, heavy noise. Barely recognizable. CRT on.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

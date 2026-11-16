@@ -1,4 +1,5 @@
 {
+  "description" : "A soft, smeary VHS picture interrupted by sudden blips: rolls, ghosts, tracking jumps and fast-forward bars. CRT on. 5 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "area",

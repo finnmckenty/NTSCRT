@@ -1,4 +1,5 @@
 {
+  "description" : "A 2000s webcam: low resolution, blotchy compression blocks, smeared detail and washed-out color. Digital only: no tape, no CRT.",
   "digital" : {
     "enabled" : true,
     "values" : {

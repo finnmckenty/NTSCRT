@@ -1,4 +1,5 @@
 {
+  "description" : "A steady VHS picture on a CRT with strong colored static through the dark areas.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",

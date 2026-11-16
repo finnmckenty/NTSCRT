@@ -1,4 +1,5 @@
 {
+  "description" : "Bursts of VHS warping between calmer stretches: the picture's edges wave, color smears and drops out. CRT with bloom. 2 s.",
   "downscale" : {
     "enabled" : true,
     "method" : "nearest",
