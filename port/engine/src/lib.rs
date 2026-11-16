@@ -301,6 +301,33 @@ pub fn cpu_stages(digital: &mut codec::DigitalVideoRenderer, settings: &Settings
     Ok(())
 }
 
+/// Opens another reader of the clip's earlier frames (for the Digital
+/// stage's re-runs) that can go to another thread.
+pub type ClipOpener = Arc<dyn Fn() -> Option<Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool + Send>> + Send + Sync>;
+
+/// A Digital re-run on a thread of its own (see `Engine::digital_in_background`).
+struct DigitalRerun {
+    frame: DigitalFrame,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    result: Arc<std::sync::Mutex<Option<codec::DigitalVideoRenderer>>>,
+}
+
+impl DigitalRerun {
+    fn landed(&self) -> bool {
+        self.result.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+}
+
+/// A frame the stream can carry on to from where `earlier` left it: the
+/// same stream and settings, at that frame or a later one.
+fn continues(later: &DigitalFrame, earlier: &DigitalFrame) -> bool {
+    later.frame >= earlier.frame
+        && later.settings == earlier.settings
+        && later.capture == earlier.capture
+        && later.source_fps == earlier.source_fps
+        && later.history == earlier.history
+}
+
 pub struct Engine {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -320,6 +347,20 @@ pub struct Engine {
     chain: Option<Chain>,
     /// A Screen Loop in progress (exports only).
     howl: Option<howl::feedback::HowlState>,
+    /// The preview's: long re-runs of the receiver (a VCR knob turned on a
+    /// paused clip, a far scrub) go to a thread of their own, the preview
+    /// showing the knobs on the state it has meanwhile. `background_landed`
+    /// says when to render again. Exports leave it off.
+    pub glitch_in_background: bool,
+    /// Likewise for the Digital stage's re-runs from a keyframe: the frame
+    /// shows coded on its own meanwhile, and `last_interim` is set so it
+    /// isn't kept (baked) as the frame. Needs `clip_opener` on a clip.
+    pub digital_in_background: bool,
+    clip_opener: Option<ClipOpener>,
+    digital_rerun: Option<DigitalRerun>,
+    /// A finished Digital re-run, for the next frame to take over.
+    digital_ready: Option<(DigitalFrame, codec::DigitalVideoRenderer)>,
+    last_interim: bool,
 }
 
 /// `NTSCRT_BACKEND` (or the spike's `SPIKE_BACKEND`) = gl | dx12 | vulkan | metal.
@@ -395,8 +436,113 @@ impl Engine {
             last_prepare_ms: 0.0,
             chain: None,
             howl: None,
+            glitch_in_background: false,
+            digital_in_background: false,
+            clip_opener: None,
+            digital_rerun: None,
+            digital_ready: None,
+            last_interim: false,
         })
     }
+
+    /// How to open the clip's earlier frames on another thread (None for a
+    /// still), for background Digital re-runs.
+    pub fn set_clip_opener(&mut self, opener: Option<ClipOpener>) {
+        self.clip_opener = opener;
+    }
+
+    /// A background re-run (receiver or Digital) is on its way.
+    pub fn background_pending(&self) -> bool {
+        self.glitch.rerun_pending() || self.digital_rerun.is_some()
+    }
+
+    /// Whether a background re-run has finished since the last ask (it's
+    /// then taken over): render the frame again to show it.
+    pub fn take_landed(&mut self) -> bool {
+        let glitch = self.glitch.take_landed();
+        let digital = self.digital_rerun.as_ref().is_some_and(|r| r.landed());
+        if digital {
+            let r = self.digital_rerun.take().expect("checked");
+            if let Some(done) = r.result.lock().ok().and_then(|mut g| g.take()) {
+                self.digital_ready = Some((r.frame, done));
+            }
+            self.prepared = None;
+        }
+        glitch || digital
+    }
+
+    /// The last render's Digital stage showed the frame coded on its own
+    /// while the exact re-run works: not the frame to keep.
+    pub fn last_interim(&self) -> bool {
+        self.last_interim
+    }
+
+    /// A new look: the receiver starts over under it rather than carrying
+    /// the last one's state (a rolling picture, lost tracking) into it.
+    pub fn restart_glitch(&mut self) {
+        self.glitch.restart();
+    }
+
+    fn cancel_digital_rerun(&mut self) {
+        self.digital_ready = None;
+        if let Some(r) = self.digital_rerun.take() {
+            r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// The Digital stage for the preview, in place: a finished background
+    /// re-run taken over first; a long re-run deferred to a thread of its
+    /// own when that's on.
+    fn preview_cpu_stages(&mut self, settings: &Settings, pixels: &mut Image, earlier: Option<&mut FrameVisitor<'_>>) -> Result<()> {
+        self.last_interim = false;
+        let Some(d) = settings.digital.clone() else {
+            return cpu_stages(&mut self.digital, settings, pixels, earlier);
+        };
+        if let Some((frame, done)) = self.digital_ready.take() {
+            if continues(&d, &frame) {
+                self.digital = done;
+            }
+        }
+        // Off this thread needs a reader of its own for a clip.
+        let opener = if earlier.is_some() { self.clip_opener.clone() } else { None };
+        let can_defer = self.digital_in_background && (earlier.is_none() || opener.is_some());
+        self.digital.defer_rerun_above = if can_defer { Some(Self::DIGITAL_BACKGROUND_ABOVE) } else { None };
+        let ran = cpu_stages(&mut self.digital, settings, pixels, earlier);
+        self.digital.defer_rerun_above = None;
+        let Some(source) = self.digital.take_deferred_pixels() else { return ran };
+        self.last_interim = true;
+        self.cancel_digital_rerun();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = Arc::new(std::sync::Mutex::new(None));
+        let (stop, out, frame) = (cancel.clone(), result.clone(), d.clone());
+        let (w, h) = (pixels.width as usize, pixels.height as usize);
+        std::thread::spawn(move || {
+            let mut exact = codec::DigitalVideoRenderer::new();
+            exact.cancel = Some(stop.clone());
+            let mut reader = opener.and_then(|open| open());
+            let mut px = source;
+            match reader.as_mut() {
+                Some(r) => {
+                    let mut visit = |n: i64, body: &mut dyn FnMut(&[u8], usize, usize, usize)| r(n, body);
+                    exact.process(frame.frame, &mut px, w, h, w * 4, frame.capture, frame.source_fps, &frame.settings, frame.history.as_ref().map(|h| h.0.as_ref()), Some(&mut visit));
+                }
+                None => exact.process(frame.frame, &mut px, w, h, w * 4, frame.capture, frame.source_fps, &frame.settings, frame.history.as_ref().map(|h| h.0.as_ref()), None),
+            }
+            exact.cancel = None;
+            if !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(mut g) = out.lock() {
+                    *g = Some(exact);
+                }
+            }
+        });
+        self.digital_rerun = Some(DigitalRerun { frame: d, cancel, result });
+        ran
+    }
+
+    /// Re-runs longer than this many captures (~10 ms each, with the earlier
+    /// frames to decode) go to a thread of their own when
+    /// `digital_in_background` is on.
+    pub const DIGITAL_BACKGROUND_ABOVE: i64 = 6;
 
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.info
@@ -412,10 +558,12 @@ impl Engine {
     /// carry on from (and to give back with `put_digital` when it stops).
     pub fn take_digital(&mut self) -> codec::DigitalVideoRenderer {
         self.prepared = None;
+        self.cancel_digital_rerun();
         std::mem::take(&mut self.digital)
     }
 
     pub fn put_digital(&mut self, digital: codec::DigitalVideoRenderer) {
+        self.cancel_digital_rerun();
         self.digital = digital;
         self.prepared = None;
     }
@@ -671,8 +819,12 @@ impl Engine {
             }
         }
         let mut pixels = source.clone();
-        cpu_stages(&mut self.digital, settings, &mut pixels, earlier)?;
+        self.preview_cpu_stages(settings, &mut pixels, earlier)?;
         let tex = self.upload_prepared(key, &pixels);
+        if self.last_interim {
+            // Not the frame: the exact one replaces it once it lands.
+            self.prepared = None;
+        }
         Ok(tex)
     }
 
@@ -757,6 +909,7 @@ impl Engine {
     /// shows of it at this moment.
     fn apply_glitch(&mut self, enc: &mut wgpu::CommandEncoder, chain_input: wgpu::Texture, settings: &Settings) -> wgpu::Texture {
         let Some(frame) = &settings.glitch else { return chain_input };
+        self.glitch.background = self.glitch_in_background;
         let (w, h) = (chain_input.width(), chain_input.height());
         let plan = self.glitch.plan(glitch::receiver::Raster::new(w as usize, h as usize), frame);
         let out = texture(

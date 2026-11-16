@@ -495,7 +495,21 @@ impl Simulator {
         frame_duration: f64,
         settings_at: &dyn Fn(f64) -> GlitchSettings,
         resume_from: Option<&Snapshot>,
+        checkpoint: Option<&mut dyn FnMut(Snapshot)>,
+    ) {
+        self.resimulate_unless(time, frame_duration, settings_at, resume_from, checkpoint, &|| false);
+    }
+
+    /// `resimulate`, abandoned (leaving the set mid-run) once `cancelled`
+    /// says so — checked every 30 frames.
+    pub fn resimulate_unless(
+        &mut self,
+        time: f64,
+        frame_duration: f64,
+        settings_at: &dyn Fn(f64) -> GlitchSettings,
+        resume_from: Option<&Snapshot>,
         mut checkpoint: Option<&mut dyn FnMut(Snapshot)>,
+        cancelled: &dyn Fn() -> bool,
     ) {
         let mut k: i64 = 1;
         match resume_from {
@@ -513,6 +527,9 @@ impl Simulator {
         }
         let mut next_checkpoint = (self.time() + 1.0).floor();
         loop {
+            if k % 30 == 0 && cancelled() {
+                return;
+            }
             let t = time.min(k as f64 * frame_duration);
             self.advance(t, &settings_at(t));
             if t >= time {

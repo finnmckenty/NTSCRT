@@ -5,7 +5,8 @@
 //! re-simulates, so a given moment always looks the same.
 
 use std::f64::consts::PI;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::params::GlitchSettings;
 use super::receiver::{draw_constants, timing as T, FieldPlan, Raster, Simulator, Snapshot};
@@ -49,22 +50,110 @@ enum CheckpointKey {
     History(u64, u64),
 }
 
+/// A re-run on a thread of its own (see `Renderer::background`).
+struct Rerun {
+    key: CheckpointKey,
+    time: f64,
+    raster: Raster,
+    settings: GlitchSettings,
+    /// The checkpoints it resumed from (kept with what it adds).
+    kept: Vec<Snapshot>,
+    cancel: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<(Simulator, Vec<Snapshot>)>>>,
+}
+
 #[derive(Default)]
 pub struct Renderer {
     sim: Option<Simulator>,
     last_settings: Option<GlitchSettings>,
     checkpoints: Vec<Snapshot>,
     key: Option<CheckpointKey>,
+    /// The preview turns this on: a long exact re-run (a VCR knob turned on
+    /// a paused clip a minute in, a far scrub) happens on a thread of its
+    /// own while the preview shows the knobs applied to the state it has;
+    /// the next `plan` after it finishes picks it up (`rerun_landed` says
+    /// when to ask). Exports leave it off — every frame they draw is exact.
+    pub background: bool,
+    rerun: Option<Rerun>,
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        self.cancel_rerun();
+    }
 }
 
 impl Renderer {
     /// Forward jumps longer than this re-simulate instead of stepping.
     pub const MAX_STEP: f64 = 1.0;
+    /// Re-runs longer than this (simulated seconds from where one can
+    /// resume) go to a thread of their own when `background` is on. A
+    /// second of simulation is ~35 ms; a minute is ~2 s.
+    pub const BACKGROUND_ABOVE: f64 = 1.5;
+
+    /// A background re-run is on its way.
+    pub fn rerun_pending(&self) -> bool {
+        self.rerun.is_some()
+    }
+
+    /// A background re-run has finished: the next `plan` uses it.
+    pub fn rerun_landed(&self) -> bool {
+        self.rerun.as_ref().is_some_and(|r| r.result.lock().map(|g| g.is_some()).unwrap_or(false))
+    }
+
+    /// If a background re-run has finished, take it over (the next `plan`
+    /// starts from it) and say so — once.
+    pub fn take_landed(&mut self) -> bool {
+        if !self.rerun_landed() {
+            return false;
+        }
+        self.adopt_rerun();
+        true
+    }
+
+    /// Forget the simulation: the next frame starts from a freshly simulated
+    /// set at its time, as if these settings had always been on (a new look
+    /// mustn't inherit the last one's rolling picture or lost tracking).
+    pub fn restart(&mut self) {
+        self.cancel_rerun();
+        self.sim = None;
+        self.checkpoints.clear();
+        self.key = None;
+        self.last_settings = None;
+    }
+
+    fn cancel_rerun(&mut self) {
+        if let Some(r) = self.rerun.take() {
+            r.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Take a finished background re-run's simulation and checkpoints.
+    fn adopt_rerun(&mut self) {
+        let Some(r) = self.rerun.as_ref() else { return };
+        let Some((sim, taken)) = r.result.lock().ok().and_then(|mut g| g.take()) else { return };
+        let r = self.rerun.take().expect("checked");
+        if self.sim.as_ref().map(|s| s.raster) != Some(r.raster) {
+            return;
+        }
+        let mut all = r.kept;
+        for snap in taken {
+            if snap.time > all.last().map_or(f64::NEG_INFINITY, |c| c.time) {
+                all.push(snap);
+            }
+        }
+        self.sim = Some(sim);
+        self.checkpoints = all;
+        self.key = Some(r.key);
+        self.last_settings = Some(r.settings);
+    }
 
     /// Bring the receiver to `frame.time` and return the field it displays.
     pub fn plan(&mut self, raster: Raster, frame: &GlitchFrame) -> FieldPlan {
+        self.adopt_rerun();
         let mut fresh = false;
         if self.sim.as_ref().map(|s| s.raster) != Some(raster) {
+            self.cancel_rerun();
             self.sim = Some(Simulator::new(raster));
             fresh = true;
             self.checkpoints.clear();
@@ -79,7 +168,27 @@ impl Renderer {
         let retuned = standing_still && self.last_settings.as_ref().is_some_and(|l| l.timing() != settings.timing());
         let past = if standing_still { None } else { frame.history.as_ref() };
         if fresh || jumped || retuned {
-            self.resimulate(time, settings, frame.history.as_ref());
+            let h = frame.history.as_ref();
+            let key = match h {
+                Some(h) => CheckpointKey::History(h.id, h.frame_duration.to_bits()),
+                None => CheckpointKey::Constant(settings.timing()),
+            };
+            let resume_at =
+                if Some(&key) == self.key.as_ref() { self.checkpoints.iter().rev().find(|c| c.time <= time).map(|c| c.time) } else { None };
+            let span = time - resume_at.unwrap_or(-Simulator::WARMUP);
+            if self.background && span > Self::BACKGROUND_ABOVE {
+                let on_its_way = self.rerun.as_ref().is_some_and(|r| r.key == key && r.raster == raster && r.time <= time + 2.0 * line_time);
+                // Already on its way to here, or to a moment before it
+                // (playing on, scrubbing forward): keep showing what we
+                // have; from where it lands, the rest is a short step.
+                if !on_its_way {
+                    self.show_meanwhile(time, settings, retuned, fresh);
+                    self.start_rerun(key, time, settings, h.cloned(), raster);
+                }
+            } else {
+                self.cancel_rerun();
+                self.resimulate(time, settings, h);
+            }
         } else if let Some(h) = past.filter(|h| self.key == Some(CheckpointKey::History(h.id, h.frame_duration.to_bits()))) {
             // A short step forward through keyframed knobs (playback, or a
             // scrub of under a second): run it frame by frame through the
@@ -101,6 +210,63 @@ impl Renderer {
         }
         self.last_settings = Some(settings.clone());
         self.sim.as_ref().expect("sim").plan()
+    }
+
+    /// While a background re-run works: the knobs applied to the state the
+    /// simulation has (a knob turned on a paused frame), a checkpoint within
+    /// a second of a jump stepped on to it, or a fresh set's first moment.
+    fn show_meanwhile(&mut self, time: f64, settings: &GlitchSettings, retuned: bool, fresh: bool) {
+        let near = self.checkpoints.iter().rev().find(|c| c.time <= time && time - c.time <= Self::MAX_STEP).cloned();
+        let sim = self.sim.as_mut().expect("sim");
+        if retuned {
+            let t = sim.time();
+            sim.advance(t, settings);
+        } else if let Some(c) = near {
+            sim.restore(&c);
+            sim.advance(time, settings);
+        } else if fresh {
+            sim.advance(0.0, settings);
+        }
+    }
+
+    /// The exact re-run on a fresh simulator on a thread of its own.
+    fn start_rerun(&mut self, key: CheckpointKey, time: f64, settings: &GlitchSettings, history: Option<GlitchHistory>, raster: Raster) {
+        self.cancel_rerun();
+        let kept_all = if Some(&key) == self.key.as_ref() { self.checkpoints.clone() } else { Vec::new() };
+        let resume = kept_all.iter().rev().find(|c| c.time <= time).cloned();
+        let kept: Vec<Snapshot> = kept_all.into_iter().filter(|c| resume.as_ref().is_some_and(|r| c.time <= r.time)).collect();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(None));
+        let (stop, out, constant) = (cancel.clone(), result.clone(), settings.clone());
+        std::thread::spawn(move || {
+            let cancelled = || stop.load(Ordering::Relaxed);
+            let mut sim = Simulator::new(raster);
+            let mut taken = Vec::new();
+            if let Some(h) = history {
+                let settings_at = h.settings_at.clone();
+                let mut keep = |snap: Snapshot| taken.push(snap);
+                sim.resimulate_unless(time, h.frame_duration, &move |t| settings_at(t), resume.as_ref(), Some(&mut keep), &cancelled);
+            } else {
+                if let Some(r) = &resume {
+                    sim.restore(r);
+                }
+                let mut next = (resume.as_ref().map_or(0.0, |r| r.time) + 1.0).floor().max(1.0);
+                while next < time && !cancelled() {
+                    sim.advance(next, &constant);
+                    taken.push(sim.snapshot());
+                    next += 1.0;
+                }
+                if !cancelled() {
+                    sim.advance(time, &constant);
+                }
+            }
+            if !cancelled() {
+                if let Ok(mut g) = out.lock() {
+                    *g = Some((sim, taken));
+                }
+            }
+        });
+        self.rerun = Some(Rerun { key, time, raster, settings: settings.clone(), kept, cancel, result });
     }
 
     fn resimulate(&mut self, time: f64, settings: &GlitchSettings, history: Option<&GlitchHistory>) {
@@ -310,5 +476,88 @@ impl Gpu {
         pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(&self.compose);
         pass.dispatch_workgroups(width.div_ceil(8), input.height().div_ceil(8), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(values: &[(&str, f64)]) -> GlitchSettings {
+        let mut s = GlitchSettings::default();
+        for (k, v) in values {
+            s.values.insert(k.to_string(), *v);
+        }
+        s
+    }
+
+    fn frame(settings: GlitchSettings, time: f64, history: Option<GlitchHistory>) -> GlitchFrame {
+        GlitchFrame { settings, time, history }
+    }
+
+    /// Plan on the background renderer until its re-run has landed.
+    fn settled(r: &mut Renderer, raster: Raster, f: &GlitchFrame) -> FieldPlan {
+        let _ = r.plan(raster, f);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while r.rerun_pending() && std::time::Instant::now() < deadline {
+            if r.take_landed() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!r.rerun_pending(), "background re-run never landed");
+        r.plan(raster, f)
+    }
+
+    fn same(a: &FieldPlan, b: &FieldPlan) {
+        assert_eq!(a.rows, b.rows);
+        assert_eq!(format!("{:?}", a.vcr), format!("{:?}", b.vcr));
+        assert_eq!(a.chroma_phase, b.chroma_phase);
+    }
+
+    /// A timing knob turned on a paused frame far into a clip: the preview
+    /// shows something at once, and once the background re-run lands the
+    /// frame is exactly what a full re-run gives (the Mac's 0.26.1 fix).
+    #[test]
+    fn a_background_rerun_after_a_retune_matches_a_full_rerun() {
+        let raster = Raster::new(320, 240);
+        let mut values = vec![("vcr", 1.0), ("tracking_offset", 0.3), ("back_tension", 0.2), ("tape_sticky", 0.5), ("dirt_buildup", 0.6), ("tape_mold", 0.4)];
+        let mut preview = Renderer::default();
+        preview.background = true;
+        settled(&mut preview, raster, &frame(settings(&values), 6.0, None));
+        values[2] = ("back_tension", 0.6);
+        let f = frame(settings(&values), 6.0, None);
+        let meanwhile = preview.plan(raster, &f);
+        assert!(!meanwhile.rows.is_empty());
+        assert!(preview.rerun_pending(), "a 6 s re-run goes to the background");
+        let landed = settled(&mut preview, raster, &f);
+        same(&landed, &Renderer::default().plan(raster, &f));
+        // Its checkpoints are good for seeking back, too.
+        let back = frame(settings(&values), 3.5, None);
+        same(&preview.plan(raster, &back), &Renderer::default().plan(raster, &back));
+    }
+
+    #[test]
+    fn a_background_rerun_after_a_jump_matches_a_full_rerun_with_keyframes() {
+        let raster = Raster::new(320, 240);
+        let history = GlitchHistory {
+            frame_duration: 1.0 / 24.0,
+            id: 9,
+            settings_at: Arc::new(|t| {
+                settings(&[
+                    ("vcr", 1.0),
+                    ("tracking_offset", (t / 5.0).min(0.6)),
+                    ("back_tension", if t > 2.3 { 0.6 } else { 0.0 }),
+                    ("tape_sticky", (t / 3.0).min(1.0)),
+                    ("vertical_hold", (t / 6.0).min(0.9)),
+                ])
+            }),
+        };
+        let t = 130.0 / 24.0;
+        let f = frame((history.settings_at)(t), t, Some(history.clone()));
+        let mut preview = Renderer::default();
+        preview.background = true;
+        let landed = settled(&mut preview, raster, &f);
+        same(&landed, &Renderer::default().plan(raster, &f));
     }
 }

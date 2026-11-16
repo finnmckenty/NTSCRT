@@ -177,6 +177,17 @@ pub struct DigitalVideoRenderer {
 
     /// Captures re-run since the last call (for tests and the perf log).
     pub last_run_length: usize,
+
+    /// A re-run longer than this many captures isn't done: the frame is
+    /// coded on its own instead (a keyframe under the settings — no smear
+    /// or datamosh from before it), and its pixels as they came in are kept
+    /// in `deferred_pixels` for running it exactly elsewhere (the preview's
+    /// background re-runs). `None` (the default) always re-runs.
+    pub defer_rerun_above: Option<i64>,
+    deferred_pixels: Option<Vec<u8>>,
+    /// Checked once a capture during a re-run; set abandons it (the renderer
+    /// is left mid-stream, so only a throwaway one should be cancelled).
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for DigitalVideoRenderer {
@@ -207,7 +218,16 @@ impl DigitalVideoRenderer {
             checkpoint_order: VecDeque::new(),
             checkpoint_bytes: 0,
             last_run_length: 0,
+            defer_rerun_above: None,
+            deferred_pixels: None,
+            cancel: None,
         }
+    }
+
+    /// After a `process` that deferred its re-run: the frame's pixels as
+    /// they came in.
+    pub fn take_deferred_pixels(&mut self) -> Option<Vec<u8>> {
+        self.deferred_pixels.take()
     }
 
     /// The capture size for a picture of `width` × `height` at a capture
@@ -243,7 +263,10 @@ impl DigitalVideoRenderer {
         history: Option<&DigitalHistory>,
         earlier: Option<&mut FrameVisitor<'_>>,
     ) {
-        self.run_frame(n, pixels, width, height, row_bytes, capture_size, source_fps, settings, history, earlier);
+        self.deferred_pixels = None;
+        if self.run_frame(n, pixels, width, height, row_bytes, capture_size, source_fps, settings, history, earlier) {
+            self.deferred_pixels = Some(pixels.to_vec());
+        }
         Self::upscale(&self.shown, capture_size, pixels, width, height, row_bytes);
     }
 
@@ -263,7 +286,9 @@ impl DigitalVideoRenderer {
         history: Option<&DigitalHistory>,
         earlier: Option<&mut FrameVisitor<'_>>,
     ) {
+        let defer = self.defer_rerun_above.take();
         self.run_frame(n, pixels, width, height, row_bytes, capture_size, source_fps, settings, history, earlier);
+        self.defer_rerun_above = defer;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -279,7 +304,7 @@ impl DigitalVideoRenderer {
         settings: &DigitalSettings,
         history: Option<&DigitalHistory>,
         mut earlier: Option<&mut FrameVisitor<'_>>,
-    ) {
+    ) -> bool {
         let structure = settings;
         let timing = DigitalTiming::new(source_fps, structure);
         let geometry = CodecGeometry::new(capture_size.0, capture_size.1, structure.chroma());
@@ -300,6 +325,7 @@ impl DigitalVideoRenderer {
         let current = Self::scale(pixels, width, height, row_bytes, capture_size, structure);
 
         let last = self.last_capture;
+        let mut deferred = false;
         if last == Some(c) && self.state.is_some() && self.last_settings.as_ref() == Some(&now) {
             // Same frame, same settings: what's shown already.
         } else if let Some(last) = last.filter(|&l| self.state.is_some() && c > l && c - l <= swift_max(2, 2 * timing.keyframe_every)) {
@@ -318,12 +344,13 @@ impl DigitalVideoRenderer {
                 self.advance(k, &src, &geometry, &timing, &sf.at(k), key, history);
             }
             if !ok {
-                self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
+                deferred = self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
             }
         } else {
-            self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
+            deferred = self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
         }
         self.last_settings = Some(now);
+        deferred
     }
 
     // MARK: - running the stream
@@ -342,7 +369,7 @@ impl DigitalVideoRenderer {
         history: Option<&DigitalHistory>,
         mut earlier: Option<&mut FrameVisitor<'_>>,
         sf: &SettingsFor<'_>,
-    ) {
+    ) -> bool {
         let g = timing.keyframe_every;
         let checkpoint_settings: Option<DigitalSettings> = if history.is_none() { Some(sf.at(c)) } else { None };
         let start: i64;
@@ -367,6 +394,13 @@ impl DigitalVideoRenderer {
             }
             start = b;
         }
+        if self.defer_rerun_above.is_some_and(|limit| c - start > limit) {
+            // See `defer_rerun_above`: this frame alone, unfit to checkpoint.
+            self.state = Some(CodecState::new(*geometry));
+            self.run_settings = None;
+            self.advance(c, current, geometry, timing, &sf.at(c), key, history);
+            return true;
+        }
         let was_restored = restored.is_some();
         self.state = Some(restored.unwrap_or_else(|| CodecState::new(*geometry)));
         self.run_settings = Some(checkpoint_settings);
@@ -380,9 +414,12 @@ impl DigitalVideoRenderer {
             self.shown = Self::render(&decoded, geometry, &s, step);
             self.shown_size = (geometry.width, geometry.height);
             self.last_capture = Some(c);
-            return;
+            return false;
         }
         for k in first..=c {
+            if self.cancel.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                return false;
+            }
             // The camera took capture k at its first frame; `current` is
             // frame n, which may be a later repeat of it.
             let src: Cow<[u8]> = if timing.frame_of_capture(k) == n {
@@ -393,6 +430,7 @@ impl DigitalVideoRenderer {
             };
             self.advance(k, &src, geometry, timing, &sf.at(k), key, history);
         }
+        false
     }
 
     /// The capture-size picture for capture `k`, from an earlier frame — or

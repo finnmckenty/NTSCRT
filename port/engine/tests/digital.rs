@@ -76,3 +76,74 @@ fn the_stage_changes_the_picture_and_its_noise_moves() {
     let again = engine.render_export(&on, out, None).expect("render");
     assert_eq!(a.rgba, again.rgba, "the stream should be deterministic");
 }
+
+/// A clip whose frames move: frame n is the picture shifted n pixels.
+fn clip_frame(n: i64) -> Image {
+    let base = picture(640, 480);
+    let shift = (n.max(0) as usize % 640) * 4;
+    let mut rgba = base.rgba.clone();
+    for row in rgba.chunks_mut(640 * 4) {
+        row.rotate_left(shift);
+    }
+    Image::new(640, 480, rgba)
+}
+
+fn visit_clip(n: i64, body: &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool {
+    let f = clip_frame(n);
+    body(&f.rgba, 640, 480, 640 * 4);
+    true
+}
+
+/// The preview's long Digital re-runs (a knob turned on a paused clip, a
+/// jump) go to a thread of their own: meanwhile the frame shows coded on
+/// its own (and isn't to be kept), and once the re-run lands the frame is
+/// exactly what a straight re-run gives — the Mac's 0.26.1 fix.
+#[test]
+fn background_digital_reruns_land_on_the_exact_frame() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut engine) = Engine::new() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut look = cheap_camcorder();
+    look.shader_enabled = Some(false);
+    look.ntsc_enabled = Some(false);
+    look.glitch_enabled = false;
+    let shaders = std::path::PathBuf::from("/nonexistent");
+    let mut s = look.render_settings((640, 480), &shaders, 0).expect("settings");
+    {
+        let d = s.digital.as_mut().expect("digital on");
+        d.settings.set("keyframe_interval", 2.0);
+        d.settings.set("data_loss", 0.4);
+        d.source_fps = 30.0;
+        d.frame = 50;
+    }
+    engine.digital_in_background = true;
+    let opener: ntscrt_engine::ClipOpener = std::sync::Arc::new(|| {
+        let visit: Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool + Send> = Box::new(visit_clip);
+        Some(visit)
+    });
+    engine.set_clip_opener(Some(opener));
+    for change in [None, Some(("quality", 0.15)), Some(("data_loss", 0.7))] {
+        if let Some((k, v)) = change {
+            s.digital.as_mut().unwrap().settings.set(k, v); // turned while paused
+        }
+        engine.set_source(clip_frame(50));
+        let mut visit = visit_clip;
+        engine.bake(&s, Some(&mut visit)).expect("meanwhile");
+        assert!(engine.last_interim(), "{change:?}: a 50-capture re-run goes to the background");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !engine.take_landed() {
+            assert!(std::time::Instant::now() < deadline, "background re-run never landed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let landed = engine.bake(&s, Some(&mut visit)).expect("landed");
+        assert!(!engine.last_interim());
+
+        let mut exact = Engine::new().expect("engine");
+        exact.set_source(clip_frame(50));
+        let mut visit = visit_clip;
+        let want = exact.bake(&s, Some(&mut visit)).expect("exact");
+        assert_eq!(landed.rgba, want.rgba, "{change:?}");
+    }
+}

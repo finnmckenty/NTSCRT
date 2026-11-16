@@ -542,8 +542,15 @@ impl App {
                 self.digital_values = v;
                 self.digital_enabled = *enabled;
             }
-            None => self.digital_enabled = false,
+            None => {
+                // Not the last look's values behind a switched-off stage.
+                self.digital_values = ntscrt_engine::codec::DigitalParam::starting_values();
+                self.digital_enabled = false;
+            }
         }
+        // The receiver starts over under the new look rather than carrying
+        // the last one's state (a rolling picture, lost tracking) into it.
+        let _ = self.requests.send(Request::NewLook);
         if let Some(d) = look.timeline_duration { self.timeline_seconds = d }
         if let Some(f) = look.timeline_fps { self.timeline_fps = f }
         if look.raw.contains_key("timeline") {
@@ -802,9 +809,15 @@ impl App {
         }
         total.hash(&mut hasher);
         reception_on.hash(&mut hasher);
-        for (n, v) in &base.values {
-            n.hash(&mut hasher);
-            v.to_bits().hash(&mut hasher);
+        // As digital_history: the base only matters for keys saved without
+        // glitch values. Hashing it otherwise gave every playhead position a
+        // new id (the playhead writes keyed values into the base), so each
+        // scrub step re-ran the receiver from time zero.
+        if self.keys.iter().any(|k| k.glitch.is_empty()) {
+            for (n, v) in &base.values {
+                n.hash(&mut hasher);
+                v.to_bits().hash(&mut hasher);
+            }
         }
         Some(ntscrt_engine::glitch::GlitchHistory {
             frame_duration: 1.0 / fps,

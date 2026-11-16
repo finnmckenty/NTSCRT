@@ -24,6 +24,8 @@ const FILL_AFTER: Duration = Duration::from_millis(250);
 pub enum Request {
     Still(Image),
     Video(PathBuf),
+    /// A look was loaded: the receiver starts over under it.
+    NewLook,
     Render {
         seq: u64,
         settings: Settings,
@@ -76,6 +78,10 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
     };
     let a = engine.adapter_info();
     send(Event::Adapter(format!("{} ({:?})", a.name, a.backend)));
+    // Long exact re-runs (a VCR or Digital knob turned on a paused clip, a
+    // far scrub) go to threads of their own; the preview shows a quick
+    // version meanwhile and is rendered again when they land.
+    engine.glitch_in_background = true;
 
     // NTSCRT_PROFILE=1: where each preview frame's time goes, on stderr.
     let profile = std::env::var_os("NTSCRT_PROFILE").is_some();
@@ -97,14 +103,41 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
     let mut clip_id = 0u64;
 
     let mut fill: Option<Fill> = None;
+    let mut pending_first: Option<Request> = None;
     // While a clip plays: its frames' CPU stages, made ahead on a thread.
     let mut producer: Option<Producer> = None;
     let mut last_request = Instant::now();
+    // The last render asked for, to render again when a background re-run
+    // lands: (seq, settings, plan, full, frame, crop, want_source, playing).
+    #[allow(clippy::type_complexity)]
+    let mut last_render: Option<(u64, Settings, PreviewPlan, bool, usize, Option<Crop>, bool, bool)> = None;
     loop {
+        // A background re-run on its way: look for it between requests, and
+        // bake nothing ahead until it's in (its frame isn't the exact one).
+        if engine.background_pending() {
+            let first = match requests.recv_timeout(Duration::from_millis(10)) {
+                Ok(r) => Some(r),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => None,
+            };
+            let replay = match first {
+                Some(r) => r,
+                None if engine.take_landed() => match last_render.clone() {
+                    Some((seq, settings, plan, full, frame, crop, want_source, playing)) => {
+                        Request::Render { seq, settings, plan, full, frame, crop, want_source, playing }
+                    }
+                    None => continue,
+                },
+                None => continue,
+            };
+            pending_first = Some(replay);
+        }
         // Baking ahead waits until the requests settle: a frame of it holds
         // up the next request, so mid-drag it would halve the preview's rate.
         let settle = FILL_AFTER.saturating_sub(last_request.elapsed());
-        let first = if fill.is_some() && !settle.is_zero() {
+        let first = if let Some(r) = pending_first.take() {
+            r
+        } else if fill.is_some() && !settle.is_zero() {
             match requests.recv_timeout(settle) {
                 Ok(r) => r,
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -197,10 +230,12 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
                     }
                     Err(e) => send(Event::Opened(Err(format!("{e:#}")))),
                 },
+                Request::NewLook => engine.restart_glitch(),
                 r @ Request::Render { .. } => render = Some(r),
             }
         }
         let Some(Request::Render { seq, mut settings, plan, full, frame, crop, want_source, playing }) = render else { continue };
+        last_render = Some((seq, settings.clone(), plan, full, frame, crop, want_source, playing));
         if !playing {
             if let Some(p) = producer.take() {
                 engine.put_digital(p.finish());
@@ -307,15 +342,30 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
             let decoded = decode_start.elapsed().as_secs_f64() * 1000.0;
             let mut none = None;
             let visitor = if settings.digital.is_some() { &mut clip } else { &mut none };
+            // A long Digital re-run goes to a thread of its own, with a
+            // reader of the clip of its own.
+            engine.set_clip_opener(clip_path.clone().filter(|_| settings.digital.is_some()).map(|path| {
+                let opener: ntscrt_engine::ClipOpener = Arc::new(move || {
+                    let mut c = crate::clip_frames::ClipFrames::open(&path, crop).ok()?;
+                    let visit: Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool + Send> =
+                        Box::new(move |n, body| c.visit(n, body));
+                    Some(visit)
+                });
+                opener
+            }));
+            engine.digital_in_background = true;
             let rendered = if is_video {
-                // Bake it for next time.
+                // Bake it for next time (not a stand-in for it).
                 crate::clip_frames::with_visitor(visitor, |v| engine.bake_and_preview(&settings, plan, full, v)).map(|(baked, out)| {
-                    cache.insert(frame, stamp, baked);
+                    if !engine.last_interim() {
+                        cache.insert(frame, stamp, baked);
+                    }
                     out
                 })
             } else {
                 crate::clip_frames::with_visitor(visitor, |v| engine.render_preview(&settings, plan, full, v))
             };
+            engine.digital_in_background = false;
             if profile {
                 eprintln!(
                     "profile frame {frame}: decode+crop {decoded:.1} ms, CPU stages {:.1} ms, total {:.1} ms",
@@ -328,6 +378,9 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
         .map_err(|e| format!("{e:#}"));
         // Paused on a clip: bake ahead of the playhead while there's nothing to do.
         fill = match (&media, playing) {
+            // Baking ahead carries the stream on from the frame shown, which
+            // must be the exact one first.
+            (Some(Media::Video(_)), false) if engine.last_interim() => None,
             (Some(Media::Video(_)), false) => Some(Fill { settings: settings.clone(), crop, next: shown_frame + 1, looked: 0 }),
             _ => None,
         };
