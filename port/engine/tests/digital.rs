@@ -120,7 +120,7 @@ fn background_digital_reruns_land_on_the_exact_frame() {
     }
     engine.digital_in_background = true;
     let opener: ntscrt_engine::ClipOpener = std::sync::Arc::new(|| {
-        let visit: Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool + Send> = Box::new(visit_clip);
+        let visit: Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool> = Box::new(visit_clip);
         Some(visit)
     });
     engine.set_clip_opener(Some(opener));

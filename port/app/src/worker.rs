@@ -347,7 +347,7 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
             engine.set_clip_opener(clip_path.clone().filter(|_| settings.digital.is_some()).map(|path| {
                 let opener: ntscrt_engine::ClipOpener = Arc::new(move || {
                     let mut c = crate::clip_frames::ClipFrames::open(&path, crop).ok()?;
-                    let visit: Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool + Send> =
+                    let visit: Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool> =
                         Box::new(move |n, body| c.visit(n, body));
                     Some(visit)
                 });

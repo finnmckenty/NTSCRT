@@ -301,9 +301,10 @@ pub fn cpu_stages(digital: &mut codec::DigitalVideoRenderer, settings: &Settings
     Ok(())
 }
 
-/// Opens another reader of the clip's earlier frames (for the Digital
-/// stage's re-runs) that can go to another thread.
-pub type ClipOpener = Arc<dyn Fn() -> Option<Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool + Send>> + Send + Sync>;
+/// Opens another reader of the clip's earlier frames, for the Digital
+/// stage's re-runs on another thread. It's called on that thread, so the
+/// reader needn't be sendable (Windows' Media Foundation one isn't).
+pub type ClipOpener = Arc<dyn Fn() -> Option<Box<dyn FnMut(i64, &mut dyn FnMut(&[u8], usize, usize, usize)) -> bool>> + Send + Sync>;
 
 /// A Digital re-run on a thread of its own (see `Engine::digital_in_background`).
 struct DigitalRerun {
