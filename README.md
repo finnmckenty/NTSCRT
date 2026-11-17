@@ -135,6 +135,8 @@ NTSCRT can act as an MCP server: a background helper that gives an AI app new to
 
 **The easy way**: put NTSCRT in your Applications folder, open it, and choose **NTSCRT > Connect to Claude…**. Click **Connect** next to Claude Desktop or Claude Code, then quit and reopen Claude Desktop (**⌘Q**). NTSCRT backs up Claude's settings first and leaves your other servers alone.
 
+**Claude Desktop extension**: download `ntscrt-mcp-<version>.mcpb` from the [latest release](../../releases/latest) and double-click it (or drag it into Claude's **Settings > Extensions**). It needs NTSCRT in your Applications folder. NTSCRT is also listed in the official [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.finnmckenty/ntscrt`.
+
 **Claude Desktop, by hand**
 
 1. Put NTSCRT in your Applications folder.

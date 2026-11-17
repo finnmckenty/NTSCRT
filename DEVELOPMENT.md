@@ -215,8 +215,11 @@ git tag v0.23.0 && git push origin v0.23.0
 # The tag's Windows CI run builds the package stamped 0.23.0; once it passes:
 gh run download <run id> -n NTSCRT-windows-x64 -D build/ci-0.23.0
 (cd build/ci-0.23.0 && zip -qr -X ../../dist/NTSCRT-0.23.0-windows-x64.zip NTSCRT)
-gh release create v0.23.0 dist/NTSCRT-0.23.0.dmg dist/NTSCRT-0.23.0-windows-x64.zip --title "NTSCRT 0.23.0" --notes-file notes.md
+./scripts/make-mcpb.sh 0.23.0      # the Claude Desktop extension, after make-release (it empties dist/)
+gh release create v0.23.0 dist/NTSCRT-0.23.0.dmg dist/NTSCRT-0.23.0-windows-x64.zip dist/ntscrt-mcp-0.23.0.mcpb --title "NTSCRT 0.23.0" --notes-file notes.md
 ```
+
+Publishing the release with `ntscrt-mcp-<v>.mcpb` attached runs the **MCP Registry** workflow, which lists that version in the official MCP Registry (`io.github.finnmckenty/ntscrt`, from `server.json`) by GitHub OIDC; no secret. Re-run it by hand with the tag if it fails. The extension (`mcpb/`) is only a launcher that finds the installed app (Applications, else Spotlight by bundle id) and runs `NTSCRT mcp`, with a clear error when NTSCRT is missing or older than 0.26.
 
 Tag first: the Windows build takes its version from the tag (`git describe`), and both apps' update check compares their version with the latest release's tag. A Windows package built before the tag would call itself 0.22.1-n-g… and keep offering 0.23.0 to people who already have it.
 

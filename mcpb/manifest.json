@@ -1,0 +1,78 @@
+{
+  "manifest_version": "0.3",
+  "name": "ntscrt",
+  "display_name": "NTSCRT",
+  "version": "0.26.4",
+  "description": "Make images and video look like they're on a VHS tape, an old TV or a CRT: preview, animate and render analog looks.",
+  "long_description": "NTSCRT runs your images and video through simulated analog video gear: a camera and codec, an NTSC signal, a VHS tape in a VCR, a TV receiver and a CRT screen. With this extension, Claude can pick a look, preview frames, adjust tape damage, glitches and scanlines, animate stills with keyframes, render MP4, GIF or PNG files on your Mac, and save looks for the app.\n\nRequires the NTSCRT app (free, macOS 14 or later) in your Applications folder: https://github.com/finnmckenty/NTSCRT/releases/latest",
+  "author": {
+    "name": "Finn McKenty",
+    "url": "https://github.com/finnmckenty"
+  },
+  "homepage": "https://github.com/finnmckenty/NTSCRT",
+  "documentation": "https://github.com/finnmckenty/NTSCRT#using-ntscrt-from-claude-mcp",
+  "support": "https://github.com/finnmckenty/NTSCRT/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/finnmckenty/NTSCRT"
+  },
+  "icon": "icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/launch.sh",
+    "mcp_config": {
+      "command": "/bin/sh",
+      "args": [
+        "${__dirname}/server/launch.sh"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "ntscrt_list_looks",
+      "description": "Named starting points: NTSCRT's built-in looks (each with a description of what it looks like and the stages it uses), the VCR's Tape and Deck conditions, Digital video formats and CRT presets."
+    },
+    {
+      "name": "ntscrt_guide",
+      "description": "Read this first, once per conversation, before choosing any settings: the craft rules for NTSCRT — which stage fits which words, how strong to go, resolution and scanlines (bold scanlines need a LOW resolution), sampling and pixel art, CRT close-ups, Digital video, glitch timing, and animating still images (loops, variations). Optional topics narrow it."
+    },
+    {
+      "name": "ntscrt_describe",
+      "description": "Every control of the stages asked for: id, kind (slider, toggle, choice, seed, integer), range, default, and what it does. Stages: crop, downscale, digital, ntsc, glitch, vcr, crt, output. CRT parameters depend on the preset; pass crt_preset for one other than the default (glow_gauss)."
+    },
+    {
+      "name": "ntscrt_preview",
+      "description": "Render a few frames of the source with the settings and return them as images, to check a look before rendering the whole video. Times are seconds into the clip (or into the video a still becomes); the VCR and Glitch stages change over time, so ask for several."
+    },
+    {
+      "name": "ntscrt_render",
+      "description": "Render the source with the settings to a file: a clip in full, or a still as a video of `duration` seconds. Waits up to wait_seconds (default 45) and returns the result, or a job id to poll with ntscrt_render_status. Renders run one at a time."
+    },
+    {
+      "name": "ntscrt_render_status",
+      "description": "A render's progress, time left, and — when done — its output file. Waits up to wait_seconds (default 30) for it to finish."
+    },
+    {
+      "name": "ntscrt_save_look",
+      "description": "Save the settings as an NTSCRT look file, which the app opens with Preset > Load Preset…."
+    }
+  ],
+  "keywords": [
+    "vhs",
+    "crt",
+    "glitch",
+    "retro",
+    "analog",
+    "video",
+    "scanlines",
+    "ntsc",
+    "vcr",
+    "gif"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ]
+  }
+}
