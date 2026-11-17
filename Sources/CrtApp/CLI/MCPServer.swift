@@ -88,6 +88,8 @@ enum MCPServer {
     - Webcam, video call, camcorder, MiniDV, skate video, early internet video, streaming, CD-ROM, compression, blocks, datamosh: the digital stage; start from a format or a look.
     - Glitchy digital video: block video at fairly low quality (roughly 0.3–0.6), and above all a long keyframe interval (3–6 s) with moderate data_loss, so lost data smears and hangs until the next keyframe (see the "glitchy block video" look). Glitchy streaming video is different: a long keyframe interval or a fixed bitrate adds a lot of noise, which most users won't want, so leave both off unless they ask to go really overboard ("glitchy streaming video" vs "glitchy streaming video with noise"). These errors live in motion: on a still image they barely show, since a lost block repeats an identical frame.
     - Don't stack Digital video with the analog stages (ntsc, vcr, glitch) unless the user asks: that would be streaming video recorded onto a VHS tape, an unlikely thing. With Digital video, switch ntsc off ("ntsc": "off") and leave vcr and glitch off. Digital video with the CRT makes sense for a vintage computer monitor, when the user says so; otherwise Digital video alone is closest to what people picture.
+    - Sampling (downscale "method": "chunky" or "smooth") matters a lot. Chunky picks single pixels, so the NTSC stage's fine noise survives as much stronger, sparkly noise, and the CRT draws hard, crisp pixels; smooth averages, so the noise calms down and edges soften. Neither is better: choose by what the user wants (grit and crispness, or a cleaner, softer picture).
+    - Pixel art (game screenshots, sprites, low-resolution graphics with hard pixel edges): the user almost always wants each art pixel to stay crisp under sharp, even scanlines. Any mismatch between the art's own pixel grid and the lines the CRT draws, or smooth sampling, blurs edges into sub-pixel mush. So: check the source size (the result's look.source) and the art's pixel size. If the art is at its native resolution (e.g. 256 or 320 wide), switch downscale off or set it to exactly that width. If it's an upscaled screenshot, set the width to its native resolution (source width ÷ the size of one art pixel, e.g. 1024 ÷ 4 = 256), or a whole-number fraction of it. Use chunky, never smooth, and set snap so every line gets the same number of output rows. Usually leave the ntsc stage off or very light for pixel art unless the user wants composite artifacts.
     - Resolution: downscale width. 320 is a typical TV picture; lower is chunkier, 640 is sharp. Portrait video: crop "9:16" and a lower width.
     - A close-up of the CRT itself (huge scanlines, the phosphor mask's slots or dots visible, as if a camera were pressed to the screen): downscale hard (128–160, 256 at most), then zoom 8–12 on a PNG (zoom and zoom_at on ntscrt_preview and ntscrt_render); choose zoom_at over the interesting part of the picture. This is how it's done in the app too: zoom the preview way in and Export viewport. A mask-heavy CRT preset (royale, aperture) shows the mask most.
     - Prominent scanlines come from a LOW downscale width, not a high one. The CRT draws one scanline per line of the picture it gets, so fewer lines means bigger, more visible scanlines: 128–192 for bold, chunky scanlines (several bundled looks use 128 or 160), 256–320 for normal ones, 640 for fine, faint ones. Users often assume higher resolution is better; when they ask for visible scanlines or a chunky retro look, lower the width and say why.
@@ -152,6 +154,7 @@ enum Tools {
                     "settings": settingsSchema,
                     "times": ["type": "array", "items": ["type": "number"], "description": "Seconds (default [0.5, 2, 4])."],
                     "long_edge": ["type": "integer", "description": "Preview size in pixels (default 640)."],
+                    "snap": ["type": "boolean", "description": "Round the output size to a whole number of pixels per scanline, as the app's \"Snap size to scanline grid\": even, crisp scanlines. Use for pixel art."],
                     "zoom": ["type": "number", "description": "Magnify like the app's preview zoomed in (1–12): a close-up of the CRT's scanlines and phosphor mask. Pair with a low downscale width."],
                     "zoom_at": ["type": "array", "items": ["type": "number"], "description": "Where to zoom, [x, y] from 0 to 1 (default the center)."],
                 ] as [String: Any],
@@ -176,6 +179,7 @@ enum Tools {
                     "duration": ["type": "number", "description": "A still's video length in seconds (default 5, or the look's)."],
                     "fps": ["type": "integer", "description": "A still's frame rate (default 30)."],
                     "long_edge": ["type": "integer", "description": "Output long edge in pixels (default 1920)."],
+                    "snap": ["type": "boolean", "description": "Round the output size to a whole number of pixels per scanline, as the app's \"Snap size to scanline grid\": even, crisp scanlines. Use for pixel art."],
                     "quality": ["type": "string", "enum": ["standard", "high", "very-high", "maximum"]],
                     "loops": ["type": "integer", "description": "Repeat the content this many times in the file."],
                     "gif_width": ["type": "integer"], "gif_fps": ["type": "integer"],
@@ -365,6 +369,7 @@ enum Tools {
 
     static func zoomArgs(_ a: [String: Any]) -> [String] {
         var out: [String] = []
+        if let snap = a["snap"].flatMap(LookSettings.bool), snap { out.append("--snap") }
         if let z = LookSettings.number(a["zoom"]), z > 1 { out += ["--zoom", String(z)] }
         if let xy = (a["zoom_at"] as? [Any])?.compactMap({ LookSettings.number($0) }), xy.count == 2 {
             out += ["--zoom-at", "\(xy[0]),\(xy[1])"]

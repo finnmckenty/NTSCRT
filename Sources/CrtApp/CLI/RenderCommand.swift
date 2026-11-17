@@ -399,7 +399,13 @@ enum Summary {
         out["crop"] = s.cropEnabled ? s.cropRatio.label : "off"
         out["digital"] = s.digitalEnabled ? (s.digitalFormat?.name ?? "custom") : "off"
         out["ntsc"] = s.ntscEnabled && s.ntscAvailable ? "on" : "off"
-        out["downscale"] = s.downscaleEnabled ? s.downscaleWidth as Any : "off"
+        if let src = s.sourcePixelSize { out["source"] = "\(src.width)×\(src.height)" }
+        if s.downscaleEnabled {
+            let method = LookSettings.downscaleMethods.first { $0.value == s.downscaleMethod }?.key ?? s.downscaleMethod.rawValue
+            out["downscale"] = "\(s.downscaleWidth) wide, \(method), \(s.chainInputSize.height) lines"
+        } else {
+            out["downscale"] = "off (\(s.chainInputSize.height) lines)"
+        }
         let g = s.glitchSettings
         out["glitch"] = s.glitchEnabled
             ? (GlitchParam.controls(in: .reception).allSatisfy { abs(g[$0.id] - $0.defaultValue) < 1e-9 } ? "on (healthy)" : "on")
