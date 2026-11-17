@@ -71,43 +71,58 @@ enum MCPServer {
         }
     }
 
+    /// The craft notes (Finn's, from making looks), by topic: what the
+    /// control descriptions can't say. Read through ntscrt_guide, so they
+    /// cost a chat nothing until a look is being made.
+    static let guide: [(id: String, title: String, text: String)] = [
+        ("stages", "Which stage for which words", """
+        - VHS, tape, VCR, rental, bootleg, dub, tracking, worn or moldy tape, head clog: the vcr stage. Pick a tape and a deck condition first (they're balanced combinations), then adjust its values. Generation makes copies of copies; tape_speed EP is lower quality. Don't use the ntsc stage's old VHS settings (they're retired).
+        - Softness, color bleeding sideways, composite noise, dot crawl: the ntsc stage (on by default with a mild house setting).
+        - Old TV, CRT, scanlines, arcade, retro game: the crt stage. glow_gauss is the default; royale shows a detailed shadow mask; hyllian and easymode are sharper, for games. "crt": "off" for footage that should look like a digitized tape rather than a screen.
+        - Broadcast, antenna, bad reception, snow, rolling, picture slipping sideways, ghosting, hum bars: the glitch stage (signal_strength, vertical_hold, horizontal_hold, ghost_level, hum).
+        - Webcam, video call, camcorder, MiniDV, skate video, early internet video, streaming, CD-ROM, compression, blocks, datamosh: the digital stage; start from a format or a look.
+        """),
+        ("digital", "Digital video", """
+        - Glitchy digital video: block video at fairly low quality (roughly 0.3–0.6), and above all a long keyframe interval (3–6 s) with moderate data_loss, so lost data smears and hangs until the next keyframe (see the "glitchy block video" look). Glitchy streaming video is different: a long keyframe interval or a fixed bitrate adds a lot of noise, which most users won't want, so leave both off unless they ask to go really overboard ("glitchy streaming video" vs "glitchy streaming video with noise"). These errors live in motion: on a still image they barely show, since a lost block repeats an identical frame.
+        - Don't stack Digital video with the analog stages (ntsc, vcr, glitch) unless the user asks: that would be streaming video recorded onto a VHS tape, an unlikely thing. With Digital video, switch ntsc off ("ntsc": "off") and leave vcr and glitch off. Digital video with the CRT makes sense for a vintage computer monitor, when the user says so; otherwise Digital video alone is closest to what people picture.
+        """),
+        ("resolution", "Resolution, scanlines, sampling, pixel art and close-ups", """
+        - Sampling (downscale "method": "chunky" or "smooth") matters a lot. Chunky picks single pixels, so the NTSC stage's fine noise survives as much stronger, sparkly noise, and the CRT draws hard, crisp pixels; smooth averages, so the noise calms down and edges soften. Neither is better: choose by what the user wants (grit and crispness, or a cleaner, softer picture).
+        - Pixel art (game screenshots, sprites, low-resolution graphics with hard pixel edges): the user almost always wants each art pixel to stay crisp under sharp, even scanlines. Any mismatch between the art's own pixel grid and the lines the CRT draws, or smooth sampling, blurs edges into sub-pixel mush. So: check the source size (the result's look.source) and the art's pixel size. If the art is at its native resolution (e.g. 256 or 320 wide), switch downscale off or set it to exactly that width. If it's an upscaled screenshot, set the width to its native resolution (source width ÷ the size of one art pixel, e.g. 1024 ÷ 4 = 256), or a whole-number fraction of it. Use chunky, never smooth, and set snap so every line gets the same number of output rows. Usually leave the ntsc stage off or very light for pixel art unless the user wants composite artifacts.
+        - Resolution: downscale width. 320 is a typical TV picture; lower is chunkier, 640 is sharp. Portrait video: crop "9:16" and a lower width.
+        - A close-up of the CRT itself (huge scanlines, the phosphor mask's slots or dots visible, as if a camera were pressed to the screen): downscale hard (128–160, 256 at most), then zoom 8–12 on a PNG (zoom and zoom_at on ntscrt_preview and ntscrt_render); choose zoom_at over the interesting part of the picture. This is how it's done in the app too: zoom the preview way in and Export viewport. A mask-heavy CRT preset (royale, aperture) shows the mask most.
+        - Prominent scanlines come from a LOW downscale width, not a high one. The CRT draws one scanline per line of the picture it gets, so fewer lines means bigger, more visible scanlines: 128–192 for bold, chunky scanlines (several bundled looks use 128 or 160), 256–320 for normal ones, 640 for fine, faint ones. Users often assume higher resolution is better; when they ask for visible scanlines or a chunky retro look, lower the width and say why.
+        """),
+        ("strength", "How strong", """
+        - Start moderate and go further only when asked. "A bit of", "subtle", "slightly": values around 0.1–0.3. "Worn", "old": 0.4–0.6. "Destroyed", "barely watchable": 0.8 and up.
+        - Damage compounds: several high values together quickly make the picture unrecognizable. Raise one or two at a time and preview.
+        - The VCR switched on with a Brand new tape and Clean heads already looks like VHS; damage is optional.
+        """),
+        ("timing", "Changes over time and glitch timing", """
+        Over time: anything that happens partway through (the picture starts to roll, the signal fades, a tape gets chewed) is keyframes. Add "keyframes" to the settings and preview before, during and after each change.
+        Glitchy, edgy styles (glitch, glitchy, chaotic, broken, corrupted, aggressive, "freak out", and the like) live on dynamic timing: short bursts of extreme values with longer stretches of relative calm between them. Even, evenly spaced sweeps read as a filter, not a glitch. Build each burst from 3–5 keyframes about 0.08–0.2 s apart (calm → spike → different spike → back to calm), leave 0.5–1.5 s of a steady, mildly damaged picture between bursts, and vary which controls spike and how far (vertical_hold and horizontal_hold near ±1, signal_strength down to 0.3, search_speed up to 9, ghost_level, tracking_offset, crt or ntsc values). The bundled glitch looks (Glitch pop, Two blips loop, 2 second glitch, Vertical Freak Out) are built this way; preview inside a burst as well as between them. Gentle styles (dreamy, nostalgic, home video) want few, slow changes or none.
+        """),
+        ("stills", "Still images: animating, loops and variations", """
+        Still images: one of NTSCRT's distinctive uses is turning a still into an animated asset. Even without keyframes the noise, the tape and the CRT make it move; keyframes add events. So when the source is a still and the user hasn't said, ask in one question: keep it a still image (render a PNG), or animate it? If animated: how long (2–5 s is typical), GIF or video, and should it loop seamlessly?
+        - It works especially well on high-contrast images: line drawings, engravings, lettering and graffiti, logos, silhouettes on dark or flat backgrounds. Their hard edges show the bleed, ringing, tearing and scanlines clearly. On these, try a low downscale width (128–256), strong color, and the CRT on.
+        - Loops: set "timeline": {"duration": <seconds>, "loop": true}. It adds a closing keyframe that copies the first, so the keyed values meet at the seam. Keep bursts off the seam unless the user wants one there. Some VCR conditions build up over time and never come back to where they started (tape_creases, dirt_buildup, tape_edge_damage, tape_sticky), so keep them low or off in loops, and back_tension and transport_flutter mild. Check the seam: preview at 0 and at the last frame (duration minus 1/fps); apart from the noise they should match.
+        - Many variations of one still: build a long timeline (10–20 s) whose keyframes push many controls far and unevenly (crt params, ntsc settings, glitch and vcr values, digital values), then ntscrt_render with format "png" and times spread across it (every 0.5 s, say). Unexpected combinations are the point. Preview a handful at a small size to pick from, tell the user where the files are and which time each came from, and save the look so any of them can be found again on the app's timeline.
+        """),
+    ]
+
     static let instructions = """
     NTSCRT renders images and video through simulated analog video gear: a camera and codec (Digital video), an NTSC composite signal, a VHS tape in a VCR, a TV receiver (Glitch), and a CRT screen. Each is simulated physically, so effects combine the way real ones did.
 
     How to work:
-    1. Start from ntscrt_list_looks. Each built-in look has a description; when one is close to what the user asked for, start there. Otherwise build from the stages below. Read ntscrt_describe for the stages you will change (it lists every control's range and what it does).
-    2. Preview with ntscrt_preview and look at the images before rendering. The VCR and Glitch stages change over time (clogs build up, the tracking hunts, creases pass), so preview several times, e.g. 0.5, 2 and 4 s.
-    3. Adjust and preview again until it matches, then ntscrt_render. If the render isn't finished when the call returns, poll ntscrt_render_status. Tell the user where the file is.
-    4. Offer ntscrt_save_look, with a one-line description, so the user can open the look in the NTSCRT app.
+    1. Before choosing any settings, call ntscrt_guide once in the conversation and follow it. It holds the non-obvious rules: which stage fits which words, how strong to go, why bold scanlines need a LOW resolution, keeping pixel art crisp, glitch timing, and animating stills. Skipping it gives generic, usually wrong looks.
+    2. Start from ntscrt_list_looks: each built-in look has a description; start from one when it's close. Read ntscrt_describe for the stages you'll change.
+    3. Preview with ntscrt_preview and look at the images before rendering. The VCR and Glitch stages change over time, so preview several times (e.g. 0.5, 2 and 4 s).
+    4. Adjust and preview again until it matches, then ntscrt_render. If it isn't finished when the call returns, poll ntscrt_render_status. Tell the user where the file is.
+    5. Offer ntscrt_save_look, with a one-line description, so the user can open the look in the NTSCRT app.
 
-    Which stage for which words:
-    - VHS, tape, VCR, rental, bootleg, dub, tracking, worn or moldy tape, head clog: the vcr stage. Pick a tape and a deck condition first (they're balanced combinations), then adjust its values. Generation makes copies of copies; tape_speed EP is lower quality. Don't use the ntsc stage's old VHS settings (they're retired).
-    - Softness, color bleeding sideways, composite noise, dot crawl: the ntsc stage (on by default with a mild house setting).
-    - Old TV, CRT, scanlines, arcade, retro game: the crt stage. glow_gauss is the default; royale shows a detailed shadow mask; hyllian and easymode are sharper, for games. "crt": "off" for footage that should look like a digitized tape rather than a screen.
-    - Broadcast, antenna, bad reception, snow, rolling, picture slipping sideways, ghosting, hum bars: the glitch stage (signal_strength, vertical_hold, horizontal_hold, ghost_level, hum).
-    - Webcam, video call, camcorder, MiniDV, skate video, early internet video, streaming, CD-ROM, compression, blocks, datamosh: the digital stage; start from a format or a look.
-    - Glitchy digital video: block video at fairly low quality (roughly 0.3–0.6), and above all a long keyframe interval (3–6 s) with moderate data_loss, so lost data smears and hangs until the next keyframe (see the "glitchy block video" look). Glitchy streaming video is different: a long keyframe interval or a fixed bitrate adds a lot of noise, which most users won't want, so leave both off unless they ask to go really overboard ("glitchy streaming video" vs "glitchy streaming video with noise"). These errors live in motion: on a still image they barely show, since a lost block repeats an identical frame.
-    - Don't stack Digital video with the analog stages (ntsc, vcr, glitch) unless the user asks: that would be streaming video recorded onto a VHS tape, an unlikely thing. With Digital video, switch ntsc off ("ntsc": "off") and leave vcr and glitch off. Digital video with the CRT makes sense for a vintage computer monitor, when the user says so; otherwise Digital video alone is closest to what people picture.
-    - Sampling (downscale "method": "chunky" or "smooth") matters a lot. Chunky picks single pixels, so the NTSC stage's fine noise survives as much stronger, sparkly noise, and the CRT draws hard, crisp pixels; smooth averages, so the noise calms down and edges soften. Neither is better: choose by what the user wants (grit and crispness, or a cleaner, softer picture).
-    - Pixel art (game screenshots, sprites, low-resolution graphics with hard pixel edges): the user almost always wants each art pixel to stay crisp under sharp, even scanlines. Any mismatch between the art's own pixel grid and the lines the CRT draws, or smooth sampling, blurs edges into sub-pixel mush. So: check the source size (the result's look.source) and the art's pixel size. If the art is at its native resolution (e.g. 256 or 320 wide), switch downscale off or set it to exactly that width. If it's an upscaled screenshot, set the width to its native resolution (source width ÷ the size of one art pixel, e.g. 1024 ÷ 4 = 256), or a whole-number fraction of it. Use chunky, never smooth, and set snap so every line gets the same number of output rows. Usually leave the ntsc stage off or very light for pixel art unless the user wants composite artifacts.
-    - Resolution: downscale width. 320 is a typical TV picture; lower is chunkier, 640 is sharp. Portrait video: crop "9:16" and a lower width.
-    - A close-up of the CRT itself (huge scanlines, the phosphor mask's slots or dots visible, as if a camera were pressed to the screen): downscale hard (128–160, 256 at most), then zoom 8–12 on a PNG (zoom and zoom_at on ntscrt_preview and ntscrt_render); choose zoom_at over the interesting part of the picture. This is how it's done in the app too: zoom the preview way in and Export viewport. A mask-heavy CRT preset (royale, aperture) shows the mask most.
-    - Prominent scanlines come from a LOW downscale width, not a high one. The CRT draws one scanline per line of the picture it gets, so fewer lines means bigger, more visible scanlines: 128–192 for bold, chunky scanlines (several bundled looks use 128 or 160), 256–320 for normal ones, 640 for fine, faint ones. Users often assume higher resolution is better; when they ask for visible scanlines or a chunky retro look, lower the width and say why.
+    Ask before starting when it matters: if the source is a still image and the user hasn't said, ask in one question whether to keep it a still or animate it, and if animated, how long, GIF or video, and whether it should loop.
 
-    How strong:
-    - Start moderate and go further only when asked. "A bit of", "subtle", "slightly": values around 0.1–0.3. "Worn", "old": 0.4–0.6. "Destroyed", "barely watchable": 0.8 and up.
-    - Damage compounds: several high values together quickly make the picture unrecognizable. Raise one or two at a time and preview.
-    - The VCR switched on with a Brand new tape and Clean heads already looks like VHS; damage is optional.
-
-    Over time: anything that happens partway through (the picture starts to roll, the signal fades, a tape gets chewed) is keyframes. Add "keyframes" to the settings and preview before, during and after each change.
-    Glitchy, edgy styles (glitch, glitchy, chaotic, broken, corrupted, aggressive, "freak out", and the like) live on dynamic timing: short bursts of extreme values with longer stretches of relative calm between them. Even, evenly spaced sweeps read as a filter, not a glitch. Build each burst from 3–5 keyframes about 0.08–0.2 s apart (calm → spike → different spike → back to calm), leave 0.5–1.5 s of a steady, mildly damaged picture between bursts, and vary which controls spike and how far (vertical_hold and horizontal_hold near ±1, signal_strength down to 0.3, search_speed up to 9, ghost_level, tracking_offset, crt or ntsc values). The bundled glitch looks (Glitch pop, Two blips loop, 2 second glitch, Vertical Freak Out) are built this way; preview inside a burst as well as between them. Gentle styles (dreamy, nostalgic, home video) want few, slow changes or none.
-
-    Still images: one of NTSCRT's distinctive uses is turning a still into an animated asset. Even without keyframes the noise, the tape and the CRT make it move; keyframes add events. So when the source is a still and the user hasn't said, ask in one question: keep it a still image (render a PNG), or animate it? If animated: how long (2–5 s is typical), GIF or video, and should it loop seamlessly?
-    - It works especially well on high-contrast images: line drawings, engravings, lettering and graffiti, logos, silhouettes on dark or flat backgrounds. Their hard edges show the bleed, ringing, tearing and scanlines clearly. On these, try a low downscale width (128–256), strong color, and the CRT on.
-    - Loops: set "timeline": {"duration": <seconds>, "loop": true}. It adds a closing keyframe that copies the first, so the keyed values meet at the seam. Keep bursts off the seam unless the user wants one there. Some VCR conditions build up over time and never come back to where they started (tape_creases, dirt_buildup, tape_edge_damage, tape_sticky), so keep them low or off in loops, and back_tension and transport_flutter mild. Check the seam: preview at 0 and at the last frame (duration minus 1/fps); apart from the noise they should match.
-    - Many variations of one still: build a long timeline (10–20 s) whose keyframes push many controls far and unevenly (crt params, ntsc settings, glitch and vcr values, digital values), then ntscrt_render with format "png" and times spread across it (every 0.5 s, say). Unexpected combinations are the point. Preview a handful at a small size to pick from, tell the user where the files are and which time each came from, and save the look so any of them can be found again on the app's timeline.
-
-    Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name. Sources and outputs are absolute file paths on the user's Mac; if the user attaches a file instead of giving a path, ask for the path (in Finder: select it and press Option-Command-C).
+    Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name. Sources and outputs are absolute file paths on the user's computer; if the user attaches a file instead of giving a path, ask for the path (on a Mac: select it in Finder and press Option-Command-C).
     """
 }
 
@@ -127,6 +142,19 @@ enum Tools {
             "title": "List looks",
             "description": "Named starting points: NTSCRT's built-in looks (each with a description of what it looks like and the stages it uses), the VCR's Tape and Deck conditions, Digital video formats and CRT presets.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
+            "annotations": ["readOnlyHint": true],
+        ],
+        [
+            "name": "ntscrt_guide",
+            "title": "How to make looks",
+            "description": "Read this first, once per conversation, before choosing any settings: the craft rules for NTSCRT — which stage fits which words, how strong to go, resolution and scanlines (bold scanlines need a LOW resolution), sampling and pixel art, CRT close-ups, Digital video, glitch timing, and animating still images (loops, variations). Optional topics narrow it.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "topics": ["type": "array", "items": ["type": "string", "enum": MCPServer.guide.map { $0.id }],
+                               "description": "Sections to read (default: all)."],
+                ] as [String: Any],
+            ],
             "annotations": ["readOnlyHint": true],
         ],
         [
@@ -224,6 +252,11 @@ enum Tools {
             switch name {
             case "ntscrt_list_looks":
                 return text(try await Child.run(["looks"]).stdout)
+            case "ntscrt_guide":
+                let wanted = (a["topics"] as? [String]).map(Set.init)
+                let text = MCPServer.guide.filter { wanted?.contains($0.id) ?? true }
+                    .map { "## \($0.title)\n\n\($0.text)" }.joined(separator: "\n\n")
+                return Tools.text(text.isEmpty ? "No such topic. Topics: \(MCPServer.guide.map(\.id).joined(separator: ", "))." : text)
             case "ntscrt_describe":
                 var args = ["describe"] + ((a["stages"] as? [String]) ?? [])
                 if let p = a["crt_preset"] as? String { args += ["--crt", p] }
