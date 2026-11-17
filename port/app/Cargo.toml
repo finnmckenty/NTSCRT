@@ -10,6 +10,11 @@ publish = false
 name = "ntscrt"
 path = "src/main.rs"
 
+# The command line in a terminal (ntscrt.exe is a windowed program).
+[[bin]]
+name = "ntscrt-cli"
+path = "src/bin/ntscrt-cli.rs"
+
 [dependencies]
 anyhow.workspace = true
 ntscrt-media = { path = "../media" }
@@ -21,3 +26,21 @@ gif = "0.13"
 # The update check: GitHub over HTTPS with the system's TLS (SChannel on Windows).
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
 native-tls = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# The command line's standard handles, the console launcher's job object,
+# the Videos folder and local time.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

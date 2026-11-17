@@ -195,7 +195,14 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
             let seed = if info.is_some() { job.png_frame + 1 } else { job.png_frame };
             let (mut s, pic) = picture(job.png_frame, seed, None)?;
             let seconds = s.glitch.as_ref().map_or(0.0, |g| g.time);
+            // A still keeps the timeline's history: the receiver re-runs the
+            // keyframed values up to this moment, as the Mac's PNG export does
+            // (videos run their own receiver frame by frame instead).
+            let history = s.glitch.as_ref().and_then(|g| g.history.clone());
             animate(&mut s, job.png_t, seconds);
+            if let Some(g) = s.glitch.as_mut() {
+                g.history = history;
+            }
             engine.set_source(pic);
             let img = crate::clip_frames::with_visitor(&mut clip, |v| engine.render_export(&s, job.size, v))?;
             image::RgbaImage::from_raw(img.width, img.height, img.rgba).context("image")?.save(&job.path)?;

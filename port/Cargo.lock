@@ -2553,11 +2553,13 @@ dependencies = [
  "eframe",
  "gif",
  "image",
+ "libc",
  "native-tls",
  "ntscrt-engine",
  "ntscrt-media",
  "rfd",
  "ureq",
+ "windows",
 ]
 
 [[package]]

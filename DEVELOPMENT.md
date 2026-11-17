@@ -70,7 +70,7 @@ swift build -c release --product crt-app
 
 ## Windows port (in progress)
 
-A separate Rust/wgpu version in `port/`; the Mac app doesn't use it and its build ignores the folder. See [port/README.md](port/README.md) and [docs/windows-port-plan.md](docs/windows-port-plan.md).
+A separate Rust/wgpu version in `port/`; the Mac app doesn't use it and its build ignores the folder. It has everything the Mac app has except ProRes, the command line and MCP server included (see below). See [port/README.md](port/README.md) and [docs/windows-port-plan.md](docs/windows-port-plan.md).
 
 ## Optional: the VHS stage (ntsc-rs)
 
@@ -219,7 +219,7 @@ gh run download <run id> -n NTSCRT-windows-x64 -D build/ci-0.23.0
 gh release create v0.23.0 dist/NTSCRT-0.23.0.dmg dist/NTSCRT-0.23.0-windows-x64.zip dist/ntscrt-mcp-0.23.0.mcpb --title "NTSCRT 0.23.0" --notes-file notes.md
 ```
 
-Publishing the release with `ntscrt-mcp-<v>.mcpb` attached runs the **MCP Registry** workflow, which lists that version in the official MCP Registry (`io.github.finnmckenty/ntscrt`, from `server.json`) by GitHub OIDC; no secret. Re-run it by hand with the tag if it fails. The extension (`mcpb/`) is only a launcher that finds the installed app (Applications, else Spotlight by bundle id) and runs `NTSCRT mcp`, with a clear error when NTSCRT is missing or older than 0.26.
+Publishing the release with `ntscrt-mcp-<v>.mcpb` attached runs the **MCP Registry** workflow, which lists that version in the official MCP Registry (`io.github.finnmckenty/ntscrt`, from `server.json`) by GitHub OIDC; no secret. Re-run it by hand with the tag if it fails. The extension (`mcpb/`) is only a launcher that finds the installed app (Applications, else Spotlight by bundle id) and runs `NTSCRT mcp`, with a clear error when NTSCRT is missing or older than 0.26. On Windows (`platform_overrides.win32`: `cmd.exe /d /c launch.cmd`) it reads `HKCU\Software\NTSCRT` (`Path`, `Version`), which `ntscrt.exe` writes each time its window opens from a lasting folder (`claude::remember_location`), else looks in the usual unzip places for a package that has `ntscrt-cli.exe`; same two errors. `launch.cmd` must keep CRLF line endings (`.gitattributes`).
 
 Tag first: the Windows build takes its version from the tag (`git describe`), and both apps' update check compares their version with the latest release's tag. A Windows package built before the tag would call itself 0.22.1-n-g… and keep offering 0.23.0 to people who already have it.
 
@@ -274,6 +274,8 @@ The app binary doubles as a command-line tool. `Sources/CrtApp/CLI/Launch.swift`
 - **Connect to Claude…** (NTSCRT menu; `ClaudeConnection.swift`, `ConnectClaudeView.swift`) writes `mcpServers.ntscrt` into `~/Library/Application Support/Claude/claude_desktop_config.json` (backup `…json.before-ntscrt`; an unparseable file is left alone) and runs `claude mcp add --scope user` for Claude Code. It uses the running executable's path, and refuses while running from App Translocation or a disk image. `CRT_CONNECT_SELFTEST=<out.png> CRT_CLAUDE_HOME=<scratch dir>` checks it against a scratch home and snapshots the window.
 - **Instructions vs guide**: the server's `instructions` (sent to the client and loaded into every chat while it's connected) are a short core: the workflow, the still-image question, the settings format. The craft notes live in `MCPServer.guide`, read through the `ntscrt_guide` tool by topic, so they cost nothing until a look is being made. New tips go in the guide.
 - **Testing the server**: pipe JSON-RPC lines in, e.g. `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | .build/debug/crt-app mcp`.
+- **New tips go in the guide, then into Windows**: `port/scripts/sync-mcp-text.py` regenerates `port/app/src/cli/mcp_text.rs` (instructions and guide, word for word, with the Mac-only phrases it lists swapped). Tool descriptions and schemas are copied by hand into `port/app/src/cli/mcp.rs`.
+- **On Windows** (`port/app/src/cli/`, `claude.rs`, `connect_ui.rs`) the same commands, JSON, tools and texts, rendering through the Export window's own job (`App::headless` + `App::export_job` → `export::run`). `ntscrt.exe` stays a windowed (GUI-subsystem) program, so double-clicking it, and Claude starting `ntscrt.exe mcp` with pipes, never opens a console; its CLI output goes wherever its standard handles point. In a terminal use `ntscrt-cli.exe` (`src/bin/ntscrt-cli.rs`), a console launcher that runs `ntscrt.exe` on the terminal's handles, waits and passes on the exit code (a job object ends it on Ctrl+C). No ProRes. Connect to Claude is in the Help menu; it writes `%APPDATA%\Claude\claude_desktop_config.json` and, for the Microsoft Store build, `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\…`, and refuses while running from inside a zip (a temporary folder). Check it all with `port/scripts/cli-check.py` (CI runs it) and `NTSCRT_CONNECT_SELFTEST` (port/README.md).
 
 ## CLI usage
 

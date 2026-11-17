@@ -4,7 +4,7 @@
   "display_name": "NTSCRT",
   "version": "0.26.4",
   "description": "Make images and video look like they're on a VHS tape, an old TV or a CRT: preview, animate and render analog looks.",
-  "long_description": "NTSCRT runs your images and video through simulated analog video gear: a camera and codec, an NTSC signal, a VHS tape in a VCR, a TV receiver and a CRT screen. With this extension, Claude can pick a look, preview frames, adjust tape damage, glitches and scanlines, animate stills with keyframes, render MP4, GIF or PNG files on your Mac, and save looks for the app.\n\nRequires the NTSCRT app (free, macOS 14 or later) in your Applications folder: https://github.com/finnmckenty/NTSCRT/releases/latest",
+  "long_description": "NTSCRT runs your images and video through simulated analog video gear: a camera and codec, an NTSC signal, a VHS tape in a VCR, a TV receiver and a CRT screen. With this extension, Claude can pick a look, preview frames, adjust tape damage, glitches and scanlines, animate stills with keyframes, render MP4, GIF or PNG files on your computer, and save looks for the app.\n\nRequires the NTSCRT app (free): on a Mac (macOS 14 or later) in your Applications folder; on Windows, the NTSCRT folder unzipped somewhere it can stay, with ntscrt.exe opened once. Download: https://github.com/finnmckenty/NTSCRT/releases/latest",
   "author": {
     "name": "Finn McKenty",
     "url": "https://github.com/finnmckenty"
@@ -24,7 +24,17 @@
       "command": "/bin/sh",
       "args": [
         "${__dirname}/server/launch.sh"
-      ]
+      ],
+      "platform_overrides": {
+        "win32": {
+          "command": "cmd.exe",
+          "args": [
+            "/d",
+            "/c",
+            "${__dirname}\\server\\launch.cmd"
+          ]
+        }
+      }
     }
   },
   "tools": [
@@ -54,7 +64,7 @@
     },
     {
       "name": "ntscrt_save_look",
-      "description": "Save the settings as an NTSCRT look file, which the app opens with Preset > Load Preset…."
+      "description": "Save the settings as an NTSCRT look file, which the app opens with Preset > Load Preset… (Load… on Windows)."
     }
   ],
   "keywords": [
@@ -72,7 +82,8 @@
   "license": "MIT",
   "compatibility": {
     "platforms": [
-      "darwin"
+      "darwin",
+      "win32"
     ]
   }
 }

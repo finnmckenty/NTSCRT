@@ -1,0 +1,2 @@
+# Batch files need Windows line endings.
+mcpb/server/*.cmd text eol=crlf
