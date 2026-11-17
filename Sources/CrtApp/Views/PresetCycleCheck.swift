@@ -140,7 +140,7 @@ enum PresetCycleCheck {
                 out[path] = "\(v)"
             }
         }
-        let priors = ["15 second glitches", "Chunky webcam", "Dirty VCR", "Readable Text"]
+        let priors = ["2 second glitches", "Chunky webcam", "Dirty VCR", "Readable Text"]
         let priorURLs = priors.compactMap { name in all.first { $0.name == name }?.url }
         var carried = 0
         for p in presets where ProcessInfo.processInfo.environment["CRT_PRESET_CYCLE_NO_CARRY"] == nil {

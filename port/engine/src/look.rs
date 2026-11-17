@@ -372,7 +372,7 @@ mod timeline_tests {
 
     #[test]
     fn keyframes_round_trip_in_the_macs_format() {
-        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets/5 second glitch.json")).unwrap();
+        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets/2 second glitch.json")).unwrap();
         let look = Look::parse(&src).unwrap();
         assert!(look.keys.len() > 1);
         let ntsc = look.ntsc_settings.clone().unwrap_or_default();
