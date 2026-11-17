@@ -6,7 +6,7 @@
 
 Full disclosure: the two hardest parts aren't mine. The signal emulation is ntsc-rs, and the CRT look is the RetroArch shader community's work. NTSCRT is the native Mac app built around them: it joins them into one pipeline and adds its own pieces on top, including the Digital video, VCR and Glitch stages, Screen Loop video feedback, cropping, a keyframe timeline, video and GIF export, a command-line renderer, and an MCP server for AI apps.
 
-**Works with Claude and other AI apps (MCP).** NTSCRT includes a built-in [MCP](https://modelcontextprotocol.io) server, so Claude Desktop, Claude Code, Cursor and other MCP clients can make analog video looks for you. Describe "a moldy rental tape in a dirty VCR, played on an old TV", and the AI previews frames, adjusts the VHS, CRT and glitch settings, animates them if you ask, and renders the video on your Mac. One click sets it up: **NTSCRT > Connect to Claude…**. See [Using NTSCRT from Claude](#using-ntscrt-from-claude-mcp).
+**Works with Claude and other AI apps (MCP).** NTSCRT includes a built-in [MCP](https://modelcontextprotocol.io) server, so Claude Desktop, Claude Code, Cursor and other MCP clients can make analog video looks for you. Describe "a moldy rental tape in a dirty VCR, played on an old TV", and the AI previews frames, adjusts the VHS, CRT and glitch settings, animates them if you ask, and renders the video on your computer. One click sets it up: **NTSCRT > Connect to Claude…** on the Mac, **Help > Connect to Claude…** on Windows. See [Using NTSCRT from Claude](#using-ntscrt-from-claude-mcp).
 
 ```
 your image/video → crop → digital camera + codec → NTSC/VHS signal (full res) → downscale to retro resolution → VHS tape and deck → TV glitches → CRT shader → screen
@@ -21,7 +21,7 @@ Grab the DMG from [**Releases**](../../releases/latest), open it, and drag **NTS
 **Windows (preview):** the same release has `NTSCRT-<version>-windows-x64.zip`.
 - Unzip it anywhere and run `ntscrt.exe`. 64-bit Windows 10 or 11.
 - It isn't code-signed yet, so Windows may warn about it: click **More info**, then **Run anyway**.
-- Every feature of the Mac app except ProRes export, the command line and the MCP server. Looks and presets are the same files on both.
+- Every feature of the Mac app except ProRes export, including the command line and the MCP server. Looks and presets are the same files on both.
 - It's a preview: please open an issue if something misbehaves.
 
 **Updates:** NTSCRT checks GitHub for a newer version once a day and offers to open its download page. Check for Updates… is in the NTSCRT menu on the Mac and the Help menu on Windows, where the daily check can be turned off. The check only asks GitHub for the latest version number.
@@ -124,20 +124,23 @@ Video feedback, the analog way: a camcorder filming a TV that shows the camcorde
   ```sh
   /Applications/NTSCRT.app/Contents/MacOS/NTSCRT render clip.mp4 -o out.mp4 --look "90s VHS bootleg"
   ```
+- **On Windows** use `ntscrt-cli.exe` from the NTSCRT folder in a terminal, with the same commands: `ntscrt-cli render clip.mp4 -o out.mp4 --look "90s VHS bootleg"`. (`ntscrt.exe` is the windowed app; scripts that read its output through a pipe can run it directly.)
 - **Every section has flags**: `--look`, `--crop`, `--downscale`, `--digital`, `--ntsc`, `--glitch`, `--vcr`, `--tape`, `--deck`, `--crt`, each with a `-set key=value` partner (`--vcr-set tape_speed=EP,tracking_offset=0.4`). `NTSCRT help` lists them.
-- **Output** follows the file name: .mp4, .mov (ProRes), .gif, or .png. `--time 1,3,5` saves the frames at those times; a still becomes a video of `--duration` seconds.
+- **Output** follows the file name: .mp4, .mov (ProRes, Mac only), .gif, or .png. `--time 1,3,5` saves the frames at those times; a still becomes a video of `--duration` seconds.
 - **`NTSCRT describe`** lists every control as JSON, with its range and what it does.
 - **`NTSCRT looks`** lists the presets, tapes, decks and formats.
 
 ### Using NTSCRT from Claude (MCP)
 
-NTSCRT can act as an MCP server: a background helper that gives an AI app new tools. Claude can then preview looks, adjust them, render videos and save presets for the app. Rendering happens on your Mac; Claude sees only the preview frames it asks for.
+NTSCRT can act as an MCP server: a background helper that gives an AI app new tools. Claude can then preview looks, adjust them, render videos and save presets for the app. Rendering happens on your computer; Claude sees only the preview frames it asks for.
 
 **The easy way**: put NTSCRT in your Applications folder, open it, and choose **NTSCRT > Connect to Claude…**. Click **Connect** next to Claude Desktop or Claude Code, then quit and reopen Claude Desktop (**⌘Q**). NTSCRT backs up Claude's settings first and leaves your other servers alone.
 
-**Claude Desktop extension**: download `ntscrt-mcp-<version>.mcpb` from the [latest release](../../releases/latest) and double-click it (or drag it into Claude's **Settings > Extensions**). It needs NTSCRT in your Applications folder. NTSCRT is also listed in the official [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.finnmckenty/ntscrt`.
+**The easy way on Windows**: extract the NTSCRT folder somewhere it can stay (not inside the zip), open `ntscrt.exe`, and choose **Help > Connect to Claude…**. Connect as above, then quit Claude Desktop (including its icon in the system tray) and reopen it.
 
-**Claude Desktop, by hand**
+**Claude Desktop extension**: download `ntscrt-mcp-<version>.mcpb` from the [latest release](../../releases/latest) and double-click it (or drag it into Claude's **Settings > Extensions**). It needs NTSCRT in your Applications folder (on Windows: the NTSCRT folder unzipped somewhere it can stay, with `ntscrt.exe` opened once, so the extension can find it). NTSCRT is also listed in the official [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.finnmckenty/ntscrt`.
+
+**Claude Desktop, by hand** (on Windows the command is the full path to `ntscrt.exe`, written with double backslashes: `"C:\\Tools\\NTSCRT\\ntscrt.exe"`)
 
 1. Put NTSCRT in your Applications folder.
 2. In Claude, open **Settings > Developer** and click **Edit Config**. Finder shows a file called `claude_desktop_config.json`; open it in TextEdit.
@@ -155,19 +158,18 @@ NTSCRT can act as an MCP server: a background helper that gives an AI app new to
    If it already has an `"mcpServers"` section, add the `"ntscrt": {…}` entry inside it, with a comma after the entry before it.
 4. Save, quit Claude completely (**⌘Q**), and open it again. NTSCRT now shows in the chat's tools menu.
 
-**Claude Code**: run `claude mcp add --scope user ntscrt -- /Applications/NTSCRT.app/Contents/MacOS/NTSCRT mcp`.
+**Claude Code**: run `claude mcp add --scope user ntscrt -- /Applications/NTSCRT.app/Contents/MacOS/NTSCRT mcp` (on Windows, the path to `ntscrt.exe` instead).
 
 **Other apps** that support MCP servers (Cursor, Windsurf, …) take the same command and `mcp` argument in their settings. ChatGPT can't: it only connects to servers on the internet.
 
 **Using it**
 
-- Give Claude the file's **path**, not an attachment: NTSCRT reads the file from your Mac. In Finder, select the file and press **⌥⌘C** to copy its path.
+- Give Claude the file's **path**, not an attachment: NTSCRT reads the file from your computer. In Finder, select the file and press **⌥⌘C** to copy its path; in File Explorer, press **Ctrl+Shift+C**.
 - Then describe what you want: "Make /Users/me/Movies/skate.mp4 look like a moldy rental tape in a dirty VCR, played on an old TV." Claude previews a few frames, adjusts, and renders.
 - It can animate too: "clean for two seconds, then the picture starts to roll and the tape gets chewed". It sets keyframes, as on the app's timeline, and saved looks open with them.
 - **Stills come alive**: give it a still (line drawings, lettering and logos work especially well) and ask for an animated GIF or a seamless loop. Or ask for "twenty variations" and it renders a wildly varied timeline and saves stills from it.
 - Claude asks before using each tool the first time; allow it.
-- Videos go to `~/Movies/NTSCRT` unless you say where; saved presets go to `~/Movies/NTSCRT/Looks` and open with **Preset > Load Preset…**.
-- Mac only for now.
+- Videos go to `~/Movies/NTSCRT` (Windows: `Videos\NTSCRT`) unless you say where; saved presets go to its `Looks` folder and open with **Preset > Load Preset…** (Windows: **Preset > Load…**).
 
 ### Tips
 

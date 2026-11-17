@@ -13,7 +13,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod claude;
+mod cli;
 mod clip_frames;
+mod connect_ui;
 mod digital_panel;
 mod export;
 mod frame_cache;
@@ -218,6 +221,8 @@ struct App {
     auto_screen_loop: bool,
     /// Checking GitHub for a newer release (update.rs).
     updates: update::Updates,
+    /// Help > Connect to Claude… (connect_ui.rs).
+    connect: connect_ui::ConnectWindow,
 }
 
 impl App {
@@ -226,9 +231,25 @@ impl App {
         let (ev_tx, ev_rx) = channel();
         let ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || worker::run(req_rx, ev_tx, ctx));
-        let mut app = Self {
-            requests: req_tx,
-            events: ev_rx,
+        let scripted = ["NTSCRT_UI_SNAPSHOT", "NTSCRT_EXPORT", "NTSCRT_SCREEN_LOOP_RENDER", "NTSCRT_CONNECT_SELFTEST"].iter().any(|k| std::env::var_os(k).is_some());
+        let mut app = Self::base(req_tx, ev_rx, &cc.egui_ctx, scripted);
+        app.apply_launch_hooks();
+        app
+    }
+
+    /// The app without a window or preview worker: what the command line
+    /// (`ntscrt render`, cli/) drives, as the Mac's CLI drives a real AppState.
+    /// Its preview requests go nowhere; exports run as the Export window's do.
+    pub(crate) fn headless() -> Self {
+        let (req_tx, _) = channel();
+        let (_, ev_rx) = channel();
+        Self::base(req_tx, ev_rx, &egui::Context::default(), true)
+    }
+
+    fn base(requests: Sender<Request>, events: Receiver<Event>, ctx: &egui::Context, scripted: bool) -> Self {
+        Self {
+            requests,
+            events,
             adapter: "starting…".into(),
             shaders: find_shaders(),
             source: None,
@@ -311,11 +332,14 @@ impl App {
             cached_frames: 0,
             autoplay_at: None,
             auto_screen_loop: std::env::var("NTSCRT_SCREEN_LOOP").as_deref() == Ok("1") || std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").is_some(),
-            updates: update::Updates::new(
-                &cc.egui_ctx,
-                ["NTSCRT_UI_SNAPSHOT", "NTSCRT_EXPORT", "NTSCRT_SCREEN_LOOP_RENDER"].iter().any(|k| std::env::var_os(k).is_some()),
-            ),
-        };
+            updates: update::Updates::new(ctx, scripted),
+            connect: connect_ui::ConnectWindow::from_env(),
+        }
+    }
+
+    /// The test hooks a window launch reads (see the file's top and port/README.md).
+    fn apply_launch_hooks(&mut self) {
+        let app = self;
         let start = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::var_os("NTSCRT_SOURCE").map(PathBuf::from));
         if let Some(p) = start {
             app.open(&p);
@@ -381,7 +405,6 @@ impl App {
             app.compare = true;
             app.compare_x = 0.6;
         }
-        app
     }
 
     fn open(&mut self, path: &Path) {
@@ -1681,6 +1704,7 @@ impl eframe::App for App {
         }
         self.export_window(&ctx);
         self.updates.show(&ctx);
+        self.connect.show(&ctx);
         if self.auto_screen_loop && self.original_size.is_some() && self.shown_seq != 0 {
             self.auto_screen_loop = false;
             // For the UI snapshot: the window inside the main one, where the
@@ -1721,7 +1745,14 @@ impl eframe::App for App {
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button("Help", |ui| self.updates.menu(ui));
+                    ui.menu_button("Help", |ui| {
+                        if ui.button("Connect to Claude…").on_hover_text("Let Claude Desktop or Claude Code use NTSCRT (its MCP server).").clicked() {
+                            self.connect.open();
+                            ui.close();
+                        }
+                        ui.separator();
+                        self.updates.menu(ui);
+                    });
                 });
             });
         });
@@ -1776,6 +1807,18 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // `ntscrt render|describe|looks|mcp|help`: the command line, without a
+    // window (cli/). Anything else opens the app.
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    if let Some(command) = args.first().filter(|c| cli::COMMANDS.contains(&c.as_str())) {
+        cli::start(command, &args[1..]);
+    }
+    // NTSCRT_CONNECT_SELFTEST=<png> NTSCRT_CLAUDE_HOME=<scratch folder>: the
+    // Connect to Claude checks, then a snapshot of its window.
+    let selftest_failures = std::env::var_os("NTSCRT_CONNECT_SELFTEST").map(|_| claude::self_test());
+    if let (Some(failures), Some("-")) = (selftest_failures, std::env::var("NTSCRT_CONNECT_SELFTEST").ok().as_deref()) {
+        std::process::exit(if failures == 0 { 0 } else { 1 });
+    }
     // `ntscrt --check-update`: the update check without the window, its
     // answer on stdout (for CI; redirect it, as release builds have no console).
     if std::env::args().nth(1).as_deref() == Some("--check-update") {
@@ -1783,11 +1826,18 @@ fn main() -> eframe::Result {
         println!("version {current}: {:?}", update::check(&current));
         return Ok(());
     }
+    if selftest_failures.is_none() {
+        claude::remember_location();
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title(format!("NTSCRT {} (Windows preview)", update::current_version())).with_inner_size([1200.0, 780.0]),
         ..Default::default()
     };
-    eframe::run_native("NTSCRT", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    let result = eframe::run_native("NTSCRT", options, Box::new(|cc| Ok(Box::new(App::new(cc)))));
+    if let Some(failures) = selftest_failures {
+        std::process::exit(if failures == 0 && result.is_ok() { 0 } else { 1 });
+    }
+    result
 }
 
 /// Show a file in Explorer (Finder on the Mac).

@@ -109,7 +109,7 @@ jobs:
         run: |
           d=package/NTSCRT
           mkdir -p "$d/shaders/blurs/shaders" "$d/presets" "$d/licenses"
-          cp port/target/release/ntscrt.exe "$d/"
+          cp port/target/release/ntscrt.exe port/target/release/ntscrt-cli.exe "$d/"
           # The shaders the seven CRT presets use: crt/ and include/ (as the
           # Mac bundles), plus blurs/shaders/royale, which crt-royale needs.
           cp -R Vendor/slang-shaders/crt Vendor/slang-shaders/include "$d/shaders/"
@@ -131,6 +131,27 @@ jobs:
               && echo "ok: $sh" || { echo "::error::$sh doesn't load from the package"; tail -3 "out/pkg-$sh.log"; fail=1; }
           done
           exit $fail
+      - name: Command line and MCP server (from the package)
+        shell: bash
+        env:
+          NTSCRT_BACKEND: dx12
+        run: |
+          python port/scripts/cli-check.py package/NTSCRT/ntscrt.exe TestAssets/testpattern.png out/cli
+          # The console launcher passes output and exit codes through.
+          package/NTSCRT/ntscrt-cli.exe help | grep -q "ntscrt-cli render"
+          code=0; package/NTSCRT/ntscrt-cli.exe render > /dev/null 2>&1 || code=$?
+          [ $code = 2 ] || { echo "::error::ntscrt-cli exit code $code, expected 2"; exit 1; }
+      - name: Connect to Claude (scratch home)
+        shell: bash
+        run: |
+          mkdir -p out/claude-home
+          NTSCRT_CONNECT_SELFTEST=- NTSCRT_CLAUDE_HOME="$PWD/out/claude-home" package/NTSCRT/ntscrt.exe 2>&1 | tee out/connect.log
+          grep -q CONNECT-ALL-PASS out/connect.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-cli-output
+          path: out/cli/
       - uses: actions/upload-artifact@v4
         with:
           name: NTSCRT-windows-x64

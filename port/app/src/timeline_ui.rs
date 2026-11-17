@@ -101,7 +101,7 @@ impl App {
         }
     }
 
-    fn snapshot(&self, t: f64) -> Keyframe {
+    pub(crate) fn snapshot(&self, t: f64) -> Keyframe {
         Keyframe {
             t,
             easing: Easing::Linear,
