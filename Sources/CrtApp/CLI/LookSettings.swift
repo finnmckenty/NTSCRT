@@ -59,7 +59,8 @@ enum Session {
 ///      "glitch": {"values": {"vertical_hold": 0.3}},
 ///      "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}},
 ///      "crt": {"preset": "royale", "params": {"…": 1.0}},
-///      "timeline": {"duration": 4, "fps": 30}}
+///      "timeline": {"duration": 4, "fps": 30, "loop": true},
+///      "keyframes": [{"time": 0}, {"time": 2, "glitch": {"values": {…}}}]}
 ///
 /// A stage can also be just "on", "off", or (for digital and crt) a format
 /// or preset id. Setting any VCR value switches the VCR on; the other
@@ -90,6 +91,9 @@ struct LookSettings {
         try await Session.waitForChain(state)
         if let v = settings["keyframes"] {
             try applyKeyframes(v, explicitDuration: (settings["timeline"] as? [String: Any])?["duration"] != nil, state)
+        }
+        if let t = settings["timeline"] as? [String: Any], let loop = t["loop"].flatMap(Self.bool), loop {
+            closeLoop(state)
         }
     }
 
@@ -533,10 +537,27 @@ struct LookSettings {
         state.scrubTimeline(to: 0)
     }
 
+    /// `"timeline": {"loop": true}`: end the animation where it began, with
+    /// a key at the end copying the first, so a GIF or looped video has no
+    /// jump in its keyed values. (Slowly building VCR conditions — creases,
+    /// dirt buildup, edge damage — still drift; the guide says to keep them
+    /// low in loops.)
+    private func closeLoop(_ state: AppState) {
+        guard let first = state.timelineKeys.first, state.timelineKeys.count > 1 else { return }
+        var keys = state.timelineKeys
+        if let i = keys.firstIndex(where: { $0.t > 1 - 1e-6 }) { keys.remove(at: i) }
+        var end = first
+        end.id = UUID()
+        end.t = 1
+        keys.append(end)
+        state.timelineKeys = keys
+        state.scrubTimeline(to: 0)
+    }
+
     // MARK: timeline (a still's video length)
 
     private mutating func applyTimeline(_ v: Any, _ state: AppState) throws {
-        guard let d = v as? [String: Any] else { throw CLIError(message: "\"timeline\" takes {duration, fps}.") }
+        guard let d = v as? [String: Any] else { throw CLIError(message: "\"timeline\" takes {duration, fps, loop}.") }
         if let s = Self.number(d["duration"]) { state.timelineDuration = min(600, max(0.1, s)) }
         if let f = Self.number(d["fps"]) { state.timelineFPS = Int(min(120, max(1, f.rounded()))) }
     }

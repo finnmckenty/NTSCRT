@@ -95,7 +95,12 @@ enum MCPServer {
     - The VCR switched on with a Brand new tape and Clean heads already looks like VHS; damage is optional.
 
     Over time: anything that happens partway through (the picture starts to roll, the signal fades, a tape gets chewed) is keyframes. Add "keyframes" to the settings and preview before, during and after each change.
-    Glitchy, edgy styles (glitch, glitchy, chaotic, broken, corrupted, aggressive, "freak out", and the like) live on dynamic timing: short bursts of extreme values with longer stretches of relative calm between them. Even, evenly spaced sweeps read as a filter, not a glitch. Build each burst from 3–5 keyframes about 0.08–0.2 s apart (calm → spike → different spike → back to calm), leave 0.5–1.5 s of a steady, mildly damaged picture between bursts, and vary which controls spike and how far (vertical_hold and horizontal_hold near ±1, signal_strength down to 0.3, search_speed up to 9, ghost_level, tracking_offset, crt or ntsc values). The bundled glitch looks (Glitch pop, Two blips loop, 2 second glitch, Vertical Freak Out) are built this way; preview inside a burst as well as between them. Gentle styles (dreamy, nostalgic, home video) want few, slow changes or none. A still becomes a video of 5 seconds unless you set timeline.duration; ask how long when the user hasn't said.
+    Glitchy, edgy styles (glitch, glitchy, chaotic, broken, corrupted, aggressive, "freak out", and the like) live on dynamic timing: short bursts of extreme values with longer stretches of relative calm between them. Even, evenly spaced sweeps read as a filter, not a glitch. Build each burst from 3–5 keyframes about 0.08–0.2 s apart (calm → spike → different spike → back to calm), leave 0.5–1.5 s of a steady, mildly damaged picture between bursts, and vary which controls spike and how far (vertical_hold and horizontal_hold near ±1, signal_strength down to 0.3, search_speed up to 9, ghost_level, tracking_offset, crt or ntsc values). The bundled glitch looks (Glitch pop, Two blips loop, 2 second glitch, Vertical Freak Out) are built this way; preview inside a burst as well as between them. Gentle styles (dreamy, nostalgic, home video) want few, slow changes or none.
+
+    Still images: one of NTSCRT's distinctive uses is turning a still into an animated asset. Even without keyframes the noise, the tape and the CRT make it move; keyframes add events. So when the source is a still and the user hasn't said, ask in one question: keep it a still image (render a PNG), or animate it? If animated: how long (2–5 s is typical), GIF or video, and should it loop seamlessly?
+    - It works especially well on high-contrast images: line drawings, engravings, lettering and graffiti, logos, silhouettes on dark or flat backgrounds. Their hard edges show the bleed, ringing, tearing and scanlines clearly. On these, try a low downscale width (128–256), strong color, and the CRT on.
+    - Loops: set "timeline": {"duration": <seconds>, "loop": true}. It adds a closing keyframe that copies the first, so the keyed values meet at the seam. Keep bursts off the seam unless the user wants one there. Some VCR conditions build up over time and never come back to where they started (tape_creases, dirt_buildup, tape_edge_damage, tape_sticky), so keep them low or off in loops, and back_tension and transport_flutter mild. Check the seam: preview at 0 and at the last frame (duration minus 1/fps); apart from the noise they should match.
+    - Many variations of one still: build a long timeline (10–20 s) whose keyframes push many controls far and unevenly (crt params, ntsc settings, glitch and vcr values, digital values), then ntscrt_render with format "png" and times spread across it (every 0.5 s, say). Unexpected combinations are the point. Preview a handful at a small size to pick from, tell the user where the files are and which time each came from, and save the look so any of them can be found again on the app's timeline.
 
     Settings are one JSON object keyed by stage, applied after the "look": {"look": "90s VHS bootleg", "vcr": {"tape": "Moldy", "deck": "Dirty heads", "values": {"tape_speed": "EP"}}, "glitch": {"values": {"vertical_hold": 0.2}}, "crt": {"preset": "royale"}}. Values are numbers, true/false, or a choice's name. Sources and outputs are absolute file paths on the user's Mac; if the user attaches a file instead of giving a path, ask for the path (in Finder: select it and press Option-Command-C).
     """
@@ -159,7 +164,8 @@ enum Tools {
                     "source": ["type": "string", "description": "Absolute path of an image or video."],
                     "settings": settingsSchema,
                     "output": ["type": "string", "description": "Where to write it (.mp4, .mov, .gif or .png). Default: ~/Movies/NTSCRT/<source name> <time>.mp4."],
-                    "format": ["type": "string", "enum": ["h264", "hevc", "prores", "prores-hq", "gif"], "description": "Default: from the output's extension, else h264."],
+                    "format": ["type": "string", "enum": ["h264", "hevc", "prores", "prores-hq", "gif", "png"], "description": "Default: from the output's extension, else h264. png writes full-size stills at `times`."],
+                    "times": ["type": "array", "items": ["type": "number"], "description": "For png: seconds to take a frame at, one file each (named <output> <time>s.png). Use with a varied keyframed timeline to make many alternate stills."],
                     "duration": ["type": "number", "description": "A still's video length in seconds (default 5, or the look's)."],
                     "fps": ["type": "integer", "description": "A still's frame rate (default 30)."],
                     "long_edge": ["type": "integer", "description": "Output long edge in pixels (default 1920)."],
@@ -269,7 +275,7 @@ enum Tools {
         if let o = a["output"] as? String {
             output = (o as NSString).expandingTildeInPath
         } else {
-            let ext = format == "gif" ? "gif" : (format?.hasPrefix("prores") == true ? "mov" : "mp4")
+            let ext = format == "gif" ? "gif" : format == "png" ? "png" : (format?.hasPrefix("prores") == true ? "mov" : "mp4")
             let stamp = { () -> String in let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH.mm.ss"; return f.string(from: Date()) }()
             let stem = URL(fileURLWithPath: source).deletingPathExtension().lastPathComponent
             output = moviesFolder.appendingPathComponent("\(stem) \(stamp).\(ext)").path
@@ -285,6 +291,9 @@ enum Tools {
         }
         if let d = LookSettings.number(a["duration"]) { args += ["--duration", String(d)] }
         if let q = a["quality"] as? String { args += ["--quality", q] }
+        if let times = (a["times"] as? [Any])?.compactMap({ LookSettings.number($0) }), !times.isEmpty {
+            args += ["--time", times.map { String($0) }.joined(separator: ",")]
+        }
         args += try settingsArgs(a["settings"], in: dir)
 
         // Check it first (bad settings, the size and length) without the wait.
