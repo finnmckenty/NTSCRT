@@ -1066,10 +1066,9 @@ fn load_chain_into(slot: &mut Option<Chain>, device: &Arc<wgpu::Device>, queue: 
         let v = shader.params.iter().find(|(n, _)| n == name).map_or(*value, |(_, v)| *v);
         params.set_parameter_value(name, v);
     }
-    for (name, _) in &shader.params {
-        if params.parameter_value(name).is_none() {
-            return Err(anyhow!("{} has no parameter {name}", shader.preset.display()));
-        }
-    }
+    // Names this preset doesn't have are skipped, as the Mac skips them: a
+    // keyframe made under another CRT shader carries that shader's values
+    // (CRT Sim's BloomPower into Glow, issue #7), and looks saved with one
+    // can too. The command line checks the names people type itself.
     Ok(())
 }

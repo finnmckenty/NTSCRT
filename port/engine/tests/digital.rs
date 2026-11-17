@@ -147,3 +147,33 @@ fn background_digital_reruns_land_on_the_exact_frame() {
         assert_eq!(landed.rgba, want.rgba, "{change:?}");
     }
 }
+
+/// Issue #7: a keyframe made under CRT Sim carries its BloomPower into
+/// Glow (Gaussian) when the shader changes; the Mac skips names a preset
+/// doesn't have, and so must we (it was "crtglow_gauss.slangp has no
+/// parameter BloomPower").
+#[test]
+fn a_shader_value_from_another_preset_is_skipped() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut engine) = Engine::new() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Vendor/slang-shaders");
+    let mut s = ntscrt_engine::Settings {
+        ntsc: None,
+        downscale: None,
+        shader: Some(ntscrt_engine::ShaderSpec {
+            preset: root.join("crt/crtglow_gauss.slangp"),
+            params: vec![("BOOST".into(), 1.1), ("BloomPower".into(), 1.0)],
+        }),
+        frame: 1,
+        glitch: None,
+        digital: None,
+    };
+    engine.set_source(picture(320, 240));
+    let with_stray = engine.render_export(&s, (640, 480), None).expect("renders with a stray value");
+    s.shader.as_mut().unwrap().params.retain(|(n, _)| n != "BloomPower");
+    let without = engine.render_export(&s, (640, 480), None).expect("renders");
+    assert_eq!(with_stray.rgba, without.rgba, "the stray value changes nothing");
+}
