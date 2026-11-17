@@ -87,6 +87,7 @@ enum MCPServer {
     - Broadcast, antenna, bad reception, snow, rolling, picture slipping sideways, ghosting, hum bars: the glitch stage (signal_strength, vertical_hold, horizontal_hold, ghost_level, hum).
     - Webcam, video call, camcorder, MiniDV, skate video, early internet video, CD-ROM, compression, blocks, datamosh: the digital stage; start from a format.
     - Resolution: downscale width. 320 is a typical TV picture; lower is chunkier, 640 is sharp. Portrait video: crop "9:16" and a lower width.
+    - A close-up of the CRT itself (huge scanlines, the phosphor mask's slots or dots visible, as if a camera were pressed to the screen): downscale hard (128–160, 256 at most), then zoom 8–12 on a PNG (zoom and zoom_at on ntscrt_preview and ntscrt_render); choose zoom_at over the interesting part of the picture. This is how it's done in the app too: zoom the preview way in and Export viewport. A mask-heavy CRT preset (royale, aperture) shows the mask most.
     - Prominent scanlines come from a LOW downscale width, not a high one. The CRT draws one scanline per line of the picture it gets, so fewer lines means bigger, more visible scanlines: 128–192 for bold, chunky scanlines (several bundled looks use 128 or 160), 256–320 for normal ones, 640 for fine, faint ones. Users often assume higher resolution is better; when they ask for visible scanlines or a chunky retro look, lower the width and say why.
 
     How strong:
@@ -149,6 +150,8 @@ enum Tools {
                     "settings": settingsSchema,
                     "times": ["type": "array", "items": ["type": "number"], "description": "Seconds (default [0.5, 2, 4])."],
                     "long_edge": ["type": "integer", "description": "Preview size in pixels (default 640)."],
+                    "zoom": ["type": "number", "description": "Magnify like the app's preview zoomed in (1–12): a close-up of the CRT's scanlines and phosphor mask. Pair with a low downscale width."],
+                    "zoom_at": ["type": "array", "items": ["type": "number"], "description": "Where to zoom, [x, y] from 0 to 1 (default the center)."],
                 ] as [String: Any],
                 "required": ["source"],
             ],
@@ -165,6 +168,8 @@ enum Tools {
                     "settings": settingsSchema,
                     "output": ["type": "string", "description": "Where to write it (.mp4, .mov, .gif or .png). Default: ~/Movies/NTSCRT/<source name> <time>.mp4."],
                     "format": ["type": "string", "enum": ["h264", "hevc", "prores", "prores-hq", "gif", "png"], "description": "Default: from the output's extension, else h264. png writes full-size stills at `times`."],
+                    "zoom": ["type": "number", "description": "For png: magnify like the app's preview zoomed in (1–12), for CRT close-ups."],
+                    "zoom_at": ["type": "array", "items": ["type": "number"], "description": "For png: where to zoom, [x, y] from 0 to 1."],
                     "times": ["type": "array", "items": ["type": "number"], "description": "For png: seconds to take a frame at, one file each (named <output> <time>s.png). Use with a varied keyframed timeline to make many alternate stills."],
                     "duration": ["type": "number", "description": "A still's video length in seconds (default 5, or the look's)."],
                     "fps": ["type": "integer", "description": "A still's frame rate (default 30)."],
@@ -250,6 +255,7 @@ enum Tools {
         var args = ["render", source, "-o", dir.appendingPathComponent("preview.png").path,
                     "--time", times.map { String($0) }.joined(separator: ","),
                     "--long-edge", String(min(1600, max(128, longEdge)))]
+        args += zoomArgs(a)
         args += try settingsArgs(a["settings"], in: dir)
         let r = try await Child.run(args)
         guard r.status == 0, var result = r.result, let outputs = result["outputs"] as? [[String: Any]] else {
@@ -294,6 +300,7 @@ enum Tools {
         if let times = (a["times"] as? [Any])?.compactMap({ LookSettings.number($0) }), !times.isEmpty {
             args += ["--time", times.map { String($0) }.joined(separator: ",")]
         }
+        args += zoomArgs(a)
         args += try settingsArgs(a["settings"], in: dir)
 
         // Check it first (bad settings, the size and length) without the wait.
@@ -352,6 +359,15 @@ enum Tools {
         let file = dir.appendingPathComponent("settings.json")
         try JSONSerialization.data(withJSONObject: settings).write(to: file)
         return ["--settings", "@" + file.path]
+    }
+
+    static func zoomArgs(_ a: [String: Any]) -> [String] {
+        var out: [String] = []
+        if let z = LookSettings.number(a["zoom"]), z > 1 { out += ["--zoom", String(z)] }
+        if let xy = (a["zoom_at"] as? [Any])?.compactMap({ LookSettings.number($0) }), xy.count == 2 {
+            out += ["--zoom-at", "\(xy[0]),\(xy[1])"]
+        }
+        return out
     }
 
     static func wait(_ a: [String: Any], _ def: Double) -> Double {

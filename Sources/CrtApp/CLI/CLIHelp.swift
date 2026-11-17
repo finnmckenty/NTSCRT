@@ -25,6 +25,7 @@ enum CLIHelp {
       --gif-width N  --gif-fps N   GIF size and rate (default 480, 12)
       --duration S  --fps N        a still's video length (default 5 s at 30)
       --time S[,S…]                PNG: the frame at these times (one file each)
+      --zoom N  --zoom-at x,y      PNG: a close-up, as the preview zoomed in (1–12×)
       --quality standard|high|very-high|maximum   --loops N   --snap
       --save-look <file.json>      also save the look
       --dry-run                    resolve the look and size, render nothing

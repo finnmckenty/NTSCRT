@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import CoreGraphics
 import CrtCore
 
 /// `NTSCRT render <source> -o <file> [options]`: the Export button, from
@@ -20,6 +22,9 @@ enum RenderCommand {
         var times: [Double] = []
         var saveLook: String?
         var dryRun = false
+        /// PNG: magnify like the preview zoomed in (1–12×), at this point.
+        var zoom: Double = 1
+        var zoomAt: (x: Double, y: Double) = (0.5, 0.5)
     }
 
     static func run(_ args: [String]) async -> Int32 {
@@ -125,6 +130,13 @@ enum RenderCommand {
                     return t
                 }
             case "--save-look": r.saveLook = try value(a)
+            case "--zoom":
+                guard let z = Double(try value(a)), z >= 1 else { throw CLIError(message: "--zoom takes a magnification from 1 to 12.") }
+                r.zoom = min(12, z)
+            case "--zoom-at":
+                let xy = try value(a).split(separator: ",").compactMap { Double($0) }
+                guard xy.count == 2 else { throw CLIError(message: "--zoom-at takes x,y from 0 to 1 (0.5,0.5 is the center).") }
+                r.zoomAt = (min(1, max(0, xy[0])), min(1, max(0, xy[1])))
             case "--dry-run": r.dryRun = true
             default:
                 if a.hasPrefix("-") { throw CLIError(message: "Unknown option \(a). Run `NTSCRT help`.") }
@@ -243,7 +255,7 @@ enum RenderCommand {
 
         if png {
             return try await renderPNGs(state, url: url, times: r.times.isEmpty ? [0] : r.times,
-                                        dryRun: r.dryRun, into: result)
+                                        zoom: r.zoom, zoomAt: r.zoomAt, dryRun: r.dryRun, into: result)
         }
         let size = state.movieExportSize
         let (frames, fps) = state.movieExportFrames
@@ -280,8 +292,9 @@ enum RenderCommand {
     /// Stills of the look at the given times. History counts — clogs build
     /// up, the tracking hunts, creases pass — so each is the frame the
     /// export would have at that time, simulated up to it.
-    static func renderPNGs(_ state: AppState, url: URL, times: [Double], dryRun: Bool,
-                           into base: [String: Any]) async throws -> [String: Any] {
+    static func renderPNGs(_ state: AppState, url: URL, times: [Double],
+                           zoom: Double = 1, zoomAt: (x: Double, y: Double) = (0.5, 0.5),
+                           dryRun: Bool, into base: [String: Any]) async throws -> [String: Any] {
         var result = base
         let size = state.exportVideoSize
         result["plan"] = ["route": "png", "width": size.width, "height": size.height, "times": times] as [String: Any]
@@ -296,10 +309,35 @@ enum RenderCommand {
             guard await state.exportPNG(to: file, size: size) else {
                 throw CLIError(message: "Rendering the frame at \(t) s failed: \(state.exportStatus)", code: 1)
             }
+            if zoom > 1.001 { try magnify(file, zoom: zoom, at: zoomAt) }
             outputs.append(output(file, size.width, size.height, time: at))
         }
         result["outputs"] = outputs
         return result
+    }
+
+    /// The preview zoomed in, as Export viewport saves it: the CRT render
+    /// cut to 1/zoom around the point and enlarged pixel for pixel, so the
+    /// scanlines and the phosphor mask show close up.
+    static func magnify(_ file: URL, zoom: Double, at p: (x: Double, y: Double)) throws {
+        guard let src = CGImageSourceCreateWithURL(file as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            throw CLIError(message: "Couldn't reopen \(file.lastPathComponent) to zoom it.", code: 1)
+        }
+        let w = image.width, h = image.height
+        let cw = max(1, Int((Double(w) / zoom).rounded())), ch = max(1, Int((Double(h) / zoom).rounded()))
+        let x0 = min(w - cw, max(0, Int(p.x * Double(w)) - cw / 2))
+        let y0 = min(h - ch, max(0, Int(p.y * Double(h)) - ch / 2))
+        guard let cut = image.cropping(to: CGRect(x: x0, y: y0, width: cw, height: ch)),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw CLIError(message: "Couldn't zoom \(file.lastPathComponent).", code: 1)
+        }
+        ctx.interpolationQuality = .none
+        ctx.draw(cut, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let out = ctx.makeImage() else { throw CLIError(message: "Couldn't zoom \(file.lastPathComponent).", code: 1) }
+        try writePNG(out, to: file)
     }
 
     /// Put the playhead at `t` seconds; returns the time it landed on.
