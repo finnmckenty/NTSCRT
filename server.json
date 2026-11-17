@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.finnmckenty/ntscrt",
   "title": "NTSCRT",
-  "description": "Make images and video look like VHS tape, an old TV or a CRT: preview, animate and render analog looks.",
+  "description": "VHS, CRT and analog TV looks for images and video: preview, animate and render them.",
   "repository": {
     "url": "https://github.com/finnmckenty/NTSCRT",
     "source": "github"
@@ -14,7 +14,9 @@
       "registryType": "mcpb",
       "identifier": "https://github.com/finnmckenty/NTSCRT/releases/download/v0.0.0/ntscrt-mcp-0.0.0.mcpb",
       "fileSha256": "filled in by the MCP Registry workflow",
-      "transport": { "type": "stdio" }
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
