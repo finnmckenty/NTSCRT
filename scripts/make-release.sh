@@ -95,11 +95,14 @@ for bin in "$APP/Contents/MacOS/NTSCRT" "$APP/Contents/Frameworks/librashader.dy
 done
 echo 'universal check: all binaries arm64 + x86_64' 
 
-# Shader presets: the crt/ tree (presets + shaders + textures) and the shared
-# include/ headers are all our 7 presets reference. ~10 MB.
-mkdir -p "$APP/Contents/Resources/slang-shaders"
+# Shader presets: the crt/ tree (presets + shaders + textures), the shared
+# include/ headers, and crt-royale's two blur passes, which live in
+# blurs/shaders/royale (without them CRT Royale fails to load). ~10 MB.
+# The Windows package copies the same three (windows-port.yml).
+mkdir -p "$APP/Contents/Resources/slang-shaders/blurs/shaders"
 cp -R Vendor/slang-shaders/crt "$APP/Contents/Resources/slang-shaders/"
 cp -R Vendor/slang-shaders/include "$APP/Contents/Resources/slang-shaders/"
+cp -R Vendor/slang-shaders/blurs/shaders/royale "$APP/Contents/Resources/slang-shaders/blurs/shaders/"
 # Licenses: the app's own (MIT) and the notices the bundled libraries and
 # shaders require to travel with binary copies (THIRD_PARTY_NOTICES.md).
 cp LICENSE THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
