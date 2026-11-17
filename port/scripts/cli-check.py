@@ -15,6 +15,8 @@ CLI_CHECK_PATHS="<guest prefix>|<host prefix>" maps the guest paths it's
 given to where the host sees them, for checking the files.
 """
 import json, ntpath, os, subprocess, sys, time
+# The check names use arrows; Windows consoles and CI default to cp1252.
+sys.stdout.reconfigure(encoding="utf-8")
 
 WRAP = json.loads(os.environ.get("CLI_CHECK_WRAP", "[]"))
 GUEST, HOST = (os.environ.get("CLI_CHECK_PATHS", "|").split("|") + [""])[:2]
