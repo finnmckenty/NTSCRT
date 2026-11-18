@@ -224,7 +224,7 @@ public struct GlitchParam: Identifiable, Sendable {
 /// knobs' top ends were strengthened (TapeParams.topEndGains), for values
 /// that must keep their look: the tape choices and migrated old looks.
 func asBefore(_ key: String, _ amount: Double) -> Double {
-    TapeParams.knob(forAmount: amount, gain: Double(TapeParams.topEndGains[key] ?? 0))
+    TapeParams.knob(key, forAmount: amount)
 }
 
 public struct VcrCondition: Identifiable, Sendable {
@@ -245,24 +245,24 @@ public struct VcrCondition: Identifiable, Sendable {
         VcrCondition(name: "Brand new", help: "Fresh out of the shrink-wrap.",
                      values: [:]),
         VcrCondition(name: "Used", help: "A rental: played a few dozen times.",
-                     values: ["tape_wear": 0.3, "tape_dropouts": 0.15, "tape_scratches": 0.1]),
+                     values: ["tape_wear": asBefore("tape_wear", 0.3), "tape_dropouts": asBefore("tape_dropouts", 0.15), "tape_scratches": asBefore("tape_scratches", 0.1)]),
         VcrCondition(name: "Worn out", help: "Played to death in a garage for twenty years.",
-                     values: ["tape_wear": asBefore("tape_wear", 0.75), "tape_dropouts": 0.5, "tape_scratches": 0.45,
-                              "tape_creases": 0.15, "tape_edge_damage": 0.2]),
+                     values: ["tape_wear": asBefore("tape_wear", 0.75), "tape_dropouts": asBefore("tape_dropouts", 0.5), "tape_scratches": asBefore("tape_scratches", 0.45),
+                              "tape_creases": 0.15, "tape_edge_damage": asBefore("tape_edge_damage", 0.2)]),
         VcrCondition(name: "Moldy", help: "Stored somewhere damp.",
-                     values: ["tape_wear": 0.5, "tape_dropouts": 0.35, "tape_mold": 0.7,
-                              "tape_edge_damage": 0.1]),
+                     values: ["tape_wear": asBefore("tape_wear", 0.5), "tape_dropouts": asBefore("tape_dropouts", 0.35), "tape_mold": 0.7,
+                              "tape_edge_damage": asBefore("tape_edge_damage", 0.1)]),
         VcrCondition(name: "Vaselined", help: "Smeared on purpose.",
-                     values: ["tape_wear": 0.2, "tape_vaseline": 0.6]),
+                     values: ["tape_wear": asBefore("tape_wear", 0.2), "tape_vaseline": 0.6]),
         VcrCondition(name: "Chewed", help: "Eaten by a deck and wound back by hand.",
-                     values: ["tape_wear": 0.4, "tape_dropouts": 0.3, "tape_scratches": 0.4,
+                     values: ["tape_wear": asBefore("tape_wear", 0.4), "tape_dropouts": asBefore("tape_dropouts", 0.3), "tape_scratches": asBefore("tape_scratches", 0.4),
                               "tape_creases": asBefore("tape_creases", 0.7),
                               "tape_edge_damage": asBefore("tape_edge_damage", 0.7)]),
         VcrCondition(name: "Sticky", help: "Its binder is breaking down: it squeals, stutters and sheds.",
-                     values: ["tape_wear": 0.45, "tape_dropouts": 0.2, "tape_sticky": 0.75]),
+                     values: ["tape_wear": asBefore("tape_wear", 0.45), "tape_dropouts": asBefore("tape_dropouts", 0.2), "tape_sticky": 0.75]),
         VcrCondition(name: "Bootleg", help: "A copy of a copy, squeezed onto a tape at EP.",
-                     values: ["tape_speed": 2, "tape_generation": 2, "tape_wear": 0.35,
-                              "tape_dropouts": 0.15, "tape_scratches": 0.1]),
+                     values: ["tape_speed": 2, "tape_generation": 2, "tape_wear": asBefore("tape_wear", 0.35),
+                              "tape_dropouts": asBefore("tape_dropouts", 0.15), "tape_scratches": asBefore("tape_scratches", 0.1)]),
     ]
 
     public static let decks: [VcrCondition] = [
@@ -360,6 +360,22 @@ public struct GlitchSettings: Equatable, Sendable {
     /// error that drew a noise band, and Time-base jitter was in µs: they
     /// become a tracking offset that puts the heads near the edge of their
     /// tracks, and Flutter.
+    /// A look's values as this version reads them, from a look saved as
+    /// `lookVersion`: before version 3 (0.27.0 and earlier) Wear, Oxide
+    /// flaws, Scratches and Edge damage followed straight lines above half
+    /// (see TapeParams.curves); each becomes the slider position that damages
+    /// the tape the same. (Before `migrated`: older looks' tape keys come
+    /// out of that already on these curves.)
+    public static func upgraded(_ values: [String: Double], lookVersion: Int) -> [String: Double] {
+        guard lookVersion < 3 else { return values }
+        var v = values
+        for key in TapeParams.curves.keys {
+            guard let k = v[key] else { continue }
+            v[key] = TapeParams.knob(key, forAmount: TapeParams.amountIn027(key, min(1, max(0, k))))
+        }
+        return v
+    }
+
     public static func migrated(_ values: [String: Double]) -> [String: Double] {
         var v = values
         if v[GlitchParam.vcrID] == nil {

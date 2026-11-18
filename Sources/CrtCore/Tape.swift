@@ -167,7 +167,7 @@ public struct TapeParams: Equatable {
     public init(_ s: GlitchSettings) {
         seed = UInt32(truncatingIfNeeded: Int(s["tape_seed"].rounded()) &* 7919 &+ 17)
         func u(_ k: String) -> Float { Float(min(1, max(0, s[k]))) }
-        func amount(_ k: String) -> Float { Self.topEnd(u(k), Self.topEndGains[k] ?? 0) }
+        func amount(_ k: String) -> Float { Self.amount(k, u(k)) }
         wear = amount("tape_wear")
         dropouts = amount("tape_dropouts")
         scratches = amount("tape_scratches")
@@ -186,18 +186,60 @@ public struct TapeParams: Equatable {
     /// 2% of the picture damaged to 14%, Scratches 0% → 15%, Edge damage
     /// 3% → 13%, Creases 2% → 5% with 14% peaks). Built-in looks and tape
     /// choices were rescaled (`knob(forAmount:)`) to render as before.
-    /// Wear reaches 1.85× the realistic worst at full: the signal 18.5 dB
-    /// down, which takes the picture over the FM threshold (heavy noise on
-    /// SP; LP and EP lose sync and tear; 2× read as a touch too much). Its color is spared
-    /// (`DeckParams.colorBoost`), or that loss would turn it black and white
-    /// first.
+    /// (Wear, Oxide flaws, Scratches and Edge damage have measured curves:
+    /// `curves`.)
     public static let topEndGains: [String: Float] = [
-        "tape_dropouts": 2, "tape_scratches": 3, "tape_creases": 4,
-        "tape_edge_damage": 0.45, "tape_wear": 0.85,
+        "tape_creases": 4,
         // The deck's Flutter (Transport) too: at 5× the picture's verticals
         // go ragged and wavy; at the realistic most they barely moved.
         "transport_flutter": 4,
     ]
+
+    /// Measured slider curves: each knob's amount (1 = the realistic worst)
+    /// at the slider's tenths, so the picture's change grows as the slider
+    /// to the power 1.5 (averaged over an EP third copy and an SP original).
+    /// 0.27.0's straight lines above half left these nearly flat until 50–80%
+    /// and put most of the effect at the very top; the realistic range of
+    /// Scratches and Edge damage barely shows, so it is the first tenth.
+    /// Wear goes to 1.85 (18.5 dB: past the FM threshold — heavy noise on
+    /// SP, LP and EP tear), with its color spared (`DeckParams.colorBoost`).
+    static let curves: [String: [Float]] = [
+        "tape_wear": [0, 0.259, 0.648, 0.955, 1.202, 1.391, 1.540, 1.640, 1.724, 1.785, 1.850],
+        "tape_dropouts": [0, 0.195, 0.473, 0.754, 0.931, 1.120, 1.322, 1.607, 2.124, 2.480, 3.0],
+        "tape_scratches": [0, 0.759, 1.281, 1.822, 2.073, 2.289, 2.516, 2.777, 3.069, 3.430, 4.0],
+        "tape_edge_damage": [0, 0.703, 0.743, 0.800, 0.888, 0.934, 0.987, 1.056, 1.190, 1.329, 1.45],
+    ]
+
+    /// A damage knob's amount for its slider position: its measured curve,
+    /// or its top end (`topEndGains`), or the knob itself.
+    public static func amount(_ key: String, _ k: Float) -> Float {
+        let k = min(1, max(0, k))
+        guard let c = curves[key] else { return topEnd(k, topEndGains[key] ?? 0) }
+        let x = k * 10
+        let i = min(9, Int(x))
+        return c[i] + (c[i + 1] - c[i]) * (x - Float(i))
+    }
+
+    /// The slider position that gives `amount` (the inverse of `amount`).
+    public static func knob(_ key: String, forAmount amount: Double) -> Double {
+        guard let c = curves[key] else { return knob(forAmount: amount, gain: Double(topEndGains[key] ?? 0)) }
+        let a = Float(min(Double(c[10]), max(0, amount)))
+        for i in 0..<10 where a <= c[i + 1] {
+            let span = c[i + 1] - c[i]
+            return Double((Float(i) + (span > 0 ? (a - c[i]) / span : 0)) / 10)
+        }
+        return 1
+    }
+
+    /// A knob's amount as 0.27.0 read it (straight lines above half), for
+    /// looks saved then and before.
+    static let gainsIn027: [String: Double] = [
+        "tape_wear": 0.85, "tape_dropouts": 2, "tape_scratches": 3, "tape_edge_damage": 0.45,
+    ]
+    public static func amountIn027(_ key: String, _ k: Double) -> Double {
+        let g = gainsIn027[key] ?? 0
+        return k <= 0.5 ? k : k + g * (k - 0.5) / 0.5
+    }
 
     /// The knob as is up to half; above, it rises on a straight line to
     /// 1 + `gain` at full.

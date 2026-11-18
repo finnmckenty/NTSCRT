@@ -391,7 +391,9 @@ extension ReceiverSimulatorTests {
         // further each frame until the picture was noise.)
         let L = ReceiverRaster(width: 320, activeLines: 240).totalLines
         for extra in [["tape_wear": 1.0],
-                      ["tape_wear": 0.7, "tape_dropouts": 0.45, "tape_scratches": 0.5, "tape_edge_damage": 0.35]] {
+                      ["tape_wear": asBefore("tape_wear", 0.7), "tape_dropouts": asBefore("tape_dropouts", 0.45),
+                       "tape_scratches": asBefore("tape_scratches", 0.5),
+                       "tape_edge_damage": asBefore("tape_edge_damage", 0.35)]] {
             let t = TransportSimulator(linesPerField: L, seed: 0x4E54_5343_5254,
                                        settings: GlitchSettings(values: extra.merging(["vcr": 1]) { a, _ in a }))
             t.reset()

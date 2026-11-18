@@ -98,6 +98,29 @@ size, and that the step between the two stays an exact integer factor. Those
 requirements pull against each other, and a fix for one silently broke the
 other once. `scripts/make-release.sh` runs the suite as a gate.
 
+```sh
+scripts/check-control-strength.py            # ~2 min
+scripts/check-control-strength.py --update   # after a deliberate change
+```
+
+Every NTSC, Glitch, VCR and Digital video control, rendered at its minimum,
+middle and maximum under the default look, measured against it (mean RGB
+difference) and compared with `scripts/control-strength-baseline.json` — in the default look
+and, for NTSC and Glitch, with a Chunky and a Smooth 320 Downscale, a 4K
+source and the VCR off. It fails when a control goes dead or its strength
+moves past 1.6× either way — and when a slider that starts at its minimum
+has a flat spot: under 10% of its effect at half its travel, or under 30% at
+three quarters (Wear in 0.27.0: 5% at half). Wear, Oxide flaws, Scratches and
+Edge damage follow measured curves (`TapeParams.curves`, the picture's change
+growing as the slider to the power 1.5); looks saved before version 3 are
+converted on loading (`GlitchSettings.upgraded`) so they damage the tape the
+same. It exists because changes to one panel kept
+weakening another's controls without anything failing: Wear did almost
+nothing at 100%, Flutter nothing visible, Digital video's values were dropped from the command line. After a deliberate change, `--update`
+and read the baseline's diff: it lists every control the change moved.
+`make-release.sh` runs it as a gate. `--app <binary>` checks another build
+against the baseline.
+
 The wrapper exists because XCTest ships with full Xcode, not the Command Line
 Tools, and `xcode-select` here points at the CLT — so it sets `DEVELOPER_DIR`
 for the test run only (no `sudo xcode-select` needed) and uses its own scratch

@@ -201,9 +201,13 @@ struct LookSettings {
             }
             state.applyDigitalFormat(format)
         }
-        try setDigitalValues(dict["values"], state)
+        // Switch it on before the values: switching on a stage that has no
+        // format yet applies one, and its values used to replace these (so
+        // --digital-set did nothing unless a format came first).
         let enabled = (dict["enabled"] as? Bool) ?? true
-        state.setDigitalEnabled(enabled)
+        if enabled { state.setDigitalEnabled(true) }
+        try setDigitalValues(dict["values"], state)
+        if !enabled { state.setDigitalEnabled(false) }
     }
 
     private mutating func setDigitalValues(_ raw: Any?, _ state: AppState) throws {
@@ -476,6 +480,12 @@ struct LookSettings {
             warnings.append("Keyframes after \(Self.fmt(duration)) s are past the end of the video; they land at the end.")
         }
 
+        // A stage a keyframe animates has to be running to show it — and
+        // Digital video on before the base is taken, since switching it on
+        // can apply a format (which would replace the keyed values).
+        if timed.contains(where: { $0.key["digital"] != nil }), !state.digitalEnabled {
+            state.setDigitalEnabled(true)
+        }
         let baseParams = state.paramValues, baseNtsc = state.ntscValues
         let baseGlitch = state.glitchValues, baseDigital = state.digitalValues
         func restore() {
@@ -532,9 +542,9 @@ struct LookSettings {
         }
         restore()
 
-        // A stage a keyframe animates has to be running to show it.
+        // A stage a keyframe animates has to be running to show it (Digital
+        // video is switched on above).
         if touched.contains("glitch") { state.glitchEnabled = true }
-        if touched.contains("digital"), !state.digitalEnabled { state.setDigitalEnabled(true) }
         if touched.contains("ntsc") { state.ntscEnabled = true }
         if touched.contains("crt") { state.shaderEnabled = true }
         state.timelineKeys = keys

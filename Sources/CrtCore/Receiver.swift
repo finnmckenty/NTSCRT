@@ -816,7 +816,7 @@ public final class ReceiverSimulator {
     private func dubPlan(field f: Int64, generation g: Int) -> VcrFieldPlan {
         let settings = GlitchSettings(values: [
             "tape_seed": Double(knobs.settings["tape_seed"].rounded()) + Double(1000 * g),
-            "tape_wear": 0.1, "tape_dropouts": 0.05, "head_wear": 0.1])
+            "tape_wear": asBefore("tape_wear", 0.1), "tape_dropouts": asBefore("tape_dropouts", 0.05), "head_wear": 0.1])
         let tape = TapeParams(settings), deck = DeckParams(settings)
         let fmt = knobs.transport.format
         var lines: [VcrLine] = []

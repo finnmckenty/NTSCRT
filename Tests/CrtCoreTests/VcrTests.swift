@@ -135,7 +135,8 @@ final class VcrTests: XCTestCase {
         XCTAssertEqual(m["vcr"], 1)
         XCTAssertEqual(m["head_dirt"]!, 0.45, accuracy: 1e-9)
         XCTAssertEqual(m["tape_creases"], 0.4)
-        XCTAssertEqual(m["tape_dropouts"], 0.3)
+        XCTAssertEqual(Double(TapeParams.amount("tape_dropouts", Float(m["tape_dropouts"]!))), 0.3, accuracy: 1e-5,
+                       "the same flaws, on Oxide flaws' curve")
         XCTAssertNil(m["head_clog"])
         XCTAssertEqual(m["dropout_compensation"], 0)
         XCTAssertEqual(GlitchSettings.migrated(["vertical_hold": 0.3])["vcr"], 0, "no tape, no VCR")
@@ -326,10 +327,33 @@ final class VcrPlaybackTests: XCTestCase {
         func tape(_ name: String) -> TapeParams {
             TapeParams(GlitchSettings(values: VcrCondition.tapes.first { $0.name == name }!.values))
         }
+        XCTAssertEqual(tape("Used").dropouts, 0.15, accuracy: 1e-5)
+        XCTAssertEqual(tape("Worn out").scratches, 0.45, accuracy: 1e-5)
         XCTAssertEqual(tape("Worn out").wear, 0.75, accuracy: 1e-5)
         XCTAssertEqual(tape("Chewed").creases, 0.7, accuracy: 1e-5)
         XCTAssertEqual(tape("Chewed").edge, 0.7, accuracy: 1e-5)
         let worn = VcrCondition.decks.first { $0.name == "Worn transport" }!.values
         XCTAssertEqual(TransportParams(GlitchSettings(values: worn)).flutter, 0.6, accuracy: 1e-5)
+    }
+
+    /// Wear, Oxide flaws, Scratches and Edge damage follow measured curves
+    /// (TapeParams.curves): rising all the way, as strong at full as in
+    /// 0.27.0, and a look saved before them damages the tape the same.
+    func testMeasuredCurvesRiseEvenlyAndKeepOldLooks() {
+        for (key, c) in TapeParams.curves {
+            XCTAssertEqual(c.count, 11, key)
+            XCTAssertEqual(c[0], 0, key)
+            for i in 1...10 { XCTAssertGreaterThan(c[i], c[i - 1], "\(key) rises at \(i)") }
+            XCTAssertEqual(Double(c[10]), TapeParams.amountIn027(key, 1), accuracy: 1e-6, "\(key): full as before")
+            for k in stride(from: 0.0, through: 1.0, by: 0.05) {
+                let a = Double(TapeParams.amount(key, Float(k)))
+                XCTAssertEqual(TapeParams.knob(key, forAmount: a), k, accuracy: 1e-5, "\(key) inverts at \(k)")
+                let old = GlitchSettings.upgraded([key: k], lookVersion: 2)[key]!
+                XCTAssertEqual(Double(TapeParams.amount(key, Float(old))), TapeParams.amountIn027(key, k),
+                               accuracy: 1e-4, "\(key): a 0.27.0 look at \(k)")
+            }
+        }
+        XCTAssertEqual(GlitchSettings.upgraded(["tape_wear": 0.4], lookVersion: 3)["tape_wear"], 0.4,
+                       "version 3 looks are read as they are")
     }
 }

@@ -305,7 +305,7 @@ enum DescribeCommand {
         s["ntsc"] = on("ntsc", default: true)
         if on("downscale", default: true), let w = (d["downscale"] as? [String: Any])?["width"] { s["downscale"] = w }
         let g = (d["glitch"] as? [String: Any])?["values"] as? [String: Double] ?? [:]
-        let values = GlitchSettings.migrated(g)
+        let values = GlitchSettings.migrated(GlitchSettings.upgraded(g, lookVersion: d["version"] as? Int ?? 1))
         if (values[GlitchParam.vcrID] ?? 0) >= 0.5 {
             let full = GlitchParam.defaultValues.merging(values) { _, n in n }
             s["vcr"] = ["tape": VcrCondition.matching(VcrCondition.tapes, keys: VcrCondition.tapeKeys, in: full)?.name ?? "custom",

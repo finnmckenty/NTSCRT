@@ -1469,7 +1469,7 @@ final class AppState {
     /// The VCR the app starts with (the VCR panel's Reset is still a new
     /// tape in a clean deck): Finn's "new defaults" look, 2026-11-17 — an EP
     /// third copy with some flaws and scratches, values exact.
-    static let startingVcr: [String: Double] = [
+    static let startingVcr: [String: Double] = GlitchSettings.upgraded([
         GlitchParam.vcrID: 1,
         "tape_speed": 2, "tape_generation": 3,
         "tape_wear": 0.1523092064065363, "tape_dropouts": 0.39689082029664796,
@@ -1477,7 +1477,7 @@ final class AppState {
         "tape_edge_damage": 0.062112894144144136, "tape_mold": 0.14560458896396397,
         "head_wear": 0.07301008968609865, "head_switch": 6.000563063063063,
         "back_tension": 0.7709740990990992,
-    ]
+    ], lookVersion: 2)   // (his file is a version 2 look: its knobs as 0.27.0 read them)
 
     /// The app's house VHS look, overlaid on ntsc-rs library defaults —
     /// Finn's dialed-in settings (2026-07-18; revised 2026-10-02 to match the
@@ -2059,7 +2059,7 @@ final class AppState {
     func lookDictionary() -> [String: Any] {
         var look: [String: Any] = [
             // 2: Digital video's Quality on its even curve (0.19).
-            "version": 2,
+            "version": 3,
             "downscale": [
                 "enabled": downscaleEnabled,
                 "width": downscaleWidth,
@@ -2191,7 +2191,7 @@ final class AppState {
                 let used = ([values] + keyed).contains { GlitchSettings.migrated($0)[GlitchParam.vcrID] == 1 }
                 vcrFromLegacy = used && glitchEnabled ? 1 : 0
             }
-            var migrated = GlitchSettings.migrated(values)
+            var migrated = GlitchSettings.migrated(GlitchSettings.upgraded(values, lookVersion: lookVersion))
             if let v = vcrFromLegacy { migrated[GlitchParam.vcrID] = v }
             glitchValues = GlitchParam.defaultValues.merging(migrated) { _, new in new }
         } else {
@@ -2233,7 +2233,7 @@ final class AppState {
                     var glitch = k["glitch"] as? [String: Double] ?? [:]
                     if !glitch.isEmpty {
                         let hadVCR = glitch[GlitchParam.vcrID] != nil
-                        glitch = GlitchSettings.migrated(glitch)
+                        glitch = GlitchSettings.migrated(GlitchSettings.upgraded(glitch, lookVersion: lookVersion))
                         if !hadVCR { glitch[GlitchParam.vcrID] = vcrFromLegacy ?? glitchValues[GlitchParam.vcrID] }
                     }
                     let digital = DigitalSettings.migrated(k["digital"] as? [String: Double] ?? [:],

@@ -57,6 +57,10 @@ fi
 # Universal app binary: SPM's multi-arch --arch flags need full Xcode's
 # XCBuild; per-triple builds + lipo work with just the Command Line Tools.
 swift build -c release --product crt-app
+# Every control's strength against the baseline: changes to one panel have
+# silently weakened another's controls before (Wear, Flutter, NTSC noise).
+echo "== checking control strengths =="
+python3 -I scripts/check-control-strength.py
 swift build -c release --triple x86_64-apple-macosx --scratch-path .build-x86 --product crt-app
 lipo -create .build/release/crt-app \
              .build-x86/x86_64-apple-macosx/release/crt-app \
