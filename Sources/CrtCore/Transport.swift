@@ -17,7 +17,11 @@ public struct TransportParams: Equatable {
 
     public init(_ s: GlitchSettings) {
         tension = min(1, max(-1, s["back_tension"]))
-        flutter = min(1, max(0, s["transport_flutter"]))
+        // On the damage knobs' curve (TapeParams.topEnd): realistic up to
+        // half, then up to 5× (at its realistic most the TV's AFC rode out
+        // nearly all of it).
+        flutter = Double(TapeParams.topEnd(Float(min(1, max(0, s["transport_flutter"]))),
+                                           TapeParams.topEndGains["transport_flutter"] ?? 0))
         // The knob on a curve: its first half moves the heads three
         // quarters of the way off their tracks (the picture just gets
         // noisier); the rest is where noise bands break out and take over.

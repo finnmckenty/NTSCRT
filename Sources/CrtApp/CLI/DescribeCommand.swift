@@ -136,7 +136,12 @@ enum DescribeCommand {
             case .percentage: c["kind"] = "slider"; c["min"] = 0; c["max"] = 1; c["display"] = "percent"
             case .float(let lo, let hi, _): c["kind"] = "slider"; c["min"] = lo; c["max"] = hi
             case .int(let lo, let hi): c["kind"] = "integer"; c["min"] = lo; c["max"] = hi
-            case .enumeration(let options): c["kind"] = "choice"; c["options"] = options.map(\.label)
+            case .enumeration(let options):
+                c["kind"] = "choice"; c["options"] = options.map(\.label)
+                // By name: the options are listed in the panel's order, not
+                // ntsc-rs's numbering.
+                if let def = (state.ntscDefaults[s.name] as? NSNumber)?.intValue,
+                   let o = options.first(where: { $0.index == def }) { c["default"] = o.label }
             case .group(let kids):
                 c["kind"] = "group"
                 c["about"] = "A switch for the settings under it."

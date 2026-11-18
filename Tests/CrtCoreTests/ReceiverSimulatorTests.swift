@@ -430,8 +430,11 @@ extension ReceiverSimulatorTests {
         func loss(_ speed: Int) -> Double {
             let sim = ReceiverSimulator(raster: raster)
             sim.advance(to: 3, settings: GlitchSettings(values: [
-                "vcr": 1, "tape_speed": Double(speed), "tape_wear": 0.63, "tape_dropouts": 0.72,
-                "tape_scratches": 1, "tape_creases": 0.95, "tape_mold": 0.13, "tape_vaseline": 0.14,
+                // The tape this was calibrated on, from before the damage
+                // knobs' top ends were strengthened.
+                "vcr": 1, "tape_speed": Double(speed), "tape_wear": asBefore("tape_wear", 0.63),
+                "tape_dropouts": asBefore("tape_dropouts", 0.72), "tape_scratches": asBefore("tape_scratches", 1),
+                "tape_creases": asBefore("tape_creases", 0.95), "tape_mold": 0.13, "tape_vaseline": 0.14,
                 "back_tension": 0, "head_dirt": 0.4, "head_wear": 0.15, "head_mismatch": 0.3,
                 "dirt_buildup": 0.18, "head_switch": 7.9]))
             let f0 = Int64((3 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 31

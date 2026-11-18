@@ -248,6 +248,44 @@ final class VcrPlaybackTests: XCTestCase {
         XCTAssertEqual(ep.luma, src.luma, accuracy: 0.03)
     }
 
+    func testWearWearsThePictureButNotTheColor() throws {
+        // Worn tape and heads lose up to 20 dB, which on EP used to sink the
+        // color-under below the color killer. People turn wear up for a
+        // worn picture, not a black-and-white one.
+        // (At the realistic worst; full Wear goes on to wreck the picture.)
+        let input = texture { _, _ in (0.7, 0.45, 0.3) }
+        let new = patch(try render(input, ["vcr": 1, "tape_speed": 2]))
+        let worn = patch(try render(input, ["vcr": 1, "tape_speed": 2, "tape_wear": asBefore("tape_wear", 1),
+                                            "head_wear": 0.5]))
+        XCTAssertGreaterThan(worn.noise, new.noise * 1.5, "the picture is worn")
+        XCTAssertEqual(worn.chroma, new.chroma, accuracy: 0.03, "the color isn't")
+    }
+
+    func testAFlawOverTheBurstDoesNotFloodTheNextLinesWithColor() throws {
+        // ACC holds through a dropout on the burst; chasing it, it turned
+        // the following lines' color up as far as 20× (bands of saturated
+        // color behind big oxide flaws).
+        let input = texture { _, _ in (0.7, 0.45, 0.3) }
+        let src = patch(try render(input, ["vcr": 0])).chroma
+        let px = try render(input, ["vcr": 1, "tape_dropouts": 1, "head_wear": 0.8])
+        var worst = 0.0
+        for y in 20..<(A - 20) {
+            var c = 0.0
+            for x in 40..<(W - 40) { let q = yiq(px, x, y); c += (q.1 * q.1 + q.2 * q.2).squareRoot() }
+            worst = max(worst, c / Double(W - 80))
+        }
+        XCTAssertLessThan(worst, src * 1.6, "most saturated line \(worst) against \(src)")
+    }
+
+    func testFullWearIsFarPastTheRealisticWorst() throws {
+        // Full Wear should read as too much for all but the most extreme
+        // uses: the signal past the FM threshold, even on SP.
+        let input = texture { _, _ in (0.5, 0.5, 0.5) }
+        let realistic = patch(try render(input, ["vcr": 1, "tape_wear": asBefore("tape_wear", 1)])).noise
+        let full = patch(try render(input, ["vcr": 1, "tape_wear": 1])).noise
+        XCTAssertGreaterThan(full, realistic * 3, "\(realistic) → \(full)")
+    }
+
     func testEveryCopyIsRecordedAndPlayedAgain() throws {
         let input = texture { _, _ in (0.5, 0.5, 0.5) }
         let original = patch(try render(input, ["vcr": 1])).noise
@@ -268,5 +306,30 @@ final class VcrPlaybackTests: XCTestCase {
         }
         let hi = noise.max()!, lo = noise.min()!
         XCTAssertGreaterThan(hi, lo * 1.5, "alternate fields differ: \(noise)")
+    }
+
+    /// The damage knobs' top ends: up to half as calibrated on real tapes,
+    /// above it stronger (a wrecked tape at full); the tape choices still
+    /// damage a tape as much as before.
+    func testDamageKnobsStrengthenOnlyAboveHalf() {
+        for (key, gain) in TapeParams.topEndGains {
+            for k in stride(from: 0.0, through: 0.5, by: 0.05) {
+                XCTAssertEqual(TapeParams.topEnd(Float(k), gain), Float(k), "\(key) at \(k)")
+            }
+            XCTAssertEqual(TapeParams.topEnd(1, gain), 1 + gain, accuracy: 1e-6, key)
+            for amount in [0.6, 0.75, 0.9, 1.0] {
+                let knob = TapeParams.knob(forAmount: amount, gain: Double(gain))
+                XCTAssertLessThanOrEqual(knob, 1)
+                XCTAssertEqual(Double(TapeParams.topEnd(Float(knob), gain)), amount, accuracy: 1e-5, "\(key) \(amount)")
+            }
+        }
+        func tape(_ name: String) -> TapeParams {
+            TapeParams(GlitchSettings(values: VcrCondition.tapes.first { $0.name == name }!.values))
+        }
+        XCTAssertEqual(tape("Worn out").wear, 0.75, accuracy: 1e-5)
+        XCTAssertEqual(tape("Chewed").creases, 0.7, accuracy: 1e-5)
+        XCTAssertEqual(tape("Chewed").edge, 0.7, accuracy: 1e-5)
+        let worn = VcrCondition.decks.first { $0.name == "Worn transport" }!.values
+        XCTAssertEqual(TransportParams(GlitchSettings(values: worn)).flutter, 0.6, accuracy: 1e-5)
     }
 }

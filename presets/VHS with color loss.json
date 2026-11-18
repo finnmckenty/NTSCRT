@@ -55,14 +55,14 @@
       "tape_edge_damage" : 0.077438766891891886,
       "tape_generation" : 3,
       "tape_mold" : 0,
-      "tape_scratches" : 0.69246551238738729,
+      "tape_scratches" : 0.5274950731981981,
       "tape_seed" : 1,
       "tape_speed" : 2,
       "tape_sticky" : 0,
       "tape_vaseline" : 0,
       "tape_wear" : 0.29999999999999999,
       "tracking_offset" : 0,
-      "transport_flutter" : 0.59999999999999998,
+      "transport_flutter" : 0.5111111111111111,
       "vcr" : 1,
       "vertical_hold" : 0
     }

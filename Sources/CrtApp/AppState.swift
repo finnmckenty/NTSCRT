@@ -687,10 +687,10 @@ final class AppState {
     /// Downscale is width-only: the horizontal resolution is chosen (or
     /// picked from a console preset), and the height follows the source's
     /// aspect ratio so any input shape works.
-    var downscaleWidth: Int = 320     { didSet { markChainDirty(); noteChainInputEdited() } }
+    var downscaleWidth: Int = 640     { didSet { markChainDirty(); noteChainInputEdited() } }
     /// Selected preset label, purely cosmetic ("Custom" when hand-edited).
-    var downscalePreset: String = "VGA (320px)"
-    var downscaleMethod: DownscaleMethod = .nearest { didSet { markChainDirty(); noteChainInputEdited() } }
+    var downscalePreset: String = "VGA² (640px)"
+    var downscaleMethod: DownscaleMethod = .area { didSet { markChainDirty(); noteChainInputEdited() } }
 
     /// Derived from the source aspect (rounded to even lines).
     var downscaleHeight: Int {
@@ -701,8 +701,9 @@ final class AppState {
     // MARK: - view (preview-only display state)
 
     /// Master shader on/off toggle. When false, the preview shows the source
-    /// (or downscaled source) without any CRT shader applied.
-    var shaderEnabled: Bool = true { didSet { markChainDirty() } }
+    /// (or downscaled source) without any CRT shader applied. Off at launch
+    /// (Finn's defaults, 2026-11-17).
+    var shaderEnabled: Bool = false { didSet { markChainDirty() } }
 
     // MARK: - glitch (simulated TV receiver — CrtCore/Receiver.swift)
 
@@ -714,7 +715,8 @@ final class AppState {
     // edit bumps at once and timeline playback/scrubbing at most ten times a
     // second (see refreshPanels) — otherwise every row of the panel rebuilds
     // on every played frame.
-    @ObservationIgnored private var glitchValuesStore: [String: Double] = GlitchParam.defaultValues
+    @ObservationIgnored private var glitchValuesStore: [String: Double] =
+        GlitchParam.defaultValues.merging(AppState.startingVcr) { _, ours in ours }
     private var glitchRevision: Int = 0
     private(set) var glitchValues: [String: Double] {
         get { _ = glitchRevision; return glitchValuesStore }
@@ -1464,15 +1466,33 @@ final class AppState {
         }
     }
 
+    /// The VCR the app starts with (the VCR panel's Reset is still a new
+    /// tape in a clean deck): Finn's "new defaults" look, 2026-11-17 — an EP
+    /// third copy with some flaws and scratches, values exact.
+    static let startingVcr: [String: Double] = [
+        GlitchParam.vcrID: 1,
+        "tape_speed": 2, "tape_generation": 3,
+        "tape_wear": 0.1523092064065363, "tape_dropouts": 0.39689082029664796,
+        "tape_scratches": 0.5487225506756757, "tape_creases": 0.2496018770036929,
+        "tape_edge_damage": 0.062112894144144136, "tape_mold": 0.14560458896396397,
+        "head_wear": 0.07301008968609865, "head_switch": 6.000563063063063,
+        "back_tension": 0.7709740990990992,
+    ]
+
     /// The app's house VHS look, overlaid on ntsc-rs library defaults —
     /// Finn's dialed-in settings (2026-07-18; revised 2026-10-02 to match the
-    /// look he saved as defaults.json, values exact). Reset returns here.
+    /// look he saved as defaults.json, and 2026-11-17 to his "new defaults",
+    /// which leave ntsc-rs's own VHS, head switching and tracking noise to
+    /// the VCR stage; values exact). Reset returns here.
     private static let appNtscDefaults: [String: Any] = [
-        "filter_type": 0,                       // Constant K (softer)
-        "composite_preemphasis": 0.2753769054878048,
-        "composite_noise_intensity": 0.1391983173076923,
-        "composite_noise_frequency": 0.8576,
-        "composite_noise_detail": 2,
+        "filter_type": 1,                       // Butterworth (sharper)
+        "composite_preemphasis": 0,
+        "composite_noise_intensity": 0.1591702707237563,
+        "composite_noise_frequency": 0.28247526709401705,
+        "composite_noise_detail": 1,
+        "vhs_settings": false,
+        "head_switching": false,
+        "tracking_noise": false,
         "snow_intensity": 0,
         "video_scanline_phase_shift_offset": 3,
         "luma_smear": 0.6692,
@@ -1490,7 +1510,7 @@ final class AppState {
         "chroma_noise_intensity": 0.13054193376068376,
         "chroma_noise_frequency": 0.0777,
         "chroma_phase_error": 0.016,
-        "chroma_phase_noise_intensity": 0.029,
+        "chroma_phase_noise_intensity": 0.06609468482905982,
         "chroma_delay_horizontal": 1.7279639582876793,
         "chroma_delay_vertical": 2,
         "vhs_chroma_loss": 0.003639155982905983,

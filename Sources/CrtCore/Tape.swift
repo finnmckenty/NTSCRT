@@ -167,14 +167,50 @@ public struct TapeParams: Equatable {
     public init(_ s: GlitchSettings) {
         seed = UInt32(truncatingIfNeeded: Int(s["tape_seed"].rounded()) &* 7919 &+ 17)
         func u(_ k: String) -> Float { Float(min(1, max(0, s[k]))) }
-        wear = u("tape_wear")
-        dropouts = u("tape_dropouts")
-        scratches = u("tape_scratches")
-        creases = u("tape_creases")
-        edge = u("tape_edge_damage")
+        func amount(_ k: String) -> Float { Self.topEnd(u(k), Self.topEndGains[k] ?? 0) }
+        wear = amount("tape_wear")
+        dropouts = amount("tape_dropouts")
+        scratches = amount("tape_scratches")
+        creases = amount("tape_creases")
+        edge = amount("tape_edge_damage")
         mold = u("tape_mold")
         vaseline = u("tape_vaseline")
         sticky = u("tape_sticky")
+    }
+
+    /// How far past a realistic worst case each damage knob goes at full.
+    /// Up to half a knob is calibrated to real tapes; above, the amount
+    /// grows on a straight line to 1 + gain at full, so the top of the
+    /// range is a wrecked tape (the realistic maximum read as too weak:
+    /// measured on flat gray at a 320 downscale, full Oxide flaws went from
+    /// 2% of the picture damaged to 14%, Scratches 0% → 15%, Edge damage
+    /// 3% → 13%, Creases 2% → 5% with 14% peaks). Built-in looks and tape
+    /// choices were rescaled (`knob(forAmount:)`) to render as before.
+    /// Wear reaches 1.85× the realistic worst at full: the signal 18.5 dB
+    /// down, which takes the picture over the FM threshold (heavy noise on
+    /// SP; LP and EP lose sync and tear; 2× read as a touch too much). Its color is spared
+    /// (`DeckParams.colorBoost`), or that loss would turn it black and white
+    /// first.
+    public static let topEndGains: [String: Float] = [
+        "tape_dropouts": 2, "tape_scratches": 3, "tape_creases": 4,
+        "tape_edge_damage": 0.45, "tape_wear": 0.85,
+        // The deck's Flutter (Transport) too: at 5× the picture's verticals
+        // go ragged and wavy; at the realistic most they barely moved.
+        "transport_flutter": 4,
+    ]
+
+    /// The knob as is up to half; above, it rises on a straight line to
+    /// 1 + `gain` at full.
+    public static func topEnd(_ k: Float, _ gain: Float) -> Float {
+        guard k > 0.5 else { return k }
+        return k + gain * (k - 0.5) / 0.5
+    }
+
+    /// The knob setting that gives `amount` (the inverse of `topEnd`): what
+    /// a value from before the top-end gains becomes, to look the same.
+    public static func knob(forAmount amount: Double, gain: Double) -> Double {
+        guard amount > 0.5 else { return amount }
+        return (amount + gain) / (1 + 2 * gain)
     }
 
     /// Remanent magnetization relative to a new tape: wear loses up to 10 dB.
@@ -258,8 +294,10 @@ public enum TapeSurface {
 
     /// The tape at `p`. `detail` includes flaws much smaller than a track
     /// (pinholes, scratches), which only matter to the picture, not to sync
-    /// or to what the heads pick up.
-    public static func at(_ p: TapePosition, _ t: TapeParams, detail: Bool = true) -> TapePoint {
+    /// or to what the heads pick up. `flakes: false` leaves out the flakes
+    /// too, for the deck's color loops, which hold through a dropout.
+    public static func at(_ p: TapePosition, _ t: TapeParams, detail: Bool = true,
+                          flakes: Bool = true) -> TapePoint {
         let s = t.seed
         let y = p.y
         var lift = t.roughness
@@ -296,7 +334,7 @@ public enum TapeSurface {
         }
 
         // Flakes: patches of coating 40–320 µm across gone, shedding.
-        if t.flakeChance > 0 {
+        if flakes && t.flakeChance > 0 {
             let (cx, _) = cell(p, 10)
             let cy = Int32(y.rounded(.down))
             for j in -1...1 {
@@ -306,7 +344,9 @@ public enum TapeSurface {
                     let ddx = dx(p, cell: ci, q: 10, frac: uni(s, 22, ci, cj)) * 0.1
                     let ddy = Float(cj) + uni(s, 23, ci, cj) - y
                     let u = uni(s, 24, ci, cj)
-                    let r = 0.04 * powf(8, u * u)
+                    // Past the realistic range (dropouts over 1: the top of
+                    // the knob) the flakes grow, since a square holds one.
+                    let r = 0.04 * powf(8, u * u) * (1 + 0.6 * max(0, t.dropouts - 1))
                     let e = 0.6 + 0.8 * uni(s, 25, ci, cj)
                     let d = ((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e)).squareRoot()
                     if d < r * 1.5 {

@@ -147,13 +147,14 @@ public struct VcrLine: Equatable {
     /// (track pitches), and how that changes per mm along the track.
     public var delta0: Float
     public var deltaSlope: Float
-    var pad: Float = 0
+    /// What the color-under is raised by on playback (`DeckParams.colorBoost`).
+    public var colorBoost: Float
 
     public init(originBase: Int32, originOffset: Float, along0: Float, spacing: Float, grease: Float,
-                gain: Float, head: UInt32, delta0: Float = 0, deltaSlope: Float = 0) {
+                gain: Float, head: UInt32, delta0: Float = 0, deltaSlope: Float = 0, colorBoost: Float = 1) {
         self.originBase = originBase; self.originOffset = originOffset; self.along0 = along0
         self.spacing = spacing; self.grease = grease; self.gain = gain; self.head = head
-        self.delta0 = delta0; self.deltaSlope = deltaSlope
+        self.delta0 = delta0; self.deltaSlope = deltaSlope; self.colorBoost = colorBoost
     }
 }
 
@@ -515,7 +516,7 @@ public final class VcrStage {
     }
     struct VcrLine {
         int originBase; float originOffset; float along0; float spacing;
-        float grease; float gain; uint head; float delta0; float deltaSlope; float pad;
+        float grease; float gain; uint head; float delta0; float deltaSlope; float colorBoost;
     };
 
     // (cos, sin) of an angle a turned on by q quarter turns.
@@ -629,7 +630,7 @@ public final class VcrStage {
                 float ddx = tdx(p, ci, 10, tuni(s, 22u, ci, cj)) * 0.1;
                 float ddy = float(cj) + tuni(s, 23u, ci, cj) - y;
                 float u = tuni(s, 24u, ci, cj);
-                float r = 0.04 * pow(8.0, u * u);
+                float r = 0.04 * pow(8.0, u * u) * (1.0 + 0.6 * max(0.0, U.dropouts - 1.0));
                 float e = 0.6 + 0.8 * tuni(s, 25u, ci, cj);
                 float d = sqrt((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e));
                 if (d < r * 1.5) out *= sstep(r * 0.8, r, d);
@@ -1030,11 +1031,18 @@ public final class VcrStage {
         // Color-under: mix down, turning this line's phase back the way the
         // head's own track turned it, then zero-phase low-pass twice (8th
         // order).
+        // Tape and head wear don't fade the color (DeckParams.colorBoost):
+        // the color path hears this line's playback as if the tape and head
+        // were new, against the same head noise (recomputed, the same
+        // samples vcr_play added). The picture keeps its worn signal.
         int q = turns(lines[y].head == 0u ? 1 : -1, int(y));
+        float boost = lines[y].colorBoost;
         for (uint i = 0; i < N; i++) {
             float a = U.cuStep * float(i);
             float2 cs = quarter(cos(a), sin(a), q);
-            chroma[row + i] = pb[row + i] * float2(cs.x, -cs.y);
+            float x = pb[row + i];
+            if (boost != 1.0) x = boost * x - (boost - 1.0) * U.noise * gauss(U.seed ^ 0x51u, U.field, int(i), int(y));
+            chroma[row + i] = x * float2(cs.x, -cs.y);
         }
         for (int pass = 0; pass < 2; pass++) {
             float4 sr = float4(0.0), si = float4(0.0);
@@ -1082,6 +1090,7 @@ public final class VcrStage {
 
     // ---- 7: ACC, APC and color killer, down the field ----
     kernel void vcr_acc(constant VcrU& U [[buffer(0)]],
+                        device const float* luma [[buffer(7)]],
                         device const float2* burst [[buffer(9)]],
                         device float4* color [[buffer(10)]],
                         uint tid [[thread_position_in_grid]])
@@ -1091,18 +1100,30 @@ public final class VcrStage {
         float nominal = U.burstAmp;
         float gain = 1.0, phase = 0.0, killer = 1.0;
         bool on = true;
+        uint b0 = uint((BURST_S + 0.3) / U.dt), b1 = min(U.n, uint((BURST_E - 0.3) / U.dt) + 1u);
         for (uint y = 0; y < U.rows; y++) {
-            float2 b = burst[y];
-            float mag = length(b);
-            // Phase error against the reference burst direction.
-            float err = atan2(ref.x * b.y - ref.y * b.x, ref.x * b.x + ref.y * b.y);
-            if (mag > 0.08 * nominal) phase += 0.35 * (err - phase);
-            gain += 0.3 * (nominal / max(mag, 0.05 * nominal) - gain);
-            gain = clamp(gain, 0.3, 20.0);
-            // The killer cuts chroma once the burst is ~26 dB down.
-            killer += 0.2 * (clamp(mag / nominal, 0.0, 1.0) - killer);
-            if (on && killer < 0.05) on = false;
-            else if (!on && killer > 0.08) on = true;
+            // A dropout over the burst (on this line or the one the comb
+            // filter averaged it with, as the dropout detector flagged it):
+            // the loops hold rather than chase a burst that isn't there —
+            // chasing it, ACC turned the next lines' color up as far as 20×
+            // (bands of saturated color behind every big flaw).
+            bool lost = false;
+            uint prev = y > 0u ? y - 1u : y;
+            for (uint i = b0; i < b1 && !lost; i++)
+                lost = luma[y * U.n + i] > 5000.0 || luma[prev * U.n + i] > 5000.0;
+            if (!lost) {
+                float2 b = burst[y];
+                float mag = length(b);
+                // Phase error against the reference burst direction.
+                float err = atan2(ref.x * b.y - ref.y * b.x, ref.x * b.x + ref.y * b.y);
+                if (mag > 0.08 * nominal) phase += 0.35 * (err - phase);
+                gain += 0.3 * (nominal / max(mag, 0.05 * nominal) - gain);
+                gain = clamp(gain, 0.3, 20.0);
+                // The killer cuts chroma once the burst is ~26 dB down.
+                killer += 0.2 * (clamp(mag / nominal, 0.0, 1.0) - killer);
+                if (on && killer < 0.05) on = false;
+                else if (!on && killer > 0.08) on = true;
+            }
             color[y] = float4(cos(-phase), sin(-phase), on ? gain : 0.0, 0.0);
         }
     }

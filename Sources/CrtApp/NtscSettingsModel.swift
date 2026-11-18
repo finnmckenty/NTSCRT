@@ -30,6 +30,19 @@ struct NtscSetting: Identifiable {
     /// when a look carries them, so older looks render as they always did.
     static let retiredVHS: Set<String> = ["head_switching", "tracking_noise", "vhs_settings"]
 
+    /// Signal-path details that read as doing nothing in the panel: the
+    /// noise seed only reshuffles the same noise, the phase shifts only move
+    /// the dot-crawl pattern, and the filters change fine color detail too
+    /// subtly to judge by eye (measured 2026-11-17; removing them from the
+    /// signal path saves under 1 ms of a 12 ms 1080p frame, so they stay).
+    /// Not shown in the panel; looks, keyframes, the command line and the
+    /// MCP server still read and apply them.
+    static let hiddenFromPanel: Set<String> = [
+        "random_seed", "input_luma_filter", "chroma_lowpass_in",
+        "video_scanline_phase_shift", "video_scanline_phase_shift_offset",
+        "chroma_demodulation", "vhs_chroma_vert_blend", "chroma_lowpass_out",
+    ]
+
     static func parse(descriptorsJSON: String) -> [NtscSetting] {
         guard let data = descriptorsJSON.data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
@@ -42,6 +55,21 @@ struct NtscSetting: Identifiable {
     ///
     /// Presentation only — the `name` keys, ranges and values are untouched,
     /// so preset JSON still round-trips with the ntsc-rs desktop app.
+    /// Choices shown under the app's own names, in this order (indices are
+    /// ntsc-rs's, so values and preset JSON are unchanged).
+    static let optionRelabels: [String: [(label: String, index: Int)]] = [
+        "filter_type": [("Sharper", 1), ("Softer", 0)],
+    ]
+    /// ntsc-rs's names for those choices, still accepted from the command line
+    /// and AI tools.
+    static let legacyOptionLabels: [String: [String: Int]] = [
+        "filter_type": ["Butterworth (sharper)": 1, "Butterworth": 1,
+                        "Constant K (blurry)": 0, "Constant K": 0],
+    ]
+    static let descriptions: [String: String] = [
+        "filter_type": "How the signal's filters treat detail: Sharper keeps more of it; Softer blurs the picture more.",
+    ]
+
     static func houseLayout(_ settings: [NtscSetting]) -> [NtscSetting] {
         // "Scale" multiplies the whole signal stage, so it reads to a user as
         // the master intensity even though ntsc-rs frames it as a scale.
@@ -49,6 +77,9 @@ struct NtscSetting: Identifiable {
             "scale_settings": "Intensity",
             "bandwidth_scale": "Horizontal intensity",
             "vertical_scale": "Vertical intensity",
+            // Nobody choosing a look knows or cares what Butterworth and
+            // constant-k filters are.
+            "filter_type": "Signal quality",
         ]
         // ntsc-rs allows these up to 8, but past ~3 the effect is mush — the
         // useful values all live low, so the slider spends its travel there.
@@ -65,12 +96,17 @@ struct NtscSetting: Identifiable {
             if case .group(let kids) = s.kind {
                 kind = .group(children: kids.map(relabel))
             }
+            if case .enumeration(let opts) = s.kind, let names = optionRelabels[s.name] {
+                kind = .enumeration(options: names.compactMap { n in
+                    opts.contains { $0.index == n.index } ? (label: n.label, index: n.index) : nil
+                })
+            }
             if case .float(_, _, let log) = s.kind, let r = rangeOverrides[s.name] {
                 kind = .float(min: r.min, max: r.max, logarithmic: log)
             }
             return NtscSetting(name: s.name,
                                label: relabels[s.name] ?? s.label,
-                               description: s.description,
+                               description: descriptions[s.name] ?? s.description,
                                kind: kind)
         }
         var out = settings.map(relabel)

@@ -32,6 +32,24 @@ public struct DeckParams: Equatable {
     /// The head's gap length, µm: 0.3 new, eroding longer with wear.
     public func gap(_ h: Int) -> Float { 0.3 + 0.35 * wear(h) }
 
+    /// How much the deck's color path raises the color-under (against the
+    /// same head noise) so that tape wear and head wear don't fade the
+    /// color. It undoes exactly what they take from the 629 kHz carrier: the
+    /// tape's lost remanence and roughness, the worn head's efficiency, tip
+    /// spacing and gap. People turn wear up for a worn picture, not a
+    /// black-and-white one. The picture keeps its worn signal; flaws,
+    /// scratches, creases and edge damage still take the color where they
+    /// are. A mismatched pair's extra wear on head 1 isn't undone.
+    public func colorBoost(_ h: Int, tape: TapeParams) -> Float {
+        let w = min(wear(h), wear)
+        let mhz = VcrChannel.colorUnderMHz
+        let worn = VcrChannel.channelGain(mhz: mhz, spacing: Double(0.3 * w + 0.1 * tape.wear),
+                                          gap: Double(0.3 + 0.35 * w))
+        let new = VcrChannel.channelGain(mhz: mhz, spacing: 0, gap: 0.3)
+        let lost = tape.remanence * powf(10, -w * 10 / 20) * Float(worn / new)
+        return 1 / max(lost, 1e-3)
+    }
+
     /// Dirt baked onto each head (µm of spacing) — there until cleaned,
     /// unlike the clogs that come and go. The two heads carry different
     /// amounts.

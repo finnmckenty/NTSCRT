@@ -712,7 +712,7 @@ public final class ReceiverSimulator {
     /// it reads off tracks of its own azimuth, and the crosstalk off the
     /// others — through the tape there, the head's own condition, and how
     /// it sits across the tracks.
-    func carrier(_ j: Int64, u: Double, mhz: Double) -> (own: Double, crosstalk: Double) {
+    func carrier(_ j: Int64, u: Double, mhz: Double, flakes: Bool = true) -> (own: Double, crosstalk: Double) {
         let read = trackPlace(j, u: u)
         let h = head(j)
         let heads = deck.heads(forField: read.field)
@@ -721,10 +721,11 @@ public final class ReceiverSimulator {
         let delta = headDelta(j, along: read.along, track: read.field)
         let p = TapeSurface.at(TapeGeometry.point(field: read.field, along: read.along,
                                                   across: -delta * fmt.trackPitch, format: fmt),
-                               knobs.tape, detail: false)
+                               knobs.tape, detail: false, flakes: flakes)
         let d = Double(p.lift + dk.wearSpacing(h) + dk.baselineDirt(h, seed: knobs.tape.seed)
                        + heads[h].debris + max(p.film, heads[h].grease)) + slackSpacing(read.along)
-        let a = Double(p.output * dk.efficiency(h)) * VcrChannel.channelGain(mhz: mhz, spacing: d, gap: Double(dk.gap(h)))
+        var a = Double(p.output * dk.efficiency(h)) * VcrChannel.channelGain(mhz: mhz, spacing: d, gap: Double(dk.gap(h)))
+        if mhz < 1 { a *= Double(dk.colorBoost(h, tape: knobs.tape)) }
         let r = fmt.read(delta: delta)
         let shares = mhz < 1 ? r.color : r.fm
         var own = 0.0, cross = 0.0
@@ -757,10 +758,12 @@ public final class ReceiverSimulator {
     /// The share of line j's color burst the deck passes on: its color
     /// killer cuts out when the color-under carrier is lost (about 30 dB
     /// down), and keeps the burst up (ACC) until then. Crosstalk from the
-    /// other azimuth's tracks the comb filter cancels.
+    /// other azimuth's tracks the comb filter cancels. A flake over the
+    /// burst is a dropout, which the deck's ACC holds through (vcr_acc):
+    /// left in, every big flake turned a line's color up or off.
     private func burstSurviving(_ j: Int64) -> Double {
         guard knobs.vcr else { return 1 }
-        let a = carrier(j, u: 6.5, mhz: VcrChannel.colorUnderMHz).own
+        let a = carrier(j, u: 6.5, mhz: VcrChannel.colorUnderMHz, flakes: false).own
         let db = 20 * log10(max(1e-6, a))
         let t = min(1, max(0, (db + 34) / 8))
         return t * t * (3 - 2 * t)
@@ -788,7 +791,8 @@ public final class ReceiverSimulator {
                 grease: heads[h].grease,
                 gain: k.deck.efficiency(h),
                 head: UInt32(h),
-                delta0: Float(d0), deltaSlope: Float(d1 - d0)))
+                delta0: Float(d0), deltaSlope: Float(d1 - d0),
+                colorBoost: k.deck.colorBoost(h, tape: k.tape)))
         }
         var plan = VcrFieldPlan(lines: lines, tape: k.tape, deck: k.deck, format: fmt)
         if k.generations > 0 {

@@ -220,6 +220,13 @@ public struct GlitchParam: Identifiable, Sendable {
 
 /// A named condition for the VCR panel's Tape and Deck pickers: a starting
 /// point for that group's knobs, which can then be adjusted.
+/// The knob setting that damages a tape as `amount` did before the damage
+/// knobs' top ends were strengthened (TapeParams.topEndGains), for values
+/// that must keep their look: the tape choices and migrated old looks.
+func asBefore(_ key: String, _ amount: Double) -> Double {
+    TapeParams.knob(forAmount: amount, gain: Double(TapeParams.topEndGains[key] ?? 0))
+}
+
 public struct VcrCondition: Identifiable, Sendable {
     public let name: String
     public let help: String
@@ -240,7 +247,7 @@ public struct VcrCondition: Identifiable, Sendable {
         VcrCondition(name: "Used", help: "A rental: played a few dozen times.",
                      values: ["tape_wear": 0.3, "tape_dropouts": 0.15, "tape_scratches": 0.1]),
         VcrCondition(name: "Worn out", help: "Played to death in a garage for twenty years.",
-                     values: ["tape_wear": 0.75, "tape_dropouts": 0.5, "tape_scratches": 0.45,
+                     values: ["tape_wear": asBefore("tape_wear", 0.75), "tape_dropouts": 0.5, "tape_scratches": 0.45,
                               "tape_creases": 0.15, "tape_edge_damage": 0.2]),
         VcrCondition(name: "Moldy", help: "Stored somewhere damp.",
                      values: ["tape_wear": 0.5, "tape_dropouts": 0.35, "tape_mold": 0.7,
@@ -249,7 +256,8 @@ public struct VcrCondition: Identifiable, Sendable {
                      values: ["tape_wear": 0.2, "tape_vaseline": 0.6]),
         VcrCondition(name: "Chewed", help: "Eaten by a deck and wound back by hand.",
                      values: ["tape_wear": 0.4, "tape_dropouts": 0.3, "tape_scratches": 0.4,
-                              "tape_creases": 0.7, "tape_edge_damage": 0.7]),
+                              "tape_creases": asBefore("tape_creases", 0.7),
+                              "tape_edge_damage": asBefore("tape_edge_damage", 0.7)]),
         VcrCondition(name: "Sticky", help: "Its binder is breaking down: it squeals, stutters and sheds.",
                      values: ["tape_wear": 0.45, "tape_dropouts": 0.2, "tape_sticky": 0.75]),
         VcrCondition(name: "Bootleg", help: "A copy of a copy, squeezed onto a tape at EP.",
@@ -268,7 +276,7 @@ public struct VcrCondition: Identifiable, Sendable {
                               "head_mismatch": 0.35, "head_switch": 1.5, "transport_flutter": 0.2]),
         VcrCondition(name: "Worn transport", help: "Stretched belts and a slack back-tension band.",
                      values: ["head_wear": 0.2, "head_switch": 2, "back_tension": -0.5,
-                              "transport_flutter": 0.6]),
+                              "transport_flutter": asBefore("transport_flutter", 0.6)]),
         VcrCondition(name: "Neglected", help: "Worn, filthy, and still in use.",
                      values: ["head_wear": 0.5, "head_dirt": 0.55, "dirt_buildup": 0.8,
                               "head_mismatch": 0.5, "head_switch": 2.5, "back_tension": -0.35,
@@ -362,11 +370,11 @@ public struct GlitchSettings: Equatable, Sendable {
                 usedTape = true
             }
             if let c = v.removeValue(forKey: "crinkle"), c > 0 {
-                v["tape_creases"] = min(1, c)
+                v["tape_creases"] = asBefore("tape_creases", min(1, c))
                 usedTape = true
             }
             if let d = v.removeValue(forKey: "dropouts"), d > 0 {
-                v["tape_dropouts"] = min(1, d)
+                v["tape_dropouts"] = asBefore("tape_dropouts", min(1, d))
                 usedTape = true
             }
             for k in kept {
@@ -379,7 +387,7 @@ public struct GlitchSettings: Equatable, Sendable {
             v["tracking_offset"] = e > 1e-9 ? min(1, 0.45 + 0.4 * e) : 0
         }
         if let j = v.removeValue(forKey: "timebase_jitter") {
-            v["transport_flutter"] = min(1, max(0, j / 2.5))
+            v["transport_flutter"] = asBefore("transport_flutter", min(1, max(0, j / 2.5)))
         }
         return v
     }

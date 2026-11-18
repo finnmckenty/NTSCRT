@@ -41,7 +41,9 @@ struct NtscPanel: View {
     }
 
     private var shown: [NtscSetting] {
-        state.ntscDescriptors.filter { !NtscSetting.retiredVHS.contains($0.name) }
+        state.ntscDescriptors.filter {
+            !NtscSetting.retiredVHS.contains($0.name) && !NtscSetting.hiddenFromPanel.contains($0.name)
+        }
     }
 
     /// The retired VHS emulation groups this look still has switched on.

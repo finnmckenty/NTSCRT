@@ -305,6 +305,11 @@ struct LookSettings {
                let hit = options.first(where: { $0.label.caseInsensitiveCompare(name) == .orderedSame }) {
                 return hit.index
             }
+            if let name = raw as? String,
+               let i = NtscSetting.legacyOptionLabels[s.name]?
+                   .first(where: { $0.key.caseInsensitiveCompare(name) == .orderedSame })?.value {
+                return i
+            }
             if let n = Self.number(raw), options.contains(where: { $0.index == Int(n) }) { return Int(n) }
             throw CLIError(message: "NTSC \(s.name) is one of: \(options.map(\.label).joined(separator: ", ")).")
         case .section:
