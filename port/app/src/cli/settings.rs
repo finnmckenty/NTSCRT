@@ -266,6 +266,9 @@ impl LookSettings {
                     if let Some((_, i)) = options.iter().find(|(l, _)| l.eq_ignore_ascii_case(label)) {
                         return Ok(Value::from(*i));
                     }
+                    if let Some(i) = ntscrt_engine::legacy_option(name, label) {
+                        return Ok(Value::from(i));
+                    }
                 }
                 if let Some(n) = number(raw) {
                     if options.iter().any(|(_, i)| *i as f64 == n) {

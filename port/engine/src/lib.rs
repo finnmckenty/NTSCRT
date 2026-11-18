@@ -15,7 +15,7 @@ mod ntsc_ui;
 pub mod preview;
 pub mod timeline;
 pub use look::{write_look, Look, LookState, TimelineState};
-pub use ntsc_ui::{ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting};
+pub use ntsc_ui::{legacy_option, ntsc_default_values, ntsc_settings, ntsc_values_json, NtscKind, NtscSetting, HIDDEN_FROM_PANEL};
 pub use ntscrt_codec as codec;
 pub use howl::feedback::HowlRender;
 pub use howl::HowlSettings;

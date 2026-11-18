@@ -43,6 +43,7 @@ vcr-used 1.3 vcr=1 tape_wear=0.3 tape_dropouts=0.15 tape_scratches=0.1
 vcr-ep 1.3 vcr=1 tape_speed=2 tape_wear=0.5 tape_scratches=0.7 tape_sticky=0.4 back_tension=0.5 tracking_offset=0.4
 vcr-dub 1.3 vcr=1 tape_generation=2 tape_speed=1 tape_wear=0.35 tape_dropouts=0.15
 vcr-search 1.3 vcr=1 search_speed=3 transport_flutter=0.5
+vcr-wrecked 1.3 vcr=1 tape_speed=2 tape_generation=1 tape_wear=0.9 tape_dropouts=0.9 tape_scratches=0.8 head_wear=0.6 tape_edge_damage=0.4 transport_flutter=0.8
 CASES
 rm -rf "$tmp"
 echo "made $(ls $plans/*.json | wc -l) plans, $(ls $renders/*.png | wc -l) renders"

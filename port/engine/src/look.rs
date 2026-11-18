@@ -96,7 +96,7 @@ impl Look {
                 let used = std::iter::once(&values).chain(&keyed).any(|v| crate::glitch::GlitchSettings::migrated(v)[crate::glitch::VCR_ID] == 1.0);
                 vcr_from_legacy = Some(if used && look.glitch_enabled { 1.0 } else { 0.0 });
             }
-            let mut migrated = crate::glitch::GlitchSettings::migrated(&values);
+            let mut migrated = crate::glitch::GlitchSettings::migrated(&crate::glitch::GlitchSettings::upgraded(&values, look.version));
             if let Some(v) = vcr_from_legacy {
                 migrated.insert(crate::glitch::VCR_ID.into(), v);
             }
@@ -134,7 +134,7 @@ impl Look {
                                 // look's.
                                 let floats: std::collections::BTreeMap<String, f64> = g.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
                                 let had_vcr = floats.contains_key(crate::glitch::VCR_ID);
-                                let mut m = crate::glitch::GlitchSettings::migrated(&floats);
+                                let mut m = crate::glitch::GlitchSettings::migrated(&crate::glitch::GlitchSettings::upgraded(&floats, look.version));
                                 if !had_vcr {
                                     m.insert(crate::glitch::VCR_ID.into(), vcr_from_legacy.unwrap_or_else(|| look.glitch_values.get(crate::glitch::VCR_ID)));
                                 }
@@ -263,7 +263,9 @@ pub fn write_look(base: Option<&Map<String, Value>>, s: &LookState) -> String {
     let mut look = base.cloned().unwrap_or_default();
     // A look without a timeline section loads fine on the Mac; with one from
     // the base, its keys are kept.
-    look.insert("version".into(), Value::from(2));
+    // 3: Wear, Oxide flaws, Scratches and Edge damage on their measured
+    // curves (older looks are converted on loading: GlitchSettings::upgraded).
+    look.insert("version".into(), Value::from(3));
     look.insert(
         "downscale".into(),
         serde_json::json!({
@@ -357,7 +359,7 @@ mod tests {
         );
         let back = Look::parse(&out).unwrap();
         assert_eq!(back.crop.map(|c| (c.ratio, c.x)), Some((Ratio::new(9, 16), 0.25)));
-        assert_eq!(back.version, 2);
+        assert_eq!(back.version, 3);
         assert_eq!(back.downscale_width, Some(320));
         assert_eq!(back.shader_params["x"], 2.0);
         assert_eq!(back.raw["glitch"], look.raw["glitch"], "kept");

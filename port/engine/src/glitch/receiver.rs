@@ -13,7 +13,7 @@ use std::f64::consts::PI;
 
 use super::deck::{DeckParams, DeckSimulator, DeckSnapshot};
 use super::params::GlitchSettings;
-use super::tape::{folds, smoothstep, tape_at, Fold, TapeGeometry, TapeParams, TapePosition};
+use super::tape::{as_before, folds, smoothstep, tape_at_with, Fold, TapeGeometry, TapeParams, TapePosition};
 use super::transport::{TransportParams, TransportSimulator, TransportSnapshot};
 use super::vcr::{carrier_to_noise_db, channel_gain, color_under_mhz, VcrFieldPlan, VcrLine, SYNC_TIP_MHZ};
 
@@ -925,15 +925,24 @@ impl Simulator {
     /// it reads off tracks of its own azimuth, and the crosstalk off the
     /// others.
     pub(crate) fn carrier(&self, j: i64, u: f64, mhz: f64) -> (f64, f64) {
+        self.carrier_with(j, u, mhz, true)
+    }
+
+    /// `carrier`; `flakes: false` leaves the tape's flakes out (the burst the
+    /// deck's ACC holds through).
+    pub(crate) fn carrier_with(&self, j: i64, u: f64, mhz: f64, flakes: bool) -> (f64, f64) {
         let (field, along) = self.track_place(j, u);
         let h = self.head(j) as usize;
         let heads = self.deck.heads(field);
         let dk = &self.knobs.deck;
         let fmt = self.knobs.transport.format;
         let delta = self.head_delta(j, along, field);
-        let p = tape_at(TapeGeometry::point(field, along, -delta * fmt.track_pitch(), fmt), &self.knobs.tape, false);
+        let p = tape_at_with(TapeGeometry::point(field, along, -delta * fmt.track_pitch(), fmt), &self.knobs.tape, false, flakes);
         let d = (p.lift + dk.wear_spacing(h) + dk.baseline_dirt(h, self.knobs.tape.seed) + heads[h].debris + p.film.max(heads[h].grease)) as f64 + self.slack_spacing(along);
-        let a = (p.output * dk.efficiency(h)) as f64 * channel_gain(mhz, d, dk.gap(h) as f64);
+        let mut a = (p.output * dk.efficiency(h)) as f64 * channel_gain(mhz, d, dk.gap(h) as f64);
+        if mhz < 1.0 {
+            a *= dk.color_boost(h, &self.knobs.tape) as f64;
+        }
         let (center, fm, color) = fmt.read(delta);
         let shares = if mhz < 1.0 { color } else { fm };
         let (mut own, mut cross) = (0.0, 0.0);
@@ -972,7 +981,10 @@ impl Simulator {
         if !self.knobs.vcr {
             return 1.0;
         }
-        let a = self.carrier(j, 6.5, color_under_mhz()).0;
+        // A flake over the burst is a dropout, which the deck's ACC holds
+        // through (vcr_acc): left in, every big flake turned a line's color
+        // up or off.
+        let a = self.carrier_with(j, 6.5, color_under_mhz(), false).0;
         let t = ((20.0 * a.max(1e-6).log10() + 34.0) / 8.0).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
@@ -1002,7 +1014,7 @@ impl Simulator {
                     head: h as u32,
                     delta0: d0 as f32,
                     delta_slope: (d1 - d0) as f32,
-                    pad: 0.0,
+                    color_boost: k.deck.color_boost(h, &k.tape),
                 }
             })
             .collect();
@@ -1027,7 +1039,7 @@ impl Simulator {
     /// playback): a decent tape in a decent deck, at this tape's speed.
     fn dub_plan(&self, f: i64, g: i64) -> VcrFieldPlan {
         let mut settings = GlitchSettings::default();
-        for (key, v) in [("tape_seed", self.knobs.settings.get("tape_seed").round() + (1000 * g) as f64), ("tape_wear", 0.1), ("tape_dropouts", 0.05), ("head_wear", 0.1)] {
+        for (key, v) in [("tape_seed", self.knobs.settings.get("tape_seed").round() + (1000 * g) as f64), ("tape_wear", as_before("tape_wear", 0.1)), ("tape_dropouts", as_before("tape_dropouts", 0.05)), ("head_wear", 0.1)] {
             settings.values.insert(key.into(), v);
         }
         let (tape, deck) = (TapeParams::new(&settings), DeckParams::new(&settings));

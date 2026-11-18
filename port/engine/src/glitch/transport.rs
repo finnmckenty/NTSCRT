@@ -43,7 +43,10 @@ impl TransportParams {
         let k = s.get("tracking_offset").clamp(-1.0, 1.0);
         Self {
             tension: s.get("back_tension").clamp(-1.0, 1.0),
-            flutter: s.get("transport_flutter").clamp(0.0, 1.0),
+            // On the damage knobs' curve (tape::top_end): realistic up to half,
+            // then up to 5x (at its realistic most the TV's AFC rode out
+            // nearly all of it).
+            flutter: super::tape::amount("transport_flutter", s.get("transport_flutter").clamp(0.0, 1.0) as f32) as f64,
             tracking: if k < 0.0 { -1.0 } else { 1.0 } * (1.0 - (1.0 - k.abs()) * (1.0 - k.abs())),
             search: s.get("search_speed").clamp(1.0, 9.0),
             format: TapeFormat::new(s),
@@ -343,7 +346,11 @@ mod tests {
         // Worn oxide reads weaker everywhere, but the control amplifier has
         // gain to spare: the servo holds (the Mac's 0.25.1 fix).
         let l = Raster::new(320, 240).total_lines();
-        for extra in [&[("tape_wear", 1.0)][..], &[("tape_wear", 0.7), ("tape_dropouts", 0.45), ("tape_scratches", 0.5), ("tape_edge_damage", 0.35)]] {
+        // (The second: a realistic worn tape, as amounts on the knobs' curves.)
+        use crate::glitch::tape::as_before;
+        let worn = [("tape_wear", as_before("tape_wear", 0.7)), ("tape_dropouts", as_before("tape_dropouts", 0.45)),
+                    ("tape_scratches", as_before("tape_scratches", 0.5)), ("tape_edge_damage", as_before("tape_edge_damage", 0.35))];
+        for extra in [&[("tape_wear", 1.0)][..], &worn[..]] {
             let mut t = TransportSimulator::new(l, Simulator::DEFAULT_SEED, &settings(extra));
             t.reset();
             let mut worst: f64 = 0.0;

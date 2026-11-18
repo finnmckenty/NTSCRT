@@ -215,9 +215,20 @@ pub const DECKS: [VcrCondition; 5] = [
     },
 ];
 
+/// Damage knobs whose slider follows a curve (tape::amount): the tape and
+/// deck choices store their realistic amounts, read through `as_before`.
+const ON_CURVES: [&str; 6] = ["tape_wear", "tape_dropouts", "tape_scratches", "tape_edge_damage", "tape_creases", "transport_flutter"];
+
 impl VcrCondition {
-    fn value(&self, key: &str) -> f64 {
-        self.values.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).or_else(|| param(key).map(|p| p.default)).unwrap_or(0.0)
+    /// The slider value this condition sets for `key`. Its damage knobs are
+    /// stored as the amounts the tape had before the curves (Mac: asBefore).
+    pub fn value(&self, key: &str) -> f64 {
+        let raw = self.values.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+        match raw {
+            Some(v) if ON_CURVES.contains(&key) => super::tape::as_before(key, v),
+            Some(v) => v,
+            None => param(key).map(|p| p.default).unwrap_or(0.0),
+        }
     }
 
     /// The condition among `list` whose values `s` matches exactly, if any.
@@ -316,11 +327,11 @@ impl GlitchSettings {
                 used = true;
             }
             if let Some(c) = v.remove("crinkle").filter(|c| *c > 0.0) {
-                v.insert("tape_creases".into(), c.min(1.0));
+                v.insert("tape_creases".into(), super::tape::as_before("tape_creases", c.min(1.0)));
                 used = true;
             }
             if let Some(d) = v.remove("dropouts").filter(|d| *d > 0.0) {
-                v.insert("tape_dropouts".into(), d.min(1.0));
+                v.insert("tape_dropouts".into(), super::tape::as_before("tape_dropouts", d.min(1.0)));
                 used = true;
             }
             for k in ["head_switch", "timebase_jitter", "tracking", "search_speed"] {
@@ -335,7 +346,25 @@ impl GlitchSettings {
             v.insert("tracking_offset".into(), if e > 1e-9 { (0.45 + 0.4 * e).min(1.0) } else { 0.0 });
         }
         if let Some(j) = v.remove("timebase_jitter") {
-            v.insert("transport_flutter".into(), (j / 2.5).clamp(0.0, 1.0));
+            v.insert("transport_flutter".into(), super::tape::as_before("transport_flutter", (j / 2.5).clamp(0.0, 1.0)));
+        }
+        v
+    }
+
+    /// A look's values as this version reads them, from a look saved as
+    /// `look_version`: before version 3 (0.27.0 and earlier) Wear, Oxide
+    /// flaws, Scratches and Edge damage followed straight lines above half
+    /// (tape::curve); each becomes the slider position that damages the tape
+    /// the same. Run before `migrated` (older looks' tape keys come out of
+    /// that already on the curves). Mac: GlitchSettings.upgraded.
+    pub fn upgraded(values: &BTreeMap<String, f64>, look_version: i64) -> BTreeMap<String, f64> {
+        let mut v = values.clone();
+        if look_version < 3 {
+            for key in super::tape::CURVE_KEYS {
+                if let Some(k) = v.get(key).copied() {
+                    v.insert(key.into(), super::tape::knob(key, super::tape::amount_in_027(key, k.clamp(0.0, 1.0))));
+                }
+            }
         }
         v
     }

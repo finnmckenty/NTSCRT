@@ -117,7 +117,7 @@ fn shelf(zero: f64, pole: f64) -> [f32; 3] {
 
 /// One active line as the VCR reads it (mirrors the GPU struct, 40 bytes).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VcrLine {
     pub origin_base: i32,
     pub origin_offset: f32,
@@ -132,7 +132,15 @@ pub struct VcrLine {
     /// (track pitches), and how that changes per mm along the track.
     pub delta0: f32,
     pub delta_slope: f32,
-    pub pad: f32,
+    /// What the color-under is raised by on playback (DeckParams::color_boost).
+    pub color_boost: f32,
+}
+
+impl Default for VcrLine {
+    fn default() -> Self {
+        Self { origin_base: 0, origin_offset: 0.0, along0: 0.0, spacing: 0.0, grease: 0.0, gain: 0.0, head: 0,
+               delta0: 0.0, delta_slope: 0.0, color_boost: 1.0 }
+    }
 }
 
 /// What the VCR needs for one displayed field.
@@ -284,7 +292,7 @@ const KERNELS: [(&str, &[u32]); 9] = [
     ("vcr_fmband", &[0, 5, 6, 12]),
     ("vcr_line", &[0, 1, 5, 6, 7, 8]),
     ("vcr_comb", &[0, 8, 9, 16]),
-    ("vcr_acc", &[0, 9, 10]),
+    ("vcr_acc", &[0, 7, 9, 10]),
     ("vcr_out", &[0, 7, 10, 14, 16]),
 ];
 

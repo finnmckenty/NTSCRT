@@ -43,6 +43,22 @@ impl DeckParams {
     pub fn gap(&self, h: usize) -> f32 {
         0.3 + 0.35 * self.head_wear(h)
     }
+    /// How much the deck's color path raises the color-under (against the
+    /// same head noise) so tape wear and head wear don't fade the color: it
+    /// undoes exactly what they take from the 629 kHz carrier (the tape's
+    /// lost remanence and roughness, the worn head's efficiency, tip spacing
+    /// and gap). The picture keeps its worn signal; flaws still take the
+    /// color where they are. A mismatched pair's extra wear on head 1 isn't
+    /// undone. Mac: DeckParams.colorBoost.
+    pub fn color_boost(&self, h: usize, tape: &TapeParams) -> f32 {
+        use super::vcr::{channel_gain, color_under_mhz};
+        let w = self.head_wear(h).min(self.wear);
+        let mhz = color_under_mhz();
+        let worn = channel_gain(mhz, (0.3 * w + 0.1 * tape.wear) as f64, (0.3 + 0.35 * w) as f64);
+        let new = channel_gain(mhz, 0.0, 0.3);
+        let lost = tape.remanence() * 10f32.powf(-w * 10.0 / 20.0) * (worn / new) as f32;
+        1.0 / lost.max(1e-3)
+    }
     /// Dirt baked onto each head (µm of spacing), there until cleaned.
     pub fn baseline_dirt(&self, h: usize, seed: u32) -> f32 {
         let share = if h == 0 { 1.2 } else { 0.5 + 0.8 * uni(seed, 90, 1, 0) };

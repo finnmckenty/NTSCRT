@@ -184,11 +184,11 @@ impl TapeParams {
         let u = |k: &str| s.get(k).clamp(0.0, 1.0) as f32;
         Self {
             seed: (s.get("tape_seed").round() as i64).wrapping_mul(7919).wrapping_add(17) as u32,
-            wear: u("tape_wear"),
-            dropouts: u("tape_dropouts"),
-            scratches: u("tape_scratches"),
-            creases: u("tape_creases"),
-            edge: u("tape_edge_damage"),
+            wear: amount("tape_wear", u("tape_wear")),
+            dropouts: amount("tape_dropouts", u("tape_dropouts")),
+            scratches: amount("tape_scratches", u("tape_scratches")),
+            creases: amount("tape_creases", u("tape_creases")),
+            edge: amount("tape_edge_damage", u("tape_edge_damage")),
             mold: u("tape_mold"),
             vaseline: u("tape_vaseline"),
             sticky: u("tape_sticky"),
@@ -206,6 +206,85 @@ impl TapeParams {
     pub fn flake_chance(&self) -> f32 {
         0.001 + 0.6 * self.dropouts * self.dropouts + 0.06 * self.wear + 0.06 * self.mold
     }
+}
+
+/// How far past a realistic worst case a damage knob goes at full: up to
+/// half as calibrated, then a straight line to 1 + gain (Creases; and the
+/// deck's Flutter, whose realistic most the TV's AFC rode out). Mac:
+/// TapeParams.topEndGains.
+pub fn top_end_gain(key: &str) -> f32 {
+    match key {
+        "tape_creases" | "transport_flutter" => 4.0,
+        _ => 0.0,
+    }
+}
+
+/// Measured slider curves: each knob's amount (1 = the realistic worst) at
+/// the slider's tenths, so the picture's change grows as the slider to the
+/// power 1.5 (Mac: TapeParams.curves — keep identical). Wear goes to 1.85,
+/// with its color spared (DeckParams::color_boost).
+pub fn curve(key: &str) -> Option<&'static [f32; 11]> {
+    match key {
+        "tape_wear" => Some(&[0.0, 0.259, 0.648, 0.955, 1.202, 1.391, 1.540, 1.640, 1.724, 1.785, 1.850]),
+        "tape_dropouts" => Some(&[0.0, 0.195, 0.473, 0.754, 0.931, 1.120, 1.322, 1.607, 2.124, 2.480, 3.0]),
+        "tape_scratches" => Some(&[0.0, 0.759, 1.281, 1.822, 2.073, 2.289, 2.516, 2.777, 3.069, 3.430, 4.0]),
+        "tape_edge_damage" => Some(&[0.0, 0.703, 0.743, 0.800, 0.888, 0.934, 0.987, 1.056, 1.190, 1.329, 1.45]),
+        _ => None,
+    }
+}
+
+/// The keys with measured curves.
+pub const CURVE_KEYS: [&str; 4] = ["tape_wear", "tape_dropouts", "tape_scratches", "tape_edge_damage"];
+
+pub fn top_end(k: f32, gain: f32) -> f32 {
+    if k <= 0.5 { k } else { k + gain * (k - 0.5) / 0.5 }
+}
+
+/// The knob setting that gives `amount` on a top end (its inverse).
+pub fn knob_for_amount_gain(amount: f64, gain: f64) -> f64 {
+    if amount <= 0.5 { amount } else { (amount + gain) / (1.0 + 2.0 * gain) }
+}
+
+/// A damage knob's amount for its slider position: its measured curve, or
+/// its top end, or the knob itself.
+pub fn amount(key: &str, k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    let Some(c) = curve(key) else { return top_end(k, top_end_gain(key)) };
+    let x = k * 10.0;
+    let i = (x as usize).min(9);
+    c[i] + (c[i + 1] - c[i]) * (x - i as f32)
+}
+
+/// The slider position that gives `amount` (the inverse of `amount`).
+pub fn knob(key: &str, amount: f64) -> f64 {
+    let Some(c) = curve(key) else { return knob_for_amount_gain(amount, top_end_gain(key) as f64) };
+    let a = amount.clamp(0.0, c[10] as f64) as f32;
+    for i in 0..10 {
+        if a <= c[i + 1] {
+            let span = c[i + 1] - c[i];
+            return ((i as f32 + if span > 0.0 { (a - c[i]) / span } else { 0.0 }) / 10.0) as f64;
+        }
+    }
+    1.0
+}
+
+/// A knob's amount as 0.27.0 read it (straight lines above half), for looks
+/// saved then and before (version < 3).
+pub fn amount_in_027(key: &str, k: f64) -> f64 {
+    let g = match key {
+        "tape_wear" => 0.85,
+        "tape_dropouts" => 2.0,
+        "tape_scratches" => 3.0,
+        "tape_edge_damage" => 0.45,
+        _ => 0.0,
+    };
+    if k <= 0.5 { k } else { k + g * (k - 0.5) / 0.5 }
+}
+
+/// The knob setting that damages a tape as `amount` did before the curves
+/// (for the tape choices, the dub decks and migrated old looks). Mac: asBefore.
+pub fn as_before(key: &str, amount: f64) -> f64 {
+    knob(key, amount)
 }
 
 /// What the head finds at one point of the tape.
@@ -287,6 +366,12 @@ const W: f32 = TapeGeometry::WIDTH as f32;
 /// The tape at `p`. `detail` includes flaws much smaller than a track
 /// (pinholes, scratches), which only matter to the picture.
 pub fn tape_at(p: TapePosition, t: &TapeParams, detail: bool) -> TapePoint {
+    tape_at_with(p, t, detail, true)
+}
+
+/// `tape_at`; `flakes: false` leaves out the flakes too, for the deck's
+/// color loops, which hold through a dropout.
+pub fn tape_at_with(p: TapePosition, t: &TapeParams, detail: bool, flakes: bool) -> TapePoint {
     let s = t.seed;
     let y = p.y;
     let mut lift = t.roughness();
@@ -326,7 +411,7 @@ pub fn tape_at(p: TapePosition, t: &TapeParams, detail: bool) -> TapePoint {
     }
 
     let flake = t.flake_chance();
-    if flake > 0.0 {
+    if flakes && flake > 0.0 {
         let (cx, _) = cell(p, 10);
         let cy = y.floor() as i32;
         for j in -1..=1 {
@@ -338,7 +423,9 @@ pub fn tape_at(p: TapePosition, t: &TapeParams, detail: bool) -> TapePoint {
                 let ddx = dx(p, ci, 10, uni(s, 22, ci, cj)) * 0.1;
                 let ddy = cj as f32 + uni(s, 23, ci, cj) - y;
                 let u = uni(s, 24, ci, cj);
-                let r = 0.04 * 8f32.powf(u * u);
+                // Past the realistic range (dropouts over 1: the top of the
+                // knob) the flakes grow, since a square holds one.
+                let r = 0.04 * 8f32.powf(u * u) * (1.0 + 0.6 * (t.dropouts - 1.0).max(0.0));
                 let e = 0.6 + 0.8 * uni(s, 25, ci, cj);
                 let d = ((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e)).sqrt();
                 if d < r * 1.5 {

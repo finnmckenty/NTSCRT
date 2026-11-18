@@ -24,7 +24,7 @@ struct VcrU {
 };
 struct VcrLine {
     originBase: i32, originOffset: f32, along0: f32, spacing: f32,
-    grease: f32, gain: f32, head: u32, delta0: f32, deltaSlope: f32, pad: f32,
+    grease: f32, gain: f32, head: u32, delta0: f32, deltaSlope: f32, colorBoost: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: VcrU;
@@ -166,7 +166,7 @@ fn tape_at(p: TPos) -> TPt {
                 let ddx = tdx(p, ci, 10, tuni(s, 22u, ci, cj)) * 0.1;
                 let ddy = f32(cj) + tuni(s, 23u, ci, cj) - y;
                 let u = tuni(s, 24u, ci, cj);
-                let r = 0.04 * pow(8.0, u * u);
+                let r = 0.04 * pow(8.0, u * u) * (1.0 + 0.6 * max(0.0, U.dropouts - 1.0));
                 let e = 0.6 + 0.8 * tuni(s, 25u, ci, cj);
                 let d = sqrt((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e));
                 if (d < r * 1.5) { outp *= sstep(r * 0.8, r, d); }
@@ -557,11 +557,18 @@ fn vcr_line(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // Color-under: mix down, turning this line's phase back the way the
     // head's own track turned it, then zero-phase low-pass twice.
+    // Tape and head wear don't fade the color (DeckParams::color_boost):
+    // the color path hears this line's playback as if the tape and head were
+    // new, against the same head noise (recomputed: the same samples vcr_play
+    // added). The picture keeps its worn signal.
     let q = turns(select(-1, 1, lines[y].head == 0u), i32(y));
+    let boost = lines[y].colorBoost;
     for (var i = 0u; i < N; i++) {
         let a = U.cuStep * f32(i);
         let cs = quarter(cos(a), sin(a), q);
-        chroma[row + i] = pb[row + i] * vec2<f32>(cs.x, -cs.y);
+        var x = pb[row + i];
+        if (boost != 1.0) { x = boost * x - (boost - 1.0) * U.noise * gaussn(U.seed ^ 0x51u, U.field, i32(i), i32(y)); }
+        chroma[row + i] = x * vec2<f32>(cs.x, -cs.y);
     }
     for (var round = 0; round < 2; round++) {
         var sr = vec4<f32>(0.0);
@@ -616,16 +623,29 @@ fn vcr_acc(@builtin(global_invocation_id) gid: vec3<u32>) {
     var phase = 0.0;
     var killer = 1.0;
     var on = true;
+    let b0 = u32((BURST_S + 0.3) / U.dt);
+    let b1 = min(U.n, u32((BURST_E - 0.3) / U.dt) + 1u);
     for (var y = 0u; y < U.rows; y++) {
-        let b = burst[y];
-        let m = length(b);
-        let err = atan2(refb.x * b.y - refb.y * b.x, refb.x * b.x + refb.y * b.y);
-        if (m > 0.08 * nominal) { phase += 0.35 * (err - phase); }
-        gain += 0.3 * (nominal / max(m, 0.05 * nominal) - gain);
-        gain = clamp(gain, 0.3, 20.0);
-        // The killer cuts chroma once the burst is ~26 dB down.
-        killer += 0.2 * (clamp(m / nominal, 0.0, 1.0) - killer);
-        if (on && killer < 0.05) { on = false; } else if (!on && killer > 0.08) { on = true; }
+        // A dropout over the burst (on this line or the one the comb filter
+        // averaged it with, as the dropout detector flagged it): the loops
+        // hold rather than chase a burst that isn't there (chasing it, ACC
+        // turned the next lines' color up as far as 20x).
+        var lost = false;
+        let prev = select(y, y - 1u, y > 0u);
+        for (var i = b0; i < b1 && !lost; i++) {
+            lost = luma[y * U.n + i] > 5000.0 || luma[prev * U.n + i] > 5000.0;
+        }
+        if (!lost) {
+            let b = burst[y];
+            let m = length(b);
+            let err = atan2(refb.x * b.y - refb.y * b.x, refb.x * b.x + refb.y * b.y);
+            if (m > 0.08 * nominal) { phase += 0.35 * (err - phase); }
+            gain += 0.3 * (nominal / max(m, 0.05 * nominal) - gain);
+            gain = clamp(gain, 0.3, 20.0);
+            // The killer cuts chroma once the burst is ~26 dB down.
+            killer += 0.2 * (clamp(m / nominal, 0.0, 1.0) - killer);
+            if (on && killer < 0.05) { on = false; } else if (!on && killer > 0.08) { on = true; }
+        }
         color[y] = vec4<f32>(cos(-phase), sin(-phase), select(0.0, gain, on), 0.0);
     }
 }

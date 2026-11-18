@@ -254,27 +254,27 @@ impl App {
             shaders: find_shaders(),
             source: None,
             downscale: true,
-            downscale_width: 320,
-            method: DownscaleMethod::Nearest,
+            downscale_width: 640,
+            method: DownscaleMethod::Area,
             ntsc: true,
             ntsc_settings: ntsc_settings(),
             ntsc_values: ntsc_default_values(),
             glitch_enabled: true,
-            glitch_values: ntscrt_engine::glitch::GlitchSettings::default(),
+            glitch_values: starting_vcr(),
             digital_enabled: false,
             digital_values: ntscrt_engine::codec::DigitalParam::starting_values(),
             open: Sections::default(),
             digital_was_enabled: false,
             animate_clock: 0.0,
             animate_last: None,
-            crt: true,
+            crt: false,
             shader_params: HashMap::new(),
             shader_values: HashMap::new(),
             presets: find_presets(),
             look_name: None,
             look_raw: None,
             look_notes: Vec::new(),
-            downscale_preset: "VGA (320px)".into(),
+            downscale_preset: "VGA² (640px)".into(),
             shader: CRT_SHADERS.iter().position(|s| s.0 == "glow_gauss").unwrap_or(0),
             integer_scale: true,
             zoom: 1.0,
@@ -1829,8 +1829,15 @@ fn main() -> eframe::Result {
     if selftest_failures.is_none() {
         claude::remember_location();
     }
+    let mut viewport = egui::ViewportBuilder::default().with_title(format!("NTSCRT {} (Windows preview)", update::current_version())).with_inner_size([1200.0, 780.0]);
+    // The window's icon (title bar, taskbar); the .exe's own is ntscrt.ico.
+    if let Ok(icon) = image::load_from_memory(include_bytes!("../icon-256.png")) {
+        let icon = icon.to_rgba8();
+        let (width, height) = icon.dimensions();
+        viewport = viewport.with_icon(std::sync::Arc::new(egui::IconData { rgba: icon.into_raw(), width, height }));
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title(format!("NTSCRT {} (Windows preview)", update::current_version())).with_inner_size([1200.0, 780.0]),
+        viewport,
         ..Default::default()
     };
     let result = eframe::run_native("NTSCRT", options, Box::new(|cc| Ok(Box::new(App::new(cc)))));
@@ -1886,4 +1893,32 @@ impl Profile {
             *self = Self::new();
         }
     }
+}
+
+/// The VCR the app starts with (the VCR panel's Reset is still a new tape in
+/// a clean deck): Finn's "new defaults" look (2026-11-17), an EP third copy
+/// with some flaws and scratches — values exact, as saved (a version 2 look,
+/// so they're read as 0.27.0 did). Mac: AppState.startingVcr.
+fn starting_vcr() -> ntscrt_engine::glitch::GlitchSettings {
+    use ntscrt_engine::glitch::GlitchSettings;
+    let saved: std::collections::BTreeMap<String, f64> = [
+        (ntscrt_engine::glitch::VCR_ID, 1.0),
+        ("tape_speed", 2.0),
+        ("tape_generation", 3.0),
+        ("tape_wear", 0.1523092064065363),
+        ("tape_dropouts", 0.39689082029664796),
+        ("tape_scratches", 0.5487225506756757),
+        ("tape_creases", 0.2496018770036929),
+        ("tape_edge_damage", 0.062112894144144136),
+        ("tape_mold", 0.14560458896396397),
+        ("head_wear", 0.07301008968609865),
+        ("head_switch", 6.000563063063063),
+        ("back_tension", 0.7709740990990992),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let mut g = GlitchSettings::default();
+    g.values.extend(GlitchSettings::upgraded(&saved, 2));
+    g
 }

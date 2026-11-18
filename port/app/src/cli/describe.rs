@@ -197,6 +197,11 @@ fn ntsc() -> Value {
             }
             NtscKind::Enumeration { options } => {
                 c.insert("options".into(), json!(options.iter().map(|o| o.0.as_str()).collect::<Vec<_>>()));
+                // By name: the options are listed in the panel's order, not
+                // ntsc-rs's numbering.
+                if let Some(o) = defaults.get(&s.name).and_then(Value::as_u64).and_then(|d| options.iter().find(|o| o.1 as u64 == d)) {
+                    c.insert("default".into(), Value::from(o.0.as_str()));
+                }
                 "choice"
             }
             NtscKind::Group { children } => {
@@ -282,7 +287,7 @@ fn glitch() -> Value {
 }
 
 pub fn condition(c: &VcrCondition) -> Value {
-    let values: Map<String, Value> = c.values.iter().map(|(k, v)| (k.to_string(), Value::from(*v))).collect();
+    let values: Map<String, Value> = c.values.iter().map(|(k, _)| (k.to_string(), Value::from(c.value(k)))).collect();
     json!({"name": c.name, "about": c.help, "values": values})
 }
 

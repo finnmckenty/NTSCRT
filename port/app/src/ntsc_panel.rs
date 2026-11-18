@@ -57,7 +57,10 @@ pub fn controls(ui: &mut egui::Ui, settings: &[NtscSetting], values: &mut Map<St
             }
         });
     }
-    for s in settings.iter().filter(|s| !RETIRED_VHS.contains(&s.name.as_str())) {
+    for s in settings
+        .iter()
+        .filter(|s| !RETIRED_VHS.contains(&s.name.as_str()) && !ntscrt_engine::HIDDEN_FROM_PANEL.contains(&s.name.as_str()))
+    {
         changed |= control(ui, s, values);
     }
     changed

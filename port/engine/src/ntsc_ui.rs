@@ -61,8 +61,24 @@ fn house_layout(settings: Vec<NtscSetting>) -> Vec<NtscSetting> {
             "scale_settings" => "Intensity".into(),
             "bandwidth_scale" => "Horizontal intensity".into(),
             "vertical_scale" => "Vertical intensity".into(),
+            // Nobody choosing a look knows or cares what Butterworth and
+            // constant-k filters are.
+            "filter_type" => "Signal quality".into(),
             _ => s.label,
         };
+        if s.name == "filter_type" {
+            s.description = Some("How the signal's filters treat detail: Sharper keeps more of it; Softer blurs the picture more.".into());
+            if let NtscKind::Enumeration { options } = &s.kind {
+                // The app's names, in this order (ntsc-rs's indices, so values
+                // and preset JSON are unchanged).
+                let named: Vec<(String, u32)> = [("Sharper", 1u32), ("Softer", 0)]
+                    .iter()
+                    .filter(|(_, i)| options.iter().any(|o| o.1 == *i))
+                    .map(|(l, i)| (l.to_string(), *i))
+                    .collect();
+                s.kind = NtscKind::Enumeration { options: named };
+            }
+        }
         if let NtscKind::Float { logarithmic, .. } = s.kind {
             if s.name == "bandwidth_scale" || s.name == "vertical_scale" {
                 s.kind = NtscKind::Float { min: 0.125, max: 3.0, logarithmic };
@@ -98,6 +114,28 @@ fn house_layout(settings: Vec<NtscSetting>) -> Vec<NtscSetting> {
     out
 }
 
+/// Signal-path details that read as doing nothing in the panel (the noise
+/// seed only reshuffles the same noise, the phase shifts only move the
+/// dot-crawl pattern, the filters change fine color detail too subtly to
+/// judge by eye). Not shown in the panel; looks, keyframes, the command line
+/// and the MCP server still read and apply them. Mac: hiddenFromPanel.
+pub const HIDDEN_FROM_PANEL: [&str; 8] = [
+    "random_seed", "input_luma_filter", "chroma_lowpass_in", "video_scanline_phase_shift",
+    "video_scanline_phase_shift_offset", "chroma_demodulation", "vhs_chroma_vert_blend", "chroma_lowpass_out",
+];
+
+/// ntsc-rs's names for choices the app renames, still accepted from the
+/// command line and AI tools.
+pub fn legacy_option(setting: &str, label: &str) -> Option<u32> {
+    if setting != "filter_type" {
+        return None;
+    }
+    [("Butterworth (sharper)", 1), ("Butterworth", 1), ("Constant K (blurry)", 0), ("Constant K", 0)]
+        .iter()
+        .find(|(l, _)| l.eq_ignore_ascii_case(label))
+        .map(|(_, i)| *i)
+}
+
 /// The NTSC panel's settings, in the Mac app's order.
 pub fn ntsc_settings() -> Vec<NtscSetting> {
     let list = SettingsList::<NtscEffectFullSettings>::new();
@@ -110,12 +148,17 @@ pub fn ntsc_default_values() -> Map<String, Value> {
     let list = SettingsList::<NtscEffectFullSettings>::new();
     let json = list.to_json_string(&NtscEffectFullSettings::default()).expect("ntsc-rs defaults as JSON");
     let mut values: Map<String, Value> = serde_json::from_str(&json).expect("ntsc-rs JSON");
+    // (2026-11-17: Finn's "new defaults", which leave ntsc-rs's own VHS,
+    // head switching and tracking noise to the VCR stage.)
     let house = json!({
-        "filter_type": 0,
-        "composite_preemphasis": 0.2753769054878048,
-        "composite_noise_intensity": 0.1391983173076923,
-        "composite_noise_frequency": 0.8576,
-        "composite_noise_detail": 2,
+        "filter_type": 1,
+        "composite_preemphasis": 0,
+        "composite_noise_intensity": 0.1591702707237563,
+        "composite_noise_frequency": 0.28247526709401705,
+        "composite_noise_detail": 1,
+        "vhs_settings": false,
+        "head_switching": false,
+        "tracking_noise": false,
         "snow_intensity": 0,
         "video_scanline_phase_shift_offset": 3,
         "luma_smear": 0.6692,
@@ -130,7 +173,7 @@ pub fn ntsc_default_values() -> Map<String, Value> {
         "chroma_noise_intensity": 0.13054193376068376,
         "chroma_noise_frequency": 0.0777,
         "chroma_phase_error": 0.016,
-        "chroma_phase_noise_intensity": 0.029,
+        "chroma_phase_noise_intensity": 0.06609468482905982,
         "chroma_delay_horizontal": 1.7279639582876793,
         "chroma_delay_vertical": 2,
         "vhs_chroma_loss": 0.003639155982905983,
