@@ -29,8 +29,13 @@ enum CLI {
         let realStdout = dup(STDOUT_FILENO)
         dup2(STDERR_FILENO, STDOUT_FILENO)
         resultOut = FileHandle(fileDescriptor: realStdout, closeOnDealloc: false)
-        // No Dock icon or menu bar: this is a command-line tool run.
-        NSApplication.shared.setActivationPolicy(.prohibited)
+        // No NSApplication at all: creating one (even with the .prohibited
+        // policy, for no Dock icon) checks the process in with Launch
+        // Services as a running copy of NTSCRT.app — so with an MCP server
+        // running from the app, opening it from the Dock or Finder failed
+        // with "The application NTSCRT.app is not open anymore" (it tried to
+        // bring the windowless server forward). Without one there's no Dock
+        // icon either.
 
         Task { @MainActor in
             let code: Int32

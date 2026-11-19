@@ -18,7 +18,11 @@ CONFIG="${1:-release}"
 swift build -c "$CONFIG" --product crt-app
 
 APP=build/NTSCRT.app
-rm -rf "$APP"
+# Keep the bundle folder itself and replace only its contents: the Dock, the
+# Desktop link and Finder aliases hold on to this folder, and deleting it
+# each rebuild left a Dock item that no longer opened the app (2026-11-19).
+mkdir -p "$APP"
+rm -rf "$APP/Contents"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
 cp ".build/$CONFIG/crt-app" "$APP/Contents/MacOS/NTSCRT"
@@ -97,6 +101,9 @@ VERSION="$(git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null | 
 
 # Ad-hoc sign so Gatekeeper lets it run.
 codesign --force --deep --sign - "$APP" >/dev/null
+# Tell Launch Services the bundle changed (its version, icon and executable).
+touch "$APP"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R -trusted "$APP" 2>/dev/null || true
 
 echo "built: $APP"
 echo "run:   open $APP"

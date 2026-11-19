@@ -174,9 +174,19 @@ fi
 # The local bundle (what the Desktop shortcut launches) becomes the
 # shipped app, bit for bit — so "I'm still seeing the bug" can never again
 # mean "the shortcut points at last week's build".
-rm -rf build/NTSCRT.app
-mkdir -p build
-cp -R "$APP" build/NTSCRT.app
+# The folder itself stays (only its contents are replaced): the Dock, the
+# Desktop link and Finder aliases hold on to it, and deleting it each release
+# left a Dock item that no longer opened the app (2026-11-19).
+mkdir -p build/NTSCRT.app
+rm -rf build/NTSCRT.app/Contents
+cp -R "$APP/Contents" build/NTSCRT.app/Contents
+touch build/NTSCRT.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R -trusted build/NTSCRT.app 2>/dev/null || true
+# Only that bundle stays registered: the dist/ copies share its app ID and
+# are deleted next release, so the Dock could end up pointing at one.
+for stale in "$PWD/dist/NTSCRT.app" "$PWD/$STAGE/NTSCRT.app"; do
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$stale" 2>/dev/null || true
+done
 echo "refreshed build/NTSCRT.app with the released app"
 
 echo
