@@ -130,7 +130,7 @@ final class PreviewCompositorTests: XCTestCase {
         XCTAssertEqual(plan.renderMultiple, 6)
         let render = scanlineRender(multiple: plan.renderMultiple, bright: 3)
         let (g, column) = composite(render: render, drawable: (700, 525), integer: false, zoom: 1)
-        XCTAssertEqual(g.targetHeight, 525, "fills the drawable")
+        XCTAssertEqual(g.targetHeight, 525, "a 4:3 picture fits a 4:3 drawable exactly")
         let mid = column[200..<300]
         XCTAssertGreaterThan(mid.max()! - mid.min()!, 0.25, "scanline modulation reaches the screen")
         let mean = column.reduce(0, +) / Float(column.count)

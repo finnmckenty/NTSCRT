@@ -488,9 +488,9 @@ final class AppState {
         return nil
     }
 
-    /// Aspect ratio (width / height) of the loaded source. Used by the preview
-    /// to letterbox/pillarbox the MTKView so the source isn't stretched, and
-    /// by the exporter to derive height from a chosen long edge.
+    /// Aspect ratio (width / height) of the loaded source. Used by the
+    /// exporter to derive height from a chosen long edge, and by sizes that
+    /// follow the picture's shape (the preview fits it from the chain input).
     var sourceAspect: CGFloat {
         if let shape = sourceShape, shape.height > 0 {
             return CGFloat(shape.width) / CGFloat(shape.height)
@@ -615,6 +615,9 @@ final class AppState {
     /// The size the preview shows the picture at, in points (set by the
     /// preview as it lays out; drags map pointer motion through it).
     @ObservationIgnored var previewDisplaySize: CGSize = .zero
+    /// The preview view's own size in points: the whole preview area, with
+    /// the picture centered in it at `previewDisplaySize` when not zoomed.
+    @ObservationIgnored var previewViewSize: CGSize = .zero
 
     /// Whether the crop can be adjusted on the preview: it's on, there's a
     /// picture, and the preview isn't zoomed in.
@@ -1058,12 +1061,12 @@ final class AppState {
     /// Preview zoom factor (1.0 = fit, up to 12.0 = 1200%).
     var zoom: Float = 1.0 {
         didSet {
-            if zoom <= 1.0 { panX = 0; panY = 0 }
+            if zoom <= 1.0 { panX = 0; panY = 0 } else { clampPan() }
             markViewDirty()
         }
     }
-    /// Pan offset in normalized image space (clamped so panning can't expose
-    /// beyond the source bounds at the current zoom).
+    /// Pan offset in normalized image space (clamped so panning can't show
+    /// letterbox while there's picture to show at the current zoom).
     var panX: Float = 0.0 { didSet { markViewDirty() } }
     var panY: Float = 0.0 { didSet { markViewDirty() } }
 
@@ -1071,6 +1074,20 @@ final class AppState {
         zoom = 1.0
         panX = 0
         panY = 0
+    }
+
+    /// Keep the pan where no letterbox shows while there's picture to show
+    /// (zooming out, or a bigger window, shrinks how far it may go).
+    func clampPan() {
+        let picture = previewDisplaySize, view = previewViewSize
+        guard picture.width > 0, picture.height > 0 else { return }
+        let limitX = PreviewGeometry.panLimit(zoom: zoom, viewExtent: Double(view.width),
+                                              pictureExtent: Double(picture.width))
+        let limitY = PreviewGeometry.panLimit(zoom: zoom, viewExtent: Double(view.height),
+                                              pictureExtent: Double(picture.height))
+        let x = max(-limitX, min(limitX, panX)), y = max(-limitY, min(limitY, panY))
+        if x != panX { panX = x }
+        if y != panY { panY = y }
     }
 
     // MARK: - timeline (keyframe animation, image sources → video)

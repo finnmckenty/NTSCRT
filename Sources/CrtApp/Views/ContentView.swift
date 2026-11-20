@@ -39,16 +39,15 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 400)
         } detail: {
             VStack(spacing: 0) {
-                // Preserve source aspect ratio: PreviewView gets a frame
-                // matching the source's aspect, centered in the available
-                // space. The view palette floats over the letterbox area and
-                // fades out when the pointer goes idle.
+                // PreviewView spans the whole area. At zoom 1 it fits the
+                // picture inside at its own shape, letterboxed; zoomed in, the
+                // picture fills it, so more of it is in sight. The view
+                // palette floats over it and fades out when the pointer goes
+                // idle.
                 ZStack {
                     Color(white: 0.04)
                     PreviewView()
-                        .aspectRatio(state.sourceAspect, contentMode: .fit)
                         .anchorPreference(key: PreviewFrameKey.self, value: .bounds) { $0 }
-                        .padding(8)
                 }
                 // While the picture is dragged to move the crop: the rest of
                 // the source, dimmed, around it.

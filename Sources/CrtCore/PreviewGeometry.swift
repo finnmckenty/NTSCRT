@@ -9,15 +9,18 @@ import Foundation
 ///   sampled, so zoom is continuous and toggling integer scale never
 ///   appears to change the zoom level;
 /// - zoomed in, the full render is sampled rather than the display fit,
-///   whose box filter averaged scanlines flat.
+///   whose box filter averaged scanlines flat;
+/// - zoomed in, the picture fills the view rather than staying in its
+///   zoom-1 frame, so more of it is in sight (and Export viewport gets it).
 ///
 /// `PreviewCompositor` feeds exactly these numbers to the shader, and
 /// `uv(px:py:)` is the shader's arithmetic.
 public struct PreviewGeometry: Equatable {
     public let drawableWidth: Int
     public let drawableHeight: Int
-    /// The displayed image's rect in drawable pixels: the plan's display size
-    /// with integer scale (letterboxed), the drawable itself otherwise (fill).
+    /// The picture's rect at zoom 1 in drawable pixels: the plan's display
+    /// size, centered (letterboxed). Zoomed in, the picture grows about its
+    /// center past this frame into the letterbox, up to the drawable's edges.
     public let targetWidth: Int
     public let targetHeight: Int
     /// Whole-pixel letterbox offset.
@@ -39,20 +42,37 @@ public struct PreviewGeometry: Equatable {
                             zoom: Float, panX: Float, panY: Float) -> PreviewGeometry {
         let z = max(1, zoom)
         let zoomed = z > zoomThreshold
-        let fill = !integerScale
-        let tw = fill ? drawableWidth : plan.displayWidth
-        let th = fill ? drawableHeight : plan.displayHeight
+        let tw = min(drawableWidth, plan.displayWidth)
+        let th = min(drawableHeight, plan.displayHeight)
+        // A pan left over from a bigger zoom or another window size would
+        // show letterbox where there's picture to show.
+        let limitX = panLimit(zoom: z, viewExtent: Double(drawableWidth), pictureExtent: Double(tw))
+        let limitY = panLimit(zoom: z, viewExtent: Double(drawableHeight), pictureExtent: Double(th))
         return PreviewGeometry(drawableWidth: drawableWidth, drawableHeight: drawableHeight,
                                targetWidth: tw, targetHeight: th,
-                               offsetX: fill ? 0 : (drawableWidth - tw) / 2,
-                               offsetY: fill ? 0 : (drawableHeight - th) / 2,
-                               zoom: z, panX: panX, panY: panY,
+                               offsetX: (drawableWidth - tw) / 2,
+                               offsetY: (drawableHeight - th) / 2,
+                               zoom: z,
+                               panX: max(-limitX, min(limitX, panX)),
+                               panY: max(-limitY, min(limitY, panY)),
                                samplesFullRender: zoomed,
                                // Pixel inspection wants raw texels; integer
                                // scale is exact multiples, so nearest is
-                               // always right there too. Fill mode at fit is
-                               // a fractional resample — linear.
+                               // always right there too. Without it the
+                               // fit is a fractional resample — linear.
                                nearest: zoomed || integerScale)
+    }
+
+    /// How far the pan may go along one axis (normalized picture units,
+    /// either way) before letterbox shows at that edge of the view. Zoomed
+    /// in, the picture spills past its zoom-1 frame, so the view shows
+    /// `viewExtent / (pictureExtent · zoom)` of it; while that's the whole
+    /// picture the limit is 0 and it stays centered. Any units, as long as
+    /// both extents share them (drawable pixels or view points).
+    public static func panLimit(zoom: Float, viewExtent: Double, pictureExtent: Double) -> Float {
+        guard pictureExtent > 0 else { return 0 }
+        let shown = viewExtent / (pictureExtent * Double(max(1, zoom)))
+        return Float(max(0, 0.5 - shown / 2))
     }
 
     /// Normalized coordinate sampled for the drawable pixel (px, py) — the

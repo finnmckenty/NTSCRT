@@ -140,21 +140,49 @@ final class PreviewScalingTests: XCTestCase {
 
     // MARK: - integer scale off
 
-    func testWithoutIntegerScaleTheImageFillsTheDrawable() {
-        for (dw, dh) in drawables {
-            let plan = PreviewScaler.plan(inputWidth: 320, inputHeight: 320,
-                                          drawableWidth: dw, drawableHeight: dh,
-                                          integerScale: false)
-            XCTAssertEqual(plan.displayWidth, dw)
-            XCTAssertEqual(plan.displayHeight, dh)
-            // Filling is a display property. The render still meets the
-            // scanline floor as a whole, even multiple of the input and is
-            // box-filtered to the drawable — rendering straight into the
-            // drawable gave fractional rows per source line, which banded.
-            XCTAssertGreaterThanOrEqual(plan.renderMultiple, PreviewScaler.minRenderMultiple)
-            XCTAssertEqual(plan.renderMultiple % 2, 0)
-            XCTAssertEqual(plan.renderWidth, 320 * plan.renderMultiple)
-            XCTAssertTrue(plan.needsDownsample)
+    func testWithoutIntegerScaleThePictureFitsTheDrawableAtItsOwnShape() {
+        for (iw, ih) in inputs {
+            for (dw, dh) in drawables {
+                let plan = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
+                                              drawableWidth: dw, drawableHeight: dh,
+                                              integerScale: false)
+                let label = "\(iw)x\(ih) in \(dw)x\(dh)"
+                // The drawable is the whole preview area now, so the picture
+                // fits inside it, touching one pair of edges, not stretched.
+                XCTAssertLessThanOrEqual(plan.displayWidth, dw, label)
+                XCTAssertLessThanOrEqual(plan.displayHeight, dh, label)
+                XCTAssertTrue(plan.displayWidth == dw || plan.displayHeight == dh, label)
+                XCTAssertEqual(Double(plan.displayWidth) / Double(plan.displayHeight),
+                               Double(iw) / Double(ih), accuracy: 0.004, label)
+                // Fitting is a display property. The render still meets the
+                // scanline floor as a whole, even multiple of the input and
+                // is box-filtered to the fitted size — rendering straight
+                // into it gave fractional rows per source line, which banded.
+                XCTAssertGreaterThanOrEqual(plan.renderMultiple, PreviewScaler.minRenderMultiple)
+                XCTAssertEqual(plan.renderMultiple % 2, 0)
+                XCTAssertEqual(plan.renderWidth, iw * plan.renderMultiple)
+                XCTAssertTrue(plan.needsDownsample)
+            }
+        }
+    }
+
+    /// The margin keeps the picture clear of the view's edges at zoom 1, as
+    /// the padding around the old picture-shaped view did: the plan is the
+    /// same as for a drawable that much smaller.
+    func testMarginFitsThePictureAsASmallerDrawableWould() {
+        for integer in [true, false] {
+            for (iw, ih) in inputs {
+                for (dw, dh) in drawables {
+                    let m = 16
+                    let a = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
+                                               drawableWidth: dw, drawableHeight: dh,
+                                               integerScale: integer, margin: m)
+                    let b = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
+                                               drawableWidth: dw - 2 * m, drawableHeight: dh - 2 * m,
+                                               integerScale: integer)
+                    XCTAssertEqual(a, b, "\(iw)x\(ih) in \(dw)x\(dh) integer=\(integer)")
+                }
+            }
         }
     }
 }

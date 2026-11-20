@@ -121,14 +121,68 @@ final class PreviewGeometryTests: XCTestCase {
                     XCTAssertNil(g.uv(px: px, py: py), "outside \((px, py)) \(label)")
                 }
             }
-            // At fit with integer scale it is the letterboxed frame; Fill
-            // and zoomed-in pictures cover the drawable.
-            let (_, fit) = geometry(dw, dh, integer: true)
-            XCTAssertEqual(fit.visiblePicture?.width, fit.targetWidth)
-            XCTAssertEqual(fit.visiblePicture?.height, fit.targetHeight)
-            let (_, fill) = geometry(dw, dh, integer: false)
-            XCTAssertEqual(fill.visiblePicture?.width, dw)
-            XCTAssertEqual(fill.visiblePicture?.height, dh)
+            // At zoom 1 it is the letterboxed frame, either way.
+            for integer in [true, false] {
+                let (_, fit) = geometry(dw, dh, integer: integer)
+                XCTAssertEqual(fit.visiblePicture?.width, fit.targetWidth)
+                XCTAssertEqual(fit.visiblePicture?.height, fit.targetHeight)
+            }
         }
+    }
+
+    // MARK: - zoomed in, the picture fills the view
+
+    /// A tall picture in a wide view (Finn's report: zoomed to 204%, it
+    /// stayed in its own narrow frame with the sides of the view empty).
+    /// Zoomed in, it grows past that frame until it fills the view.
+    func testZoomedInThePictureSpillsPastItsFrameUntilItFillsTheView() {
+        for integer in [true, false] {
+            let (dw, dh) = (1600, 1000)
+            let plan = PreviewScaler.plan(inputWidth: 240, inputHeight: 320,
+                                          drawableWidth: dw, drawableHeight: dh,
+                                          integerScale: integer)
+            func shown(_ zoom: Float) -> (x: Int, y: Int, width: Int, height: Int)? {
+                PreviewGeometry.make(plan: plan, drawableWidth: dw, drawableHeight: dh,
+                                     integerScale: integer, zoom: zoom, panX: 0, panY: 0).visiblePicture
+            }
+            let label = "integer=\(integer)"
+            let fit = shown(1)!
+            XCTAssertEqual(fit.width, plan.displayWidth, label)
+            XCTAssertLessThan(fit.width, dw / 2, "\(label): pillarboxed at zoom 1")
+            // Halfway: wider than its frame, centered, not yet the view.
+            let z = Float(dw) / Float(plan.displayWidth) / 2 + 0.5
+            let mid = shown(z)!
+            XCTAssertEqual(Float(mid.width), Float(plan.displayWidth) * z, accuracy: 2, label)
+            XCTAssertEqual(mid.x + mid.width / 2, dw / 2, accuracy: 1, label)
+            // Zoomed far enough: every pixel of the view shows picture.
+            let full = shown(Float(dw) / Float(plan.displayWidth) + 0.01)!
+            XCTAssertEqual(full.x, 0, label); XCTAssertEqual(full.width, dw, label)
+            XCTAssertEqual(full.y, 0, label); XCTAssertEqual(full.height, dh, label)
+        }
+    }
+
+    /// The pan stops where the picture's edge meets the view's edge, and
+    /// doesn't move the picture along an axis where all of it is in sight.
+    func testPanStopsAtThePicturesEdgeAndCentersWhatFits() {
+        let (dw, dh) = (1600, 1000)
+        let plan = PreviewScaler.plan(inputWidth: 240, inputHeight: 320,
+                                      drawableWidth: dw, drawableHeight: dh, integerScale: false)
+        // 1.5×: the picture's 1125 px fit the view's 1600 across; its height
+        // overflows.
+        let g = PreviewGeometry.make(plan: plan, drawableWidth: dw, drawableHeight: dh,
+                                     integerScale: false, zoom: 1.5, panX: 0.4, panY: 0.4)
+        XCTAssertEqual(g.panX, 0, "all of its width is in sight: stays centered")
+        XCTAssertGreaterThan(g.panY, 0)
+        XCTAssertEqual(g.uv(px: dw / 2, py: 0)!.y, 0, accuracy: 1e-3,
+                       "panned all the way, its top edge is at the view's top")
+        // Zoomed far in, the old limit (1 - 1/zoom) / 2 ignored the view
+        // beyond the picture's frame and would show letterbox; this one
+        // doesn't.
+        let far = PreviewGeometry.make(plan: plan, drawableWidth: dw, drawableHeight: dh,
+                                       integerScale: false, zoom: 6, panX: -1, panY: 0)
+        XCTAssertNotNil(far.uv(px: dw - 1, py: dh / 2), "no letterbox at the right edge")
+        XCTAssertEqual(far.uv(px: dw - 1, py: dh / 2)!.x, 1, accuracy: 1e-3)
+        XCTAssertEqual(far.panX, -PreviewGeometry.panLimit(zoom: 6, viewExtent: Double(dw),
+                                                           pictureExtent: Double(plan.displayWidth)))
     }
 }

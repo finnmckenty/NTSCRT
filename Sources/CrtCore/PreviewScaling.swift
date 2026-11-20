@@ -5,8 +5,10 @@ public struct PreviewScaling: Equatable {
     /// Size the filter chain renders at.
     public let renderWidth: Int
     public let renderHeight: Int
-    /// Size the result occupies in the drawable. With integer scale this is a
-    /// whole multiple of the chain input, letterboxed; otherwise it fills.
+    /// Size the picture occupies in the drawable at zoom 1, centered. With
+    /// integer scale this is a whole multiple of the chain input; otherwise
+    /// the largest size of the picture's shape that fits. Either way the rest
+    /// of the drawable is letterbox, which a zoomed-in picture spills into.
     public let displayWidth: Int
     public let displayHeight: Int
     /// display / chain input. 0 when not integer-scaled.
@@ -48,35 +50,49 @@ public enum PreviewScaler {
     public static func plan(inputWidth: Int, inputHeight: Int,
                             drawableWidth: Int, drawableHeight: Int,
                             integerScale: Bool,
+                            margin: Int = 0,
                             minRenderMultiple: Int = PreviewScaler.minRenderMultiple,
                             maxLongEdge: Int = 4096) -> PreviewScaling {
-        let dw = max(1, drawableWidth), dh = max(1, drawableHeight)
+        // The picture fits inside the drawable less `margin` on every side:
+        // the drawable is the whole preview area (a zoomed-in picture fills
+        // it), and at zoom 1 the picture keeps clear of its edges.
+        let dw = max(1, drawableWidth - 2 * max(0, margin))
+        let dh = max(1, drawableHeight - 2 * max(0, margin))
 
-        // Not integer-scaled: render at the drawable's own resolution (capped)
-        // and fill it.
-        // Render at the drawable's own size and fill it — only for an input
-        // we can't reason about, or one too big to render at any multiple.
-        func fillAtDrawable() -> PreviewScaling {
-            let scale = min(1.0, Double(maxLongEdge) / Double(max(dw, dh)))
-            return PreviewScaling(renderWidth: max(64, Int(Double(dw) * scale)),
-                                  renderHeight: max(64, Int(Double(dh) * scale)),
-                                  displayWidth: dw, displayHeight: dh,
+        // The largest size of the input's shape that fits.
+        func fitSize() -> (width: Int, height: Int) {
+            guard inputWidth > 0, inputHeight > 0 else { return (dw, dh) }
+            let scale = min(Double(dw) / Double(inputWidth), Double(dh) / Double(inputHeight))
+            return (min(dw, max(1, Int((Double(inputWidth) * scale).rounded()))),
+                    min(dh, max(1, Int((Double(inputHeight) * scale).rounded()))))
+        }
+
+        // Render at the fitted size itself — only for an input we can't
+        // reason about, or one too big to render at any multiple.
+        func renderAtFit() -> PreviewScaling {
+            let (fw, fh) = fitSize()
+            let scale = min(1.0, Double(maxLongEdge) / Double(max(fw, fh)))
+            return PreviewScaling(renderWidth: max(64, Int(Double(fw) * scale)),
+                                  renderHeight: max(64, Int(Double(fh) * scale)),
+                                  displayWidth: fw, displayHeight: fh,
                                   displayMultiple: 0, renderMultiple: 0)
         }
-        guard inputWidth > 0, inputHeight > 0 else { return fillAtDrawable() }
+        guard inputWidth > 0, inputHeight > 0 else { return renderAtFit() }
 
-        // Not integer-scaled: the image fills the drawable — but it is still
-        // rendered at the scanline floor and box-filtered down to size. The
-        // look stays window-independent, and a fractional rows-per-line
-        // ratio never reaches the shader: rendering straight into the
-        // drawable gave some source lines 2 rows and others 3, which banded.
+        // Not integer-scaled: the image is fitted to the drawable — but it
+        // is still rendered at the scanline floor and box-filtered down to
+        // size. The look stays window-independent, and a fractional
+        // rows-per-line ratio never reaches the shader: rendering straight
+        // into the drawable gave some source lines 2 rows and others 3,
+        // which banded.
         guard integerScale else {
             var rk = renderMultiple(forDisplay: 1, inputWidth: inputWidth, inputHeight: inputHeight,
                                     minRenderMultiple: minRenderMultiple, maxLongEdge: maxLongEdge)
             if rk > 1 && rk % 2 == 1 { rk -= 1 }     // odd multiples jitter glow shaders
-            guard max(inputWidth, inputHeight) * rk <= maxLongEdge else { return fillAtDrawable() }
+            guard max(inputWidth, inputHeight) * rk <= maxLongEdge else { return renderAtFit() }
+            let (fw, fh) = fitSize()
             return PreviewScaling(renderWidth: inputWidth * rk, renderHeight: inputHeight * rk,
-                                  displayWidth: dw, displayHeight: dh,
+                                  displayWidth: fw, displayHeight: fh,
                                   displayMultiple: 0, renderMultiple: rk)
         }
 
@@ -91,9 +107,7 @@ public enum PreviewScaler {
         // A window too small for even one full copy can't be integer-scaled;
         // fit instead so the image stays visible.
         if inputWidth * kDisplay > dw || inputHeight * kDisplay > dh {
-            let scale = min(Double(dw) / Double(inputWidth), Double(dh) / Double(inputHeight))
-            let fitW = max(1, Int((Double(inputWidth) * scale).rounded()))
-            let fitH = max(1, Int((Double(inputHeight) * scale).rounded()))
+            let (fitW, fitH) = fitSize()
             let rk = renderMultiple(forDisplay: 1, inputWidth: inputWidth,
                                     inputHeight: inputHeight,
                                     minRenderMultiple: minRenderMultiple,

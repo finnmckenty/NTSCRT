@@ -390,19 +390,28 @@ struct PreviewView: NSViewRepresentable {
         /// displayed size rather than stretching the render to fill.
         private var scaling: PreviewScaling?
 
+        /// Room kept between the picture and the view's edges at zoom 1, in
+        /// points. The view spans the whole preview area so a zoomed-in
+        /// picture can fill it.
+        private static let pictureMargin: CGFloat = 8
+
         private func renderTargetSize(inputW: Int, inputH: Int) -> (Int, Int) {
             let size = view?.drawableSize ?? .zero
+            let pixelsPerPoint = view.map { $0.bounds.width > 0 ? size.width / $0.bounds.width : 1 } ?? 1
             let plan = PreviewScaler.plan(
                 inputWidth: inputW, inputHeight: inputH,
                 drawableWidth: Int(size.width), drawableHeight: Int(size.height),
                 integerScale: state.integerScale,
+                margin: Int((Self.pictureMargin * pixelsPerPoint).rounded()),
                 maxLongEdge: Self.maxTargetLongEdge)
             scaling = plan
-            // The picture's size on screen in points, for dragging the crop.
+            // The picture's size on screen in points (and the view's), for
+            // dragging the crop and panning.
             if let v = view, v.bounds.width > 0, size.width > 0 {
                 let k = size.width / v.bounds.width
                 state.previewDisplaySize = CGSize(width: CGFloat(plan.displayWidth) / k,
                                                   height: CGFloat(plan.displayHeight) / k)
+                state.previewViewSize = v.bounds.size
             }
             if Self.scaleLog {
                 let key = "\(Int(size.width))x\(Int(size.height))/\(plan.renderWidth)/\(plan.displayWidth)"
@@ -483,10 +492,21 @@ struct PreviewView: NSViewRepresentable {
                 plan: plan, drawableWidth: dst.width, drawableHeight: dst.height,
                 integerScale: state.integerScale,
                 zoom: state.zoom, panX: state.panX, panY: state.panY)
+            // The compare line stays on the picture: the view is wider than
+            // it at zoom 1, and a line out in the letterbox would split
+            // nothing. Kept a few pixels inside so it stays grabbable.
+            var lineX = state.compareLineX
+            if let r = geometry.visiblePicture, dst.width > 0 {
+                let inset = min(3 * Float(dst.width) / Float(max(1, view?.bounds.width ?? 1)), Float(r.width) / 2)
+                let lo = (Float(r.x) + inset) / Float(dst.width)
+                let hi = (Float(r.x + r.width) - inset) / Float(dst.width)
+                lineX = max(lo, min(hi, lineX))
+            }
+            (view as? PreviewMTKView)?.drawnCompareLineX = lineX
             compositor.composite(primary: primaryIn, secondary: secondaryIn, into: dst,
                                  plan: plan, geometry: geometry,
                                  overlay: .init(compareEnabled: state.compareEnabled,
-                                                compareLineX: state.compareLineX),
+                                                compareLineX: lineX),
                                  background: backgroundColor, commandBuffer: cb)
             if Self.scaleLog {
                 let sampled = compositor.lastSampledSize
@@ -597,6 +617,9 @@ final class PreviewMTKView: MTKView {
 
 
     weak var appState: AppState?
+    /// Where the composite last drew the compare line (0…1 of the view's
+    /// width): the stored position, kept on the picture.
+    var drawnCompareLineX: Float?
 
     private var spaceDown: Bool = false
     private var spaceCursorPushed: Bool = false
@@ -647,7 +670,7 @@ final class PreviewMTKView: MTKView {
             spaceCursorPushed = false
         }
         if state.compareEnabled {
-            let lineX = bounds.width * CGFloat(state.compareLineX)
+            let lineX = bounds.width * CGFloat(drawnCompareLineX ?? state.compareLineX)
             if abs(p.x - lineX) < 8 {
                 NSCursor.resizeLeftRight.set()
                 return
@@ -731,6 +754,7 @@ final class PreviewMTKView: MTKView {
 
     /// Keep the compare line a few points inside the edges so it never
     /// vanishes (or becomes ungrabbable) when dragged all the way across.
+    /// (The composite also keeps it on the picture.)
     private func clampedCompareX(_ p: CGPoint) -> Float {
         let m = 3.0 / max(bounds.width, 1)
         return Float(max(m, min(1 - m, p.x / bounds.width)))
@@ -740,6 +764,7 @@ final class PreviewMTKView: MTKView {
         guard let state = appState else { return }
         let p = convert(event.locationInWindow, from: nil)
         dragStartMouse = p
+        state.clampPan()        // a window resize can leave it past the limit
         dragStartPanX = state.panX
         dragStartPanY = state.panY
 
@@ -748,7 +773,7 @@ final class PreviewMTKView: MTKView {
             return
         }
         if state.compareEnabled {
-            let lineX = bounds.width * CGFloat(state.compareLineX)
+            let lineX = bounds.width * CGFloat(drawnCompareLineX ?? state.compareLineX)
             if abs(p.x - lineX) < 12 {
                 draggingCompareLine = true
                 state.compareLineX = clampedCompareX(p)
@@ -820,17 +845,22 @@ final class PreviewMTKView: MTKView {
             dragCrop(to: p)
             return
         }
-        if spaceDown && state.zoom > 1.0 {
+        if spaceDown && state.zoom > 1.0, let pic = pictureRect {
             state.spacePanned = true     // a pan, not a play/pause tap
-            // Pan in image-uv space. Drag right → image moves right, which in
-            // texture-space means panX increases.
-            let dx = Float(p.x - dragStartMouse.x) / Float(bounds.width)
-            let dy = Float(p.y - dragStartMouse.y) / Float(bounds.height)
-            // Clamp so we can't pan past the image edge.
-            let halfRange = (1.0 - 1.0 / state.zoom) * 0.5
-            state.panX = max(-halfRange, min(halfRange, dragStartPanX + dx / state.zoom))
+            // Pan in image-uv space, so the picture follows the pointer: a
+            // point of motion is 1 / (picture size · zoom) of the picture.
+            // Drag right → image moves right, which in texture-space means
+            // panX increases.
+            let dx = Float(p.x - dragStartMouse.x) / Float(pic.width)
+            let dy = Float(p.y - dragStartMouse.y) / Float(pic.height)
+            // Clamp so no letterbox shows while there's picture to show.
+            let limitX = PreviewGeometry.panLimit(zoom: state.zoom, viewExtent: Double(bounds.width),
+                                                  pictureExtent: Double(pic.width))
+            let limitY = PreviewGeometry.panLimit(zoom: state.zoom, viewExtent: Double(bounds.height),
+                                                  pictureExtent: Double(pic.height))
+            state.panX = max(-limitX, min(limitX, dragStartPanX + dx / state.zoom))
             // y in NSView is bottom-up; the shader's y is top-down, so flip.
-            state.panY = max(-halfRange, min(halfRange, dragStartPanY - dy / state.zoom))
+            state.panY = max(-limitY, min(limitY, dragStartPanY - dy / state.zoom))
         }
     }
 

@@ -73,7 +73,7 @@ Footage recorded digitally before it goes out as an analog signal. It runs real 
 - **Compare** splits the view: full pipeline on the left, the original on the right. Drag the line to move the split.
 - **Integer scale** snaps the picture to whole-pixel multiples, for perfectly even scanlines.
 - The **sparkles** button keeps tape noise and jitter moving. Leave it on for the real experience.
-- Zoom with the slider or ⌥-scroll; hold Space and drag to pan.
+- Zoom with the slider or ⌥-scroll; hold Space and drag to pan. Zoomed in, the picture fills the whole preview, not just its own frame.
 - Videos get a transport bar with play/pause and a frame-accurate scrubber. While a video is paused, the app renders ahead (the green line under the scrubber), so that stretch then plays back smoothly.
 - The palette fades when the mouse is idle; move the mouse to bring it back.
 
