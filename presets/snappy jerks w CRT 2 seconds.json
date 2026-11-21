@@ -1,4 +1,5 @@
 {
+  "description" : "Fast, jerky failures on a CRT, changing every few frames: the picture rolls and jumps, tears sideways, ghosts, gets hum bars and smears, and breaks up into fast-forward bars and dropouts. Loops in 2 s.",
   "digital" : {
     "enabled" : false,
     "values" : {
