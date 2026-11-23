@@ -98,4 +98,50 @@ final class Video1Tests: XCTestCase {
         XCTAssertTrue(a[0] == b[0] && a[10] == b[10] && a[20] == b[20], "keyframes arrive whole")
         XCTAssertTrue((1..<10).contains { a[$0] != b[$0] }, "loss shows between keyframes")
     }
+
+    /// `step` codes blocks on scratch memory (the array version made a frame
+    /// at 640 wide take 130 ms and playback stand still). It has to give
+    /// exactly what `codeBlock` gives: every look made with it depends on it.
+    func testTheFastBlockCoderMatchesTheReferenceExactly() {
+        var rng = SplitMix(seed: 0xB10C)
+        func value(_ kind: Int, _ i: Int, _ base: SIMD3<Float>, _ other: SIMD3<Float>) -> SIMD3<Float> {
+            let noise = SIMD3<Float>(Float(rng.unit()), Float(rng.unit()), Float(rng.unit())) * 2 - 1
+            switch kind {
+            case 0: return base                                              // flat
+            case 1: return base + noise * 3                                  // flat with grain
+            case 2: return i % 4 < 2 ? base : other                          // an edge
+            case 3: return (i / 4 < 2) == (i % 4 < 2) ? base + noise * 8 : other + noise * 8   // quarters
+            case 4: return base + (other - base) * (Float(i) / 15)           // a ramp
+            default: return SIMD3<Float>(Float(rng.unit()), Float(rng.unit()), Float(rng.unit())) * 255   // noise
+            }
+        }
+        let scratch = Video1Codec.Scratch()
+        defer { scratch.free() }
+        var modes: [Video1Codec.Mode: Int] = [:]
+        Video1Codec.members.withUnsafeBufferPointer { members in
+            for trial in 0..<6000 {
+                let kind = trial % 6
+                let base = SIMD3<Float>(Float(rng.unit()), Float(rng.unit()), Float(rng.unit())) * 255
+                let other = SIMD3<Float>(Float(rng.unit()), Float(rng.unit()), Float(rng.unit())) * 255
+                let src = (0..<16).map { value(kind, $0, base, other) }
+                // A reference a little, or a lot, off the block — or none.
+                let drift = Float([0, 0.5, 4, 40][trial / 6 % 4])
+                let reference: [SIMD3<Float>]? = trial % 5 == 0 ? nil : src.map {
+                    $0 + (SIMD3<Float>(Float(rng.unit()), Float(rng.unit()), Float(rng.unit())) * 2 - 1) * drift
+                }
+                let limit = Float([1, 48, 400, 3000, 60000][trial / 24 % 5])
+                let want = Video1Codec.codeBlock(src, reference: reference, limit: limit)
+                for i in 0..<16 { scratch.src[i] = src[i]; if let reference { scratch.ref[i] = reference[i] } }
+                let got = Video1Codec.codeBlock(scratch, hasReference: reference != nil, limit: limit,
+                                                members: members.baseAddress!)
+                XCTAssertEqual(got.mode, want.mode, "trial \(trial)")
+                for i in 0..<16 {
+                    XCTAssertTrue(got.pixels[i] == want.pixels[i], "trial \(trial), pixel \(i)")
+                }
+                modes[want.mode, default: 0] += 1
+            }
+        }
+        // Every way of coding a block came up.
+        for mode in [Video1Codec.Mode.skip, .fill, .two, .eight] { XCTAssertGreaterThan(modes[mode] ?? 0, 100, "\(mode)") }
+    }
 }

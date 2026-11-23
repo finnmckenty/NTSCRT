@@ -99,14 +99,24 @@
  },
  "curve": {
   "digital.aliasing": [
-   0.66,
-   0.99,
-   1.07
+   0.63,
+   0.93,
+   1.03
+  ],
+  "digital.bit_errors": [
+   0.04,
+   0.47,
+   0.63
+  ],
+  "digital.bitrate_limit": [
+   0.0,
+   1.0,
+   1.0
   ],
   "digital.ccd_response": [
    0.31,
-   0.51,
-   0.75
+   0.52,
+   0.74
   ],
   "digital.data_loss": [
    0.01,
@@ -121,12 +131,17 @@
   "digital.deblocking": [
    0.22,
    0.41,
-   0.69
+   0.68
   ],
   "digital.fixed_bitrate": [
-   0.98,
-   1.06,
-   1.07
+   0.92,
+   1.02,
+   1.02
+  ],
+  "digital.generations": [
+   0.54,
+   0.72,
+   0.86
   ],
   "digital.keyframe_interval": [
    1.0,
@@ -134,14 +149,19 @@
    1.0
   ],
   "digital.sharpening": [
-   0.28,
+   0.27,
    0.59,
    0.86
   ],
   "digital.sharpening_width": [
-   0.61,
-   0.82,
+   0.6,
+   0.81,
    0.95
+  ],
+  "digital.smear": [
+   0.41,
+   0.65,
+   0.84
   ],
   "glitch.brightness": [
    0.33,
@@ -225,26 +245,38 @@
   ]
  },
  "default": {
-  "digital.aliasing": 1.46,
-  "digital.ccd_response": 11.69,
-  "digital.chroma": 1.42,
-  "digital.codec": 3.24,
-  "digital.data_loss": 0.33,
-  "digital.datamosh": 2.27,
+  "digital.aliasing": 1.61,
+  "digital.bit_errors": 21.16,
+  "digital.bitrate_limit": 5.73,
+  "digital.block_size": 3.12,
+  "digital.ccd_response": 11.02,
+  "digital.chroma": 1.32,
+  "digital.chroma_upsampling": 0.29,
+  "digital.codec": 2.96,
+  "digital.concealment": 18.29,
+  "digital.data_loss": 0.31,
+  "digital.datamosh": 2.14,
   "digital.deblocking": 0.37,
-  "digital.fields": 11.22,
-  "digital.fixed_bitrate": 3.37,
-  "digital.frame_rate": 1.33,
-  "digital.keyframe_interval": 2.26,
+  "digital.fields": 11.88,
+  "digital.fixed_bitrate": 3.27,
+  "digital.frame_rate": 1.37,
+  "digital.generations": 8.25,
+  "digital.keyframe_interval": 2.13,
+  "digital.loss_pattern": 1.15,
   "digital.low_light_noise": 0.0,
-  "digital.noise_reduction": 1.43,
-  "digital.quality": 12.54,
-  "digital.saturation": 22.37,
-  "digital.sensor_noise": 2.08,
-  "digital.sharpening": 5.6,
-  "digital.sharpening_width": 2.78,
-  "digital.tint": 4.9,
-  "digital.white_balance": 7.73,
+  "digital.mosh_motion": 78.48,
+  "digital.mosh_speed": 130.64,
+  "digital.noise_reduction": 1.52,
+  "digital.quality": 12.21,
+  "digital.rate_buffer": 5.73,
+  "digital.saturation": 21.95,
+  "digital.sensor": 10.78,
+  "digital.sensor_noise": 2.02,
+  "digital.sharpening": 5.64,
+  "digital.sharpening_width": 2.81,
+  "digital.smear": 61.36,
+  "digital.tint": 4.6,
+  "digital.white_balance": 7.31,
   "glitch.afc_speed": 22.4,
   "glitch.brightness": 45.93,
   "glitch.closed_captions": 0.0,

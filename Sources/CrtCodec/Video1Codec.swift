@@ -122,6 +122,116 @@ enum Video1Codec {
         return (.eight, eight)
     }
 
+    // MARK: - the same, without allocating
+    //
+    // `codeBlock` above makes a dozen small arrays a block, and shares
+    // static ones between every core: at 640 × 480 (19,200 blocks) a frame
+    // took 130 ms, and playback stood still. `step` uses the versions
+    // below, which do the same arithmetic in the same order on scratch
+    // memory (tested equal to `codeBlock`, bit for bit).
+
+    /// Scratch for one thread: five 16-pixel blocks and 16 flags.
+    struct Scratch {
+        let base: UnsafeMutablePointer<SIMD3<Float>>
+        let hi: UnsafeMutablePointer<Bool>
+        var src: UnsafeMutablePointer<SIMD3<Float>> { base }
+        var ref: UnsafeMutablePointer<SIMD3<Float>> { base + 16 }
+        var fill: UnsafeMutablePointer<SIMD3<Float>> { base + 32 }
+        var two: UnsafeMutablePointer<SIMD3<Float>> { base + 48 }
+        var eight: UnsafeMutablePointer<SIMD3<Float>> { base + 64 }
+
+        init() {
+            base = .allocate(capacity: 80)
+            base.initialize(repeating: .zero, count: 80)
+            hi = .allocate(capacity: 16)
+            hi.initialize(repeating: false, count: 16)
+        }
+        func free() { base.deallocate(); hi.deallocate() }
+    }
+
+    /// Which pixels each coding works on: all sixteen, then the quarters.
+    static let members: [Int] = Array(0..<16) + quarters.flatMap { $0 }
+
+    /// `twoColors` on scratch memory: `members` points at `count` indices.
+    @inline(__always)
+    static func twoColors(_ pixels: UnsafePointer<SIMD3<Float>>, _ members: UnsafePointer<Int>, _ count: Int,
+                          into out: UnsafeMutablePointer<SIMD3<Float>>, hi: UnsafeMutablePointer<Bool>) -> Float {
+        var sum: Float = 0
+        for k in 0..<count { sum = sum + luma(pixels[members[k]]) }
+        let mean = sum / Float(count)
+        for k in 0..<count { hi[k] = luma(pixels[members[k]]) > mean }
+        var a = SIMD3<Float>(repeating: 0), b = a
+        var na: Float = 0, nb: Float = 0
+        for k in 0..<count {
+            let i = members[k]
+            if hi[k] { b += pixels[i]; nb += 1 } else { a += pixels[i]; na += 1 }
+        }
+        guard na > 0, nb > 0 else {
+            // All one brightness: one color, twice.
+            var m = SIMD3<Float>(repeating: 0)
+            for k in 0..<count { m = m + pixels[members[k]] }
+            m = m / Float(count)
+            let c = SIMD3(q555(m.x), q555(m.y), q555(m.z))
+            var e: Float = 0
+            for k in 0..<count { let i = members[k]; out[i] = c; e += distance(pixels[i], c) }
+            return e
+        }
+        a = a / na; b = b / nb
+        for k in 0..<count {
+            let i = members[k]
+            hi[k] = distance(pixels[i], b) < distance(pixels[i], a)
+        }
+        var a2 = SIMD3<Float>(repeating: 0), b2 = a2
+        na = 0; nb = 0
+        for k in 0..<count {
+            let i = members[k]
+            if hi[k] { b2 += pixels[i]; nb += 1 } else { a2 += pixels[i]; na += 1 }
+        }
+        if na > 0, nb > 0 { a = a2 / na; b = b2 / nb }
+        let qa = SIMD3(q555(a.x), q555(a.y), q555(a.z)), qb = SIMD3(q555(b.x), q555(b.y), q555(b.z))
+        var e: Float = 0
+        for k in 0..<count {
+            let i = members[k]
+            let c = distance(pixels[i], qb) < distance(pixels[i], qa) ? qb : qa
+            out[i] = c
+            e += distance(pixels[i], c)
+        }
+        return e
+    }
+
+    /// `codeBlock` on scratch memory: codes `s.src` (against `s.ref` when
+    /// `hasReference`) and returns the mode and where the coded pixels are.
+    @inline(__always)
+    static func codeBlock(_ s: Scratch, hasReference: Bool, limit: Float, members: UnsafePointer<Int>)
+        -> (mode: Mode, pixels: UnsafeMutablePointer<SIMD3<Float>>) {
+        let src = s.src
+        if hasReference {
+            var e: Float = 0
+            for i in 0..<16 { e += distance(src[i], s.ref[i]) }
+            if e <= limit { return (.skip, s.ref) }
+        }
+        var total = SIMD3<Float>(repeating: 0)
+        for i in 0..<16 { total = total + src[i] }
+        let mean = total / 16
+        let fill = SIMD3(q555(mean.x), q555(mean.y), q555(mean.z))
+        var fillError: Float = 0
+        for i in 0..<16 { fillError += distance(src[i], fill) }
+        if fillError <= limit {
+            for i in 0..<16 { s.fill[i] = fill }
+            return (.fill, s.fill)
+        }
+        let twoError = twoColors(src, members, 16, into: s.two, hi: s.hi)
+        var eightError: Float = 0
+        for q in 0..<4 { eightError += twoColors(src, members + 16 + 4 * q, 4, into: s.eight, hi: s.hi) }
+        let good = max(limit, eightError * 1.05 + 1e-3)
+        if fillError <= good {
+            for i in 0..<16 { s.fill[i] = fill }
+            return (.fill, s.fill)
+        }
+        if twoError <= good { return (.two, s.two) }
+        return (.eight, s.eight)
+    }
+
     /// Mean absolute luma change against the reference — how much there is
     /// to code (for the fixed-bitrate squeeze).
     static func change(_ a: CodecPicture, _ b: CodecPicture, geometry g: CodecGeometry) -> Float {
@@ -143,7 +253,7 @@ enum Video1Codec {
     static func step(_ state: CodecState, source: CodecPicture, kind: CodecFrameKind,
                      index: Int, settings s: DigitalCodec.FrameSettings) -> CodecPicture {
         let g = state.geometry
-        let lost = DigitalCodec.lostBlocks(amount: s.dataLoss, index: index, geometry: g)
+        let lost = DigitalCodec.lostBlocks(amount: s.dataLoss, index: index, geometry: g, pattern: s.lossPattern)
         let predicted = kind == .predicted && state.encoder != nil
         let encRef = predicted ? state.encoder : nil
         let complexity = predicted ? change(source, encRef!, geometry: g) : DigitalCodec.detail(source, geometry: g)
@@ -159,17 +269,21 @@ enum Video1Codec {
         let w = g.lumaW, cols = g.lumaW / 4
         var anyLoss = false
         if let lost { anyLoss = lost.contains(true) }
+        let mbCols = g.mbCols
+        Self.members.withUnsafeBufferPointer { table in
+        let members = table.baseAddress!
         DispatchQueue.concurrentPerform(iterations: g.lumaH / 4) { by in
-            var src = [SIMD3<Float>](repeating: .zero, count: 16)
-            var ref = src
+            let scratch = Scratch()
+            defer { scratch.free() }
+            let src = scratch.src, ref = scratch.ref
             for bx in 0..<cols {
                 for i in 0..<16 {
                     let k = (by * 4 + i / 4) * w + bx * 4 + i % 4
                     src[i] = rgb(source, k)
                     if let encRef { ref[i] = rgb(encRef, k) }
                 }
-                let coded = codeBlock(src, reference: encRef == nil ? nil : ref, limit: limit)
-                let mb = (by * 4 / 16) * g.mbCols + bx * 4 / 16
+                let coded = codeBlock(scratch, hasReference: encRef != nil, limit: limit, members: members)
+                let mb = (by * 4 / 16) * mbCols + bx * 4 / 16
                 let blockLost = lost?[mb] == true
                 for i in 0..<16 {
                     let k = (by * 4 + i / 4) * w + bx * 4 + i % 4
@@ -194,6 +308,7 @@ enum Video1Codec {
                     }
                 }
             }
+        }
         }
         state.encoder = enc
         state.vectors = Array(repeating: MotionVector(), count: g.mbCount)

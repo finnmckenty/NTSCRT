@@ -234,6 +234,15 @@ public final class PlaybackPipeline {
 
     public func setTargetAbsoluteIndex(_ i: Int) { targetAbsolute.store(i) }
 
+    /// The frame the producer is working on now (absolute index).
+    private let workingAbsolute = ManagedAtomicInt(0)
+    public func workingAbsoluteIndex() -> Int { workingAbsolute.load() }
+
+    /// Every frame has to be processed, in order (the Digital video stage
+    /// keeps a stream going): a producer that falls behind can't catch up
+    /// by skipping work, so the consumer's clock has to wait for it.
+    public var processesEveryFrame: Bool { config.snapshot().digital != nil }
+
     public func takeReady(schedule: Int, generation: Int) -> (output: Output?, dropped: Int) {
         queue.takeReady(schedule: schedule, generation: generation)
     }
@@ -268,6 +277,7 @@ public final class PlaybackPipeline {
         var reader = try? source.makeSequentialReader(startingAtFrame: startFrame, crop: crop)
         var frameIndex = startFrame
         var absolute = startFrame
+        workingAbsolute.store(absolute)
         let total = max(1, source.totalFrames)
         var perf = (decode: 0.0, ntsc: 0.0, push: 0.0, n: 0)
         func ms(_ from: UInt64) -> Double {
@@ -309,6 +319,7 @@ public final class PlaybackPipeline {
                     frameIndex = 0
                     continue
                 }
+                workingAbsolute.store(absolute)
                 // Frames already behind the consumer's schedule get dropped
                 // on arrival — decode them (h264 needs the sequence) but skip
                 // the NTSC cost, so catch-up runs at decode speed.

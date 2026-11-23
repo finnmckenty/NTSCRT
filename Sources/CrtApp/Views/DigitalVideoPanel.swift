@@ -116,6 +116,10 @@ private struct DigitalControl: View {
                     }
                     // Double-click returns to the Webcam format's value.
                     PropertySlider(value: value, range: min...max, step: param.step, neutral: param.defaultValue)
+                    // The limit as a real bitrate, for this picture.
+                    if param.id == "bitrate_limit", !idle, let label = state.digitalBitrateLabel {
+                        Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
             }
         }
@@ -135,6 +139,20 @@ private struct DigitalControl: View {
             return "Turn up Sensor noise first — this sets how much it grows in the dark."
         case "sharpening_width" where s["sharpening"] <= 0:
             return "Turn up Sharpening first — this sets how wide its halos reach."
+        case "chroma_upsampling" where s.chroma == .full:
+            return "Set Color below 4:4:4 first — at full resolution there is nothing to scale back up."
+        case "loss_pattern" where s["data_loss"] <= 0:
+            return "Turn up Data loss first — this sets where it falls."
+        case "concealment" where s["data_loss"] <= 0:
+            return "Turn up Data loss first — this sets what shows where data was lost."
+        case "rate_buffer" where s["bitrate_limit"] <= 0:
+            return "Turn up Bitrate limit first — this sets how many bits it lets the codec borrow."
+        case "rate_buffer" where s["keyframe_interval"] <= 0:
+            return "Set a keyframe interval above 0 first — with every frame compressed on its own, each gets the same bits and there is nothing to borrow."
+        case "mosh_motion" where s["keyframe_interval"] <= 0:
+            return "Set a keyframe interval above 0 first — added motion acts on the frames between keyframes."
+        case "mosh_speed" where s["keyframe_interval"] <= 0 || s["mosh_motion"] < 0.5:
+            return "Choose an Added motion first (and a keyframe interval above 0) — this sets its speed."
         default:
             return nil
         }

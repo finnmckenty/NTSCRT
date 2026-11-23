@@ -288,7 +288,21 @@ final class AppState {
         let elapsed = clockStart.duration(to: .now)
         let secs = Double(elapsed.components.seconds)
             + Double(elapsed.components.attoseconds) / 1e18
-        let schedule = playbackScheduleBase + Int(secs * playbackFPS)
+        var schedule = playbackScheduleBase + Int(secs * playbackFPS)
+        // The Digital video stage needs every frame in order, so when its
+        // codec is slower than real time the producer can't catch up by
+        // skipping frames: the clock waits for it, and playback slows down
+        // with every frame shown. Without this the schedule ran away from
+        // the producer, every frame arrived "too late", and nothing was
+        // shown at all (Block colors at 640 wide, 130 ms a frame: playback
+        // stood still — Finn, 2026-11-22).
+        if pipe.processesEveryFrame {
+            let limit = pipe.workingAbsoluteIndex() - 1
+            if schedule > limit {
+                playbackScheduleBase -= schedule - limit
+                schedule = limit
+            }
+        }
 
         pipe.setTargetAbsoluteIndex(schedule)
         let (out, dropped) = pipe.takeReady(schedule: schedule, generation: ntscGeneration)
@@ -750,8 +764,8 @@ final class AppState {
     // MARK: - Digital video (a camera and codec ahead of NTSC — CrtCodec)
 
     /// Off by default: unlike Glitch, a codec changes the picture as soon as
-    /// it runs. The first time it's switched on, its format is applied —
-    /// resolution (the Downscale) included.
+    /// it runs. Switched on, it runs with the settings it has: the MiniDV
+    /// tape look in a new window, at whatever the Downscale is.
     var digitalEnabled: Bool = false { didSet { markChainDirty(); noteChainInputEdited() } }
     // Values live in an unobserved store; views observe `digitalRevision`, which an
     // edit bumps at once and timeline playback/scrubbing at most ten times a
@@ -872,10 +886,13 @@ final class AppState {
     }
 
     func setDigitalEnabled(_ on: Bool) {
-        if on && !digitalFormatApplied {
-            applyDigitalFormat(DigitalFormat.matching(values: digitalValues, width: downscaleWidth)
-                               ?? DigitalFormat.all[0])
-        }
+        // Switched on for the first time, the stage runs with the settings
+        // it started with (`DigitalParam.startingValues`, the MiniDV tape
+        // look) and leaves the Downscale alone. It used to apply the first
+        // format here whenever the values matched none — which the
+        // starting values never do — so the starting look was thrown away
+        // for Webcam at 320 wide.
+        if on { digitalFormatApplied = true }
         digitalEnabled = on
     }
 
@@ -909,6 +926,14 @@ final class AppState {
     var digitalSourceFPS: Double {
         if let vs = videoSource { return Double(max(1, vs.frameRate)) }
         return Double(max(1, timelineFPS))
+    }
+
+    /// The Bitrate limit in real terms for the picture on screen ("≈ 163
+    /// kbps at 320 × 240, 15 fps"); nil when it's off or nothing is open.
+    var digitalBitrateLabel: String? {
+        guard let size = croppedSize else { return nil }
+        let capture = DigitalFrameInput.captureSize(width: size.width, height: size.height, downscale: downscaleSpec)
+        return digitalSettings.bitrateLabel(width: capture.width, height: capture.height, sourceFPS: digitalSourceFPS)
     }
 
     /// How the Digital knobs vary over the timeline, by frame (a still's
@@ -1860,7 +1885,7 @@ final class AppState {
     /// CRT, each line simply shows twice.
     var downscaleSpec: DownscaleSpec? {
         guard downscaleEnabled else { return nil }
-        if digitalEnabled && digitalSettings["fields"] >= 0.5 {
+        if digitalEnabled && digitalSettings.fields == .oneField {
             return DownscaleSpec(width: downscaleWidth, height: max(8, downscaleHeight / 2),
                                  method: downscaleMethod, lineHeight: 2)
         }

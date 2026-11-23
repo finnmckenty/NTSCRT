@@ -94,10 +94,21 @@ REQUIRES = {
     'ntsc.tracking_noise_snow_anisotropy': {'ntsc': {'settings': {'tracking_noise_snow_intensity': 0.5}}},
     'digital.low_light_noise': {'digital': {'values': {'sensor_noise': 0.5}}},
     'digital.datamosh': {'digital': {'values': {'keyframe_interval': 2}}},
+    'digital.loss_pattern': {'digital': {'values': {'data_loss': 1}}},
+    'digital.concealment': {'digital': {'values': {'data_loss': 1}}},
+    'digital.chroma_upsampling': {'digital': {'values': {'chroma': '4:1:1 (DV)'}}},
+    # (A 10 s interval: at the 2 s the renders are taken, an interval of 2
+    # would have just put the picture right.)
+    'digital.mosh_motion': {'digital': {'values': {'keyframe_interval': 10}}},
+    'digital.mosh_speed': {'digital': {'values': {'keyframe_interval': 10, 'mosh_motion': 'Pan'}}},
+    # (An interval of 2: the frame at 2 s is then a keyframe, which is what
+    # the buffer's size decides the budget of.)
+    'digital.rate_buffer': {'digital': {'values': {'bitrate_limit': 0.6, 'keyframe_interval': 2}}},
 }
 # (Still dead in some contexts, as they should be: Closed captions show only
 # when the picture rolls; Scale with video size does nothing at exactly 480
-# lines; AFC speed does nothing without the VCR's timing errors.)
+# lines; AFC speed does nothing without the VCR's timing errors; Loss pattern
+# on the still test picture only moves a patch of the same picture.)
 
 def controls(stage, describe):
     """(id, values to try, settings it needs) for each of a stage's controls.

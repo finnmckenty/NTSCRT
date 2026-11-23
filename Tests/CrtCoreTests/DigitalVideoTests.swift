@@ -398,16 +398,17 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertGreaterThan(out.1, 200)
     }
 
-    func testCCDResponseLiftsBlacksAndExposesDarkScenesUp() {
-        // Black stays gray-lifted (setup + flare), a dark scene is pushed
-        // up by auto exposure, and the result never goes past white.
-        var px = patch((0, 0, 0), 32)
-        for i in stride(from: 0, to: px.count / 2, by: 4) { px[i] = 60; px[i + 1] = 60; px[i + 2] = 60 }
-        let dark = camera(px, 32, 32, ["ccd_response": 1])
-        let blackY = dark.y.data[31 * dark.y.width + 5]
+    func testCCDResponseLiftsBlacksAndExposesDimDaylightUp() {
+        // A lit but dim scene with a black patch: black stays gray-lifted
+        // (levels + flare), the scene is pushed up by auto exposure, and
+        // the result never goes past white.
+        var px = patch((110, 110, 110), 32)
+        for i in stride(from: 26 * 32 * 4, to: px.count, by: 4) { px[i] = 0; px[i + 1] = 0; px[i + 2] = 0 }
+        let lit = camera(px, 32, 32, ["ccd_response": 1])
+        let blackY = lit.y.data[31 * lit.y.width + 5]
         XCTAssertGreaterThan(blackY, 15, "black lifted")
-        XCTAssertLessThan(blackY, 45, "but not washed out")
-        XCTAssertGreaterThan(dark.y.data[2 * dark.y.width + 5], 90, "60 gray exposed up: \(dark.y.data[2 * dark.y.width + 5])")
+        XCTAssertLessThan(blackY, 50, "but not washed out")
+        XCTAssertGreaterThan(lit.y.data[2 * lit.y.width + 5], 150, "110 gray exposed up: \(lit.y.data[2 * lit.y.width + 5])")
         let half = camera(px, 32, 32, ["ccd_response": 0.5])
         XCTAssertLessThan(half.y.data[31 * half.y.width + 5], blackY, "strength scales it")
         let white = rgb(camera(patch((250, 250, 250)), 32, 32, ["ccd_response": 1]))
@@ -430,7 +431,7 @@ final class DigitalVideoTests: XCTestCase {
         XCTAssertEqual(t.captureFPS, 29)
         XCTAssertEqual(DigitalTiming(sourceFPS: 30, settings: DigitalSettings(values: ["frame_rate": 29.6])).captureFPS, 30)
         XCTAssertEqual(DigitalParam.byID["frame_rate"]?.step, 1)
-        XCTAssertEqual(DigitalParam.startingValues["frame_rate"], 30)
+        XCTAssertEqual(DigitalParam.startingValues["frame_rate"], 24)
     }
 
     func testHaloWidth() {

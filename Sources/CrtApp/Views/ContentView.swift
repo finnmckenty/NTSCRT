@@ -876,6 +876,14 @@ struct ContentView: View {
             checkJumps("one field: ", [75, 5, 61, 62])
             state.setDigitalValue("fields", 0)
 
+            // 2b′. A starved stream in big blocks, compressed twice more:
+            // the buffer's state, the frames the encoder skips and the
+            // generations come out the same played and jumped to.
+            for (id, v) in [("quality", 0.9), ("bitrate_limit", 0.75), ("rate_buffer", 0.3),
+                            ("block_size", 2), ("generations", 2)] { state.setDigitalValue(id, v) }
+            await fillCache("limit: ")
+            checkJumps("limit: ", [75, 5, 119, 61, 62, 30])
+
             // 2c. Video 1: the same guarantees with block colors and loss —
             // skipped and lost blocks stay stale, coded blocks heal.
             state.applyDigitalFormat(DigitalFormat.byID["cd_rom"]!)
@@ -932,7 +940,11 @@ struct ContentView: View {
                       && state.downscaleWidth == 320)
             } catch { check("look round trip", false, "\(error)") }
 
-            // 5. The panel, as the sidebar shows it.
+            // 5. The panel, as the sidebar shows it (the limit on, for its
+            // kbps line).
+            state.setDigitalValue("bitrate_limit", 0.6)
+            check("the limit reads as a real bitrate", state.digitalBitrateLabel?.contains("kbps") == true,
+                  state.digitalBitrateLabel ?? "nil")
             let host = NSHostingView(rootView: DigitalVideoPanel().environment(state).frame(width: 300)
                 .padding(16).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .dark))
             host.appearance = NSAppearance(named: .darkAqua)
