@@ -6,6 +6,7 @@
 //! - `NTSCRT_SOURCE=<image>` (or a path argument): open it at launch.
 //! - `NTSCRT_UI_SNAPSHOT=<png>`: once the first frame is on screen, save a
 //!   screenshot of the window there and quit.
+//! - `NTSCRT_ZOOM=2.5[,0.2,-0.1]`: the preview zoomed (and panned).
 //! - `NTSCRT_OPEN=vcr,glitch`: open only these sidebar sections (source,
 //!   crop, downscale, digital, ntsc, vcr, glitch, crt).
 //! - `NTSCRT_GLITCH=vcr=1,tape_mold=0.7`: set glitch knobs (ids as in the
@@ -86,6 +87,11 @@ fn twirl(ui: &mut egui::Ui, open: &mut bool) {
     egui::collapsing_header::paint_default_icon(ui, if *open { 1.0 } else { 0.0 }, &response);
 }
 
+/// Playing with the Digital video stage on, the clock is held when the
+/// picture showing is more than this many frames behind it (a frame or two
+/// is the render's own delay).
+const PLAYBACK_LAG: usize = 3;
+
 struct Rendered {
     seq: u64,
     result: Result<Image, String>,
@@ -141,6 +147,9 @@ struct App {
     zoom: f32,
     /// Pan in normalized picture space.
     pan: egui::Vec2,
+    /// The preview area's size and the picture's at 100%, in points (for
+    /// the pan limit).
+    preview_extents: (egui::Vec2, egui::Vec2),
     compare: bool,
     compare_x: f32,
     dragging_compare: bool,
@@ -279,6 +288,7 @@ impl App {
             integer_scale: true,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            preview_extents: (egui::Vec2::splat(1.0), egui::Vec2::splat(1.0)),
             compare: false,
             compare_x: 0.5,
             dragging_compare: false,
@@ -377,6 +387,15 @@ impl App {
             // 0–3: Standard … Maximum.
             if let Some(q) = std::env::var("NTSCRT_EXPORT_QUALITY").ok().and_then(|v| v.parse::<usize>().ok()) {
                 app.export_quality = q.min(3);
+            }
+        }
+        // NTSCRT_ZOOM=factor[,pan x,pan y]: the preview zoomed (and panned,
+        // in shares of the picture), for headless checks.
+        if let Ok(z) = std::env::var("NTSCRT_ZOOM") {
+            let v: Vec<f32> = z.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            if let Some(&zoom) = v.first() {
+                app.zoom = zoom.clamp(1.0, 12.0);
+                app.pan = egui::vec2(v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0));
             }
         }
         if let Ok(list) = std::env::var("NTSCRT_OPEN") {
@@ -695,7 +714,7 @@ impl App {
             return None;
         }
         let d = DownscaleSpec::for_width(self.downscale_width, picture, self.method);
-        Some(if self.digital_enabled && self.digital_settings().get("fields") >= 0.5 { d.one_field() } else { d })
+        Some(if self.digital_enabled && self.digital_settings().fields() == ntscrt_engine::codec::FieldMode::OneField { d.one_field() } else { d })
     }
 
     /// The frame number the Digital stage gets: a clip's own, the
@@ -944,7 +963,7 @@ impl App {
             ui.checkbox(&mut self.digital_enabled, egui::RichText::new("Digital video").heading())
                 .on_hover_text("Record the picture with a digital camera and codec before it goes out as an analog signal. Ready-made formats — webcam, video call, MiniDV and more — are in the Preset menu, and also set the Downscale resolution.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset").on_hover_text("Back to the starting values (Cheap camcorder)").clicked() {
+                if ui.small_button("Reset").on_hover_text("Back to the starting values (MiniDV tape)").clicked() {
                     self.digital_values = ntscrt_engine::codec::DigitalParam::starting_values();
                 }
             });
@@ -955,7 +974,9 @@ impl App {
         }
         self.digital_was_enabled = self.digital_enabled;
         if self.open.digital {
-            ui.add_enabled_ui(self.digital_enabled, |ui| digital_panel::controls(ui, &mut self.digital_values));
+            // The Bitrate limit in real terms, for the picture on screen.
+            let bitrate = self.picture_size().and_then(|p| self.digital_frame(p)).and_then(|d| d.settings.bitrate_label(d.capture.0, d.capture.1, d.source_fps));
+            ui.add_enabled_ui(self.digital_enabled, |ui| digital_panel::controls(ui, &mut self.digital_values, bitrate.as_deref()));
         }
         ui.separator();
 
@@ -1370,10 +1391,13 @@ impl App {
         self.clamp_pan();
     }
 
-    /// Panning can't go past the picture's edge at the current zoom.
+    /// Panning can't bring the picture's edge inside the view's at the
+    /// current zoom (zoomed in, the picture fills the whole preview area).
     fn clamp_pan(&mut self) {
-        let half = (1.0 - 1.0 / self.zoom) * 0.5;
-        self.pan = egui::vec2(self.pan.x.clamp(-half, half), self.pan.y.clamp(-half, half));
+        let (view, picture) = self.preview_extents;
+        let x = preview::pan_limit(self.zoom, view.x, picture.x);
+        let y = preview::pan_limit(self.zoom, view.y, picture.y);
+        self.pan = egui::vec2(self.pan.x.clamp(-x, x), self.pan.y.clamp(-y, y));
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
@@ -1414,6 +1438,8 @@ impl App {
             egui::vec2(plan.display_width as f32, plan.display_height as f32) / ppp,
         );
         let zoomed = self.zoom > 1.001;
+        self.preview_extents = (avail.size(), target.size());
+        self.clamp_pan();
 
         // Animate: the frame advances at 30 frames a second with NTSC on and
         // 60 without (the Mac's draw rates), as fast as rendering keeps up.
@@ -1459,17 +1485,22 @@ impl App {
             self.sent_at = Instant::now();
         }
 
-        // What part of the picture is shown: all of it, or zoomed and panned.
-        let uv = if zoomed {
-            let c = egui::pos2(0.5 - self.pan.x, 0.5 - self.pan.y);
-            let half = 0.5 / self.zoom;
-            egui::Rect::from_min_max(egui::pos2(c.x - half, c.y - half), egui::pos2(c.x + half, c.y + half))
+        // Where the picture is drawn: its fit rectangle, or zoomed in, that
+        // rectangle grown about the panned point — past its own shape into
+        // the rest of the preview area, so more of the picture shows without
+        // panning (the Mac's 0.27.5). The painter clips it to the area.
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        let shown = if zoomed {
+            let size = target.size() * self.zoom;
+            egui::Rect::from_min_size(target.center() - egui::vec2((0.5 - self.pan.x) * size.x, (0.5 - self.pan.y) * size.y), size)
         } else {
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+            target
         };
+        // What of it is on screen.
+        let visible = shown.intersect(avail);
         let painter = ui.painter_at(avail);
         if let Some(tex) = &self.texture {
-            painter.image(tex.id(), target, uv, egui::Color32::WHITE);
+            painter.image(tex.id(), shown, uv, egui::Color32::WHITE);
         }
         if self.compare {
             if self.source_texture.is_none() {
@@ -1478,10 +1509,11 @@ impl App {
                     self.source_texture = Some(ctx.load_texture("original", color, egui::TextureOptions::LINEAR));
                 }
             }
-            let x = target.left() + self.compare_x * target.width();
+            // The line stays on the visible picture.
+            let x = (target.left() + self.compare_x * target.width()).clamp(visible.left(), visible.right());
             if let Some(tex) = &self.source_texture {
-                let right = egui::Rect::from_min_max(egui::pos2(x, target.top()), target.max);
-                painter.with_clip_rect(right).image(tex.id(), target, uv, egui::Color32::WHITE);
+                let right = egui::Rect::from_min_max(egui::pos2(x, visible.top()), visible.max);
+                painter.with_clip_rect(right).image(tex.id(), shown, uv, egui::Color32::WHITE);
             }
         }
 
@@ -1491,18 +1523,18 @@ impl App {
         // The line takes a press anywhere within COMPARE_GRAB of it, or on
         // its grip; judged where the press began (a drag only starts once
         // the pointer has moved, by which time it may have left the line).
-        let line_x = target.left() + self.compare_x * target.width();
-        let grip = egui::Rect::from_center_size(egui::pos2(line_x, target.center().y), egui::vec2(COMPARE_GRIP.x + 8.0, COMPARE_GRIP.y + 8.0));
-        let on_line = |p: egui::Pos2| (p.x - line_x).abs() <= COMPARE_GRAB && p.y >= target.top() - COMPARE_GRAB && p.y <= target.bottom() + COMPARE_GRAB || grip.contains(p);
+        let line_x = (target.left() + self.compare_x * target.width()).clamp(visible.left(), visible.right());
+        let grip = egui::Rect::from_center_size(egui::pos2(line_x, visible.center().y), egui::vec2(COMPARE_GRIP.x + 8.0, COMPARE_GRIP.y + 8.0));
+        let on_line = |p: egui::Pos2| (p.x - line_x).abs() <= COMPARE_GRAB && p.y >= visible.top() - COMPARE_GRAB && p.y <= visible.bottom() + COMPARE_GRAB || grip.contains(p);
         let hovering_line = self.compare && response.hover_pos().is_some_and(on_line);
         if self.compare {
             let x = line_x;
             let lit = hovering_line || self.dragging_compare;
             let shadow = egui::Color32::from_black_alpha(110);
-            painter.line_segment([egui::pos2(x, target.top()), egui::pos2(x, target.bottom())], egui::Stroke::new(3.0, shadow));
-            painter.line_segment([egui::pos2(x, target.top()), egui::pos2(x, target.bottom())], egui::Stroke::new(if lit { 2.0 } else { 1.0 }, egui::Color32::WHITE));
+            painter.line_segment([egui::pos2(x, visible.top()), egui::pos2(x, visible.bottom())], egui::Stroke::new(3.0, shadow));
+            painter.line_segment([egui::pos2(x, visible.top()), egui::pos2(x, visible.bottom())], egui::Stroke::new(if lit { 2.0 } else { 1.0 }, egui::Color32::WHITE));
             // The grip: a pill with arrows, on the line at mid-height.
-            let pill = egui::Rect::from_center_size(egui::pos2(x, target.center().y), COMPARE_GRIP);
+            let pill = egui::Rect::from_center_size(egui::pos2(x, visible.center().y), COMPARE_GRIP);
             let fill = if lit { egui::Color32::WHITE } else { egui::Color32::from_gray(235) };
             painter.rect_filled(pill.expand(1.0), COMPARE_GRIP.x / 2.0 + 1.0, shadow);
             painter.rect_filled(pill, COMPARE_GRIP.x / 2.0, fill);
@@ -1528,9 +1560,12 @@ impl App {
         if response.dragged() {
             if self.dragging_compare {
                 if let Some(p) = response.interact_pointer_pos() {
-                    // A few points inside the edges, so it can always be grabbed again.
-                    let m = (3.0 / target.width().max(1.0)).min(0.5);
-                    self.compare_x = ((p.x - target.left()) / target.width()).clamp(m, 1.0 - m);
+                    // A few points inside the visible picture's edges, so
+                    // it can always be grabbed again.
+                    let w = target.width().max(1.0);
+                    let lo = (visible.left() - target.left() + 3.0) / w;
+                    let hi = (visible.right() - target.left() - 3.0) / w;
+                    self.compare_x = ((p.x - target.left()) / w).clamp(lo.min(hi), hi.max(lo));
                 }
             } else if self.crop_enabled && !zoomed {
                 // Drag the picture to move the crop: the picture follows the hand.
@@ -1602,7 +1637,21 @@ impl eframe::App for App {
                     self.source = None;
                     continue;
                 }
-                Event::Rendered { seq, result, millis, source } => {
+                Event::Rendered { seq, result, millis, source, frame } => {
+                    // The Digital video stage needs every frame in order,
+                    // so a codec slower than real time can't catch up by
+                    // skipping: the clock waits for it, and playback slows
+                    // down with every frame shown (the Mac's
+                    // consumePipelinedFrame). Left running, the clock got
+                    // 90 frames ahead and the producer jumped, re-running
+                    // the codec from a keyframe each time.
+                    if let (Some(shown), Some(_), Some(v), true) = (frame, self.playing, self.video, self.digital_enabled) {
+                        let total = v.total_frames.max(1);
+                        let late = (self.video_frame + total - shown % total) % total;
+                        if late > PLAYBACK_LAG && late <= total / 2 {
+                            self.playing = Some((Instant::now(), (shown + 2) % total));
+                        }
+                    }
                     if let Some(src) = source {
                         // While a clip plays this is every frame: refill the
                         // texture rather than make a new one, and a clip's

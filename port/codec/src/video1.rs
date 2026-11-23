@@ -274,7 +274,7 @@ impl Video1Codec {
     /// drag, so a lost keyframe is coded as one that arrived).
     pub fn step(state: &mut CodecState, source: &CodecPicture, kind: CodecFrameKind, index: i64, s: &FrameSettings) -> Arc<CodecPicture> {
         let g = state.geometry;
-        let lost = DigitalCodec::lost_blocks(s.data_loss, index, &g);
+        let lost = DigitalCodec::lost_blocks(s.data_loss, index, &g, s.loss_pattern);
         let predicted = kind == CodecFrameKind::Predicted && state.encoder.is_some();
         let enc_ref: Option<Arc<CodecPicture>> = if predicted { state.encoder.clone() } else { None };
         let complexity = match &enc_ref {

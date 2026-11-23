@@ -89,7 +89,7 @@ fn more_quality_never_hurts() {
                 &src,
                 CodecFrameKind::Key,
                 0,
-                &FrameSettings { quality: q, fixed_bitrate: 0.0, data_loss: 0.0 },
+                &FrameSettings::new(q, 0.0, 0.0),
             );
             let mut e = 0f32;
             for y in 0..h {

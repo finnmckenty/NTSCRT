@@ -106,6 +106,19 @@ pub fn plan_with(input: (u32, u32), drawable: (u32, u32), integer_scale: bool, m
     }
 }
 
+/// How far the picture can be panned at `zoom`, as a share of its own size
+/// either way from center, so its edge never comes inside the view's (the
+/// Mac's `PreviewGeometry.panLimit`). `view` is the preview area's extent
+/// along one axis, `picture` the picture's at 100%. Zoomed in, the picture
+/// grows past its fit rectangle into the rest of the view; while it's still
+/// smaller than the view along an axis it stays centered there.
+pub fn pan_limit(zoom: f32, view: f32, picture: f32) -> f32 {
+    if !(zoom > 0.0 && picture > 0.0) {
+        return 0.0;
+    }
+    (0.5 - view / (2.0 * picture * zoom)).max(0.0)
+}
+
 /// Smallest whole multiple of `k_display` reaching the floor within the
 /// texture budget (so the downsample is an exact integer factor).
 fn render_multiple(k_display: u32, iw: u32, ih: u32, min_render: u32, max_long_edge: u32) -> u32 {
@@ -177,6 +190,22 @@ mod tests {
         assert_eq!(p.display_multiple, 0);
         assert!(p.display_width <= 200 && p.display_width > 0);
         assert!(p.render_multiple >= MIN_RENDER_MULTIPLE);
+    }
+
+    #[test]
+    fn a_zoomed_picture_pans_until_its_edge_meets_the_views() {
+        // A picture as wide as the view: the old rule, half of what's off screen.
+        assert!((pan_limit(2.0, 800.0, 800.0) - 0.25).abs() < 1e-6);
+        assert_eq!(pan_limit(1.0, 800.0, 800.0), 0.0);
+        // A tall picture in a wide view (600 of 1000 across): centered until
+        // it's zoomed past the view's width, then it pans.
+        assert_eq!(pan_limit(1.5, 1000.0, 600.0), 0.0);
+        assert!((pan_limit(2.5, 1000.0, 600.0) - (0.5 - 1000.0 / 3000.0)).abs() < 1e-6);
+        // At the limit the picture's edge is exactly at the view's.
+        let (zoom, view, picture) = (3.0f32, 1000.0f32, 600.0f32);
+        let size = picture * zoom;
+        let left = view / 2.0 - (0.5 - pan_limit(zoom, view, picture)) * size;
+        assert!(left.abs() < 1e-3, "{left}");
     }
 
     #[test]

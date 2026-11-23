@@ -161,6 +161,16 @@ func history(_ name: String?, base: DigitalSettings) -> DigitalHistory? {
             s.values["sharpening"] = n > 10 ? 0.7 : 0.2
             return s
         }
+    case "limit":
+        // The Bitrate limit, its Buffer and the error controls keyframed.
+        return DigitalHistory(id: 13) { n in
+            var s = base
+            s.values["bitrate_limit"] = n > 12 ? 0.8 : 0.3
+            s.values["rate_buffer"] = n > 25 ? 0.5 : 0.1
+            s.values["bit_errors"] = n > 30 ? 0.6 : 0
+            s.values["generations"] = n > 34 ? 2 : 0
+            return s
+        }
     default: fatalError("history \(name!)")
     }
 }
@@ -207,6 +217,9 @@ switch args.count > 1 ? args[1] : "" {
 case "tables":
     print("DCT_BASIS: \(hex(DigitalCodec.basis))")
     print("SRGB_TO_LINEAR: \(hex(DigitalVideoRenderer.srgbToLinear))")
+    print("DCT_BASIS_4: \(hex(DigitalCodec.basis4))")
+    print("DCT_BASIS_16: \(hex(DigitalCodec.basis16))")
+    print("BLOCK_GAIN_4_16: \(hex([DigitalCodec.blockGain(4), DigitalCodec.blockGain(16)]))")
 case "run":
     let cases = parseCases(args[2])
     let dir = URL(fileURLWithPath: args[3])

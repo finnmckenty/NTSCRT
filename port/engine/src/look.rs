@@ -188,7 +188,7 @@ impl Look {
         let downscale = match (self.downscale_enabled.unwrap_or(true), self.downscale_width) {
             (true, Some(w)) => {
                 let d = crate::DownscaleSpec::for_width(w, source, self.downscale_method.unwrap_or(DownscaleMethod::Nearest));
-                Some(if digital.as_ref().is_some_and(|s| s.get("fields") >= 0.5) { d.one_field() } else { d })
+                Some(if digital.as_ref().is_some_and(|s| s.fields() == ntscrt_codec::FieldMode::OneField) { d.one_field() } else { d })
             }
             _ => None,
         };

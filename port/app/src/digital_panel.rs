@@ -6,12 +6,14 @@
 use std::collections::BTreeMap;
 
 use eframe::egui;
-use ntscrt_engine::codec::{DigitalGroup, DigitalParam, DigitalParamKind, DigitalSettings};
+use ntscrt_engine::codec::{ChromaSubsampling, DigitalGroup, DigitalParam, DigitalParamKind, DigitalSettings};
 
 use crate::ntsc_panel::edited;
 
-/// Returns true when a control changed.
-pub fn controls(ui: &mut egui::Ui, values: &mut BTreeMap<String, f64>) -> bool {
+/// Returns true when a control changed. `bitrate` is the Bitrate limit as a
+/// real rate for the picture on screen ("≈ 163 kbps at 320 × 240, 15 fps"),
+/// shown under its slider.
+pub fn controls(ui: &mut egui::Ui, values: &mut BTreeMap<String, f64>, bitrate: Option<&str>) -> bool {
     let mut changed = false;
     let settings = DigitalSettings::new(values.iter().map(|(k, v)| (k.clone(), *v)));
     let codec = settings.codec();
@@ -57,6 +59,11 @@ pub fn controls(ui: &mut egui::Ui, values: &mut BTreeMap<String, f64>) -> bool {
                             values.insert(p.id.to_string(), p.step.map_or(v, |s| (v / s).round() * s));
                             changed = true;
                         }
+                        if p.id == "bitrate_limit" && reason.is_none() {
+                            if let Some(label) = bitrate {
+                                ui.weak(label);
+                            }
+                        }
                     }
                 });
             }
@@ -71,6 +78,19 @@ fn idle_reason(id: &str, s: &DigitalSettings) -> Option<&'static str> {
         "datamosh" if s.get("keyframe_interval") <= 0.0 => Some("Set a keyframe interval above 0 first — datamoshing throws keyframes away."),
         "low_light_noise" if s.get("sensor_noise") <= 0.0 => Some("Turn up Sensor noise first — this sets how much it grows in the dark."),
         "sharpening_width" if s.get("sharpening") <= 0.0 => Some("Turn up Sharpening first — this sets how wide its halos reach."),
+        "chroma_upsampling" if s.chroma() == ChromaSubsampling::Full => Some("Set Color below 4:4:4 first — at full resolution there is nothing to scale back up."),
+        "loss_pattern" if s.get("data_loss") <= 0.0 => Some("Turn up Data loss first — this sets where it falls."),
+        "concealment" if s.get("data_loss") <= 0.0 => Some("Turn up Data loss first — this sets what shows where data was lost."),
+        "rate_buffer" if s.get("bitrate_limit") <= 0.0 => Some("Turn up Bitrate limit first — this sets how many bits it lets the codec borrow."),
+        "rate_buffer" if s.get("keyframe_interval") <= 0.0 => {
+            Some("Set a keyframe interval above 0 first — with every frame compressed on its own, each gets the same bits and there is nothing to borrow.")
+        }
+        "mosh_motion" if s.get("keyframe_interval") <= 0.0 => {
+            Some("Set a keyframe interval above 0 first — added motion acts on the frames between keyframes.")
+        }
+        "mosh_speed" if s.get("keyframe_interval") <= 0.0 || s.get("mosh_motion") < 0.5 => {
+            Some("Choose an Added motion first (and a keyframe interval above 0) — this sets its speed.")
+        }
         _ => None,
     }
 }

@@ -44,7 +44,8 @@ pub enum Request {
 pub enum Event {
     Adapter(String),
     Opened(Result<VideoInfo, String>),
-    Rendered { seq: u64, result: Result<Image, String>, millis: u128, source: Option<Image> },
+    /// `frame`: while a clip plays, the clip frame this picture is.
+    Rendered { seq: u64, result: Result<Image, String>, millis: u128, source: Option<Image>, frame: Option<usize> },
     /// Frames of the clip baked under the current settings.
     Cached(usize),
 }
@@ -392,6 +393,6 @@ pub fn run(requests: Receiver<Request>, events: Sender<Event>, ctx: egui::Contex
         if source.is_some() {
             sent_key = key;
         }
-        send(Event::Rendered { seq, result, millis: t.elapsed().as_millis(), source });
+        send(Event::Rendered { seq, result, millis: t.elapsed().as_millis(), source, frame: playing.then_some(shown_frame) });
     }
 }

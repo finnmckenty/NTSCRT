@@ -99,14 +99,14 @@ fn dct_round_trip_is_identity() {
     let mut coef = [0f32; 64];
     let mut back = [0f32; 64];
     let mut tmp = [0f32; 64];
-    DigitalCodec::forward_dct(&block, 8, &mut coef, &mut tmp, &c);
-    DigitalCodec::inverse_dct(&coef, &mut back, 8, &mut tmp, &c);
+    DigitalCodec::forward_dct(&block, 8, &mut coef, &mut tmp, &c, 8);
+    DigitalCodec::inverse_dct(&coef, &mut back, 8, &mut tmp, &c, 8);
     for i in 0..64 {
         assert!((back[i] - block[i]).abs() <= 1e-3);
     }
     // Orthonormal: a flat block of 1s has DC 8 and nothing else.
     let flat = [1f32; 64];
-    DigitalCodec::forward_dct(&flat, 8, &mut coef, &mut tmp, &c);
+    DigitalCodec::forward_dct(&flat, 8, &mut coef, &mut tmp, &c, 8);
     assert!((coef[0] - 8.0).abs() <= 1e-4);
     assert!(coef[1..].iter().map(|v| v.abs()).fold(0f32, f32::max) <= 1e-4);
 }
@@ -196,7 +196,7 @@ fn lower_frame_rate_repeats_frames() {
 
 // MARK: - the same frame however it's reached
 
-fn check_jumps_match_playing(st: &DigitalSettings, frames: i64, cut: Option<i64>, history: Option<&DigitalHistory>, label: &str) {
+pub(crate) fn check_jumps_match_playing(st: &DigitalSettings, frames: i64, cut: Option<i64>, history: Option<&DigitalHistory>, label: &str) {
     let straight = played(st, frames, cut, history);
     let mut jumper = DigitalVideoRenderer::new();
     for n in [frames - 1, 3, 27, 12, frames - 2, 0, 33] {
@@ -365,7 +365,7 @@ fn formats_are_recognized_by_their_values() {
 // MARK: - the camera
 
 /// A capture-size picture through the camera alone.
-fn camera(px: &[u8], w: usize, h: usize, values: &[(&str, f64)]) -> CodecPicture {
+pub(crate) fn camera(px: &[u8], w: usize, h: usize, values: &[(&str, f64)]) -> CodecPicture {
     let mut v: Vec<(&str, f64)> = vec![("sensor_noise", 0.0), ("noise_reduction", 0.0), ("chroma", 0.0)];
     v.extend_from_slice(values);
     DigitalVideoRenderer::capture(px, &CodecGeometry::new(w, h, ChromaSubsampling::Full), &s(&v), 0)
@@ -391,12 +391,12 @@ fn picture_controls_are_neutral_by_default() {
 }
 
 /// RGB back from a picture's first pixel (full color resolution).
-fn rgb(p: &CodecPicture, k: usize) -> (f32, f32, f32) {
+pub(crate) fn rgb(p: &CodecPicture, k: usize) -> (f32, f32, f32) {
     let (y, cb, cr) = (p.y.data[k], p.cb.data[k] - 128.0, p.cr.data[k] - 128.0);
     (y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb)
 }
 
-fn patch(c: (u8, u8, u8), n: usize) -> Vec<u8> {
+pub(crate) fn patch(c: (u8, u8, u8), n: usize) -> Vec<u8> {
     (0..n * n).flat_map(|_| [c.0, c.1, c.2, 255]).collect()
 }
 
@@ -420,20 +420,21 @@ fn ccd_response_clips_warm_highlights_red_first() {
 }
 
 #[test]
-fn ccd_response_lifts_blacks_and_exposes_dark_scenes_up() {
-    // Black stays gray-lifted (setup + flare), a dark scene is pushed up by
-    // auto exposure, and the result never goes past white.
-    let mut px = patch((0, 0, 0), 32);
-    for i in (0..px.len() / 2).step_by(4) {
-        px[i] = 60;
-        px[i + 1] = 60;
-        px[i + 2] = 60;
+fn ccd_response_lifts_blacks_and_exposes_dim_daylight_up() {
+    // A lit but dim scene with a black patch: black stays gray-lifted
+    // (levels + flare), the scene is pushed up by auto exposure, and the
+    // result never goes past white.
+    let mut px = patch((110, 110, 110), 32);
+    for i in (26 * 32 * 4..px.len()).step_by(4) {
+        px[i] = 0;
+        px[i + 1] = 0;
+        px[i + 2] = 0;
     }
-    let dark = camera(&px, 32, 32, &[("ccd_response", 1.0)]);
-    let black_y = dark.y.data[31 * dark.y.width + 5];
+    let lit = camera(&px, 32, 32, &[("ccd_response", 1.0)]);
+    let black_y = lit.y.data[31 * lit.y.width + 5];
     assert!(black_y > 15.0, "black lifted");
-    assert!(black_y < 45.0, "but not washed out");
-    assert!(dark.y.data[2 * dark.y.width + 5] > 90.0, "60 gray exposed up: {}", dark.y.data[2 * dark.y.width + 5]);
+    assert!(black_y < 50.0, "but not washed out");
+    assert!(lit.y.data[2 * lit.y.width + 5] > 150.0, "110 gray exposed up: {}", lit.y.data[2 * lit.y.width + 5]);
     let half = camera(&px, 32, 32, &[("ccd_response", 0.5)]);
     assert!(half.y.data[31 * half.y.width + 5] < black_y, "strength scales it");
     let white = rgb(&camera(&patch((250, 250, 250), 32), 32, 32, &[("ccd_response", 1.0)]), 0);
@@ -469,7 +470,7 @@ fn frame_rate_is_whole_frames() {
     assert_eq!(t.capture_fps, 29.0);
     assert_eq!(DigitalTiming::new(30.0, &s(&[("frame_rate", 29.6)])).capture_fps, 30.0);
     assert_eq!(DigitalParam::by_id("frame_rate").unwrap().step, Some(1.0));
-    assert_eq!(DigitalParam::starting_values()["frame_rate"], 30.0);
+    assert_eq!(DigitalParam::starting_values()["frame_rate"], 24.0);
 }
 
 #[test]

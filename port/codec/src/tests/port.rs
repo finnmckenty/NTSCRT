@@ -5,7 +5,7 @@ use super::digital_video::{frame, s, CAPTURE, SIZE};
 use crate::codec::*;
 use crate::renderer::*;
 use crate::resample::scale_lanczos;
-use crate::tables::{DCT_BASIS_BITS, SRGB_TO_LINEAR_BITS};
+use crate::tables::{BLOCK_GAIN_16_BITS, BLOCK_GAIN_4_BITS, DCT_BASIS_16_BITS, DCT_BASIS_4_BITS, DCT_BASIS_BITS, SRGB_TO_LINEAR_BITS};
 
 /// Values within one unit in the last place (or exact, where the platform's
 /// math library is the Mac's).
@@ -35,6 +35,28 @@ fn embedded_tables_are_the_formulas() {
             assert_eq!(v, t, "sRGB {i} on the Mac's libm");
         }
     }
+}
+
+#[test]
+fn the_other_block_sizes_tables_are_the_formulas_too() {
+    for (n, bits) in [(4usize, &DCT_BASIS_4_BITS[..]), (16, &DCT_BASIS_16_BITS[..])] {
+        for u in 0..n {
+            let a = if u == 0 { (1.0f64 / n as f64).sqrt() } else { (2.0f64 / n as f64).sqrt() };
+            for x in 0..n {
+                let v = (a * ((2 * x + 1) as f64 * u as f64 * std::f64::consts::PI / (2 * n) as f64).cos()) as f32;
+                let t = f32::from_bits(bits[u * n + x]);
+                assert!(close(v, t), "basis {n}: {u},{x}: {v} vs {t}");
+            }
+        }
+    }
+    // Block gain: (n / 8)^0.5.
+    assert!(close(0.5f32.powf(0.5), f32::from_bits(BLOCK_GAIN_4_BITS)));
+    assert!(close(2f32.powf(0.5), f32::from_bits(BLOCK_GAIN_16_BITS)));
+    assert_eq!(DigitalCodec::block_gain(8), 1.0);
+    // The 8×8 tables are untouched by the scaling, and a table for another
+    // size starts from the same average step.
+    assert_eq!(DigitalCodec::table(&DigitalCodec::LUMA_TABLE, 8), DigitalCodec::LUMA_TABLE.to_vec());
+    assert_eq!(DigitalCodec::table(&DigitalCodec::LUMA_TABLE, 16)[0], 16.0 * DigitalCodec::block_gain(16));
 }
 
 #[test]

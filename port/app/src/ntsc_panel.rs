@@ -194,7 +194,7 @@ mod tests {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     controls(ui, &settings, &mut values);
                     for d in digital.iter_mut() {
-                        crate::digital_panel::controls(ui, d);
+                        crate::digital_panel::controls(ui, d, None);
                     }
                     for (id, params, v) in shaders.iter_mut() {
                         for p in params.iter() {

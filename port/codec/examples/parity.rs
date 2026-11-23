@@ -201,6 +201,15 @@ fn history(name: Option<&str>, base: &DigitalSettings) -> Option<DigitalHistory>
             s.set("sharpening", if n > 10 { 0.7 } else { 0.2 });
             s
         })),
+        Some("limit") => Some(DigitalHistory::new(13, move |n| {
+            // The Bitrate limit, its Buffer and the error controls keyframed.
+            let mut s = b.clone();
+            s.set("bitrate_limit", if n > 12 { 0.8 } else { 0.3 });
+            s.set("rate_buffer", if n > 25 { 0.5 } else { 0.1 });
+            s.set("bit_errors", if n > 30 { 0.6 } else { 0.0 });
+            s.set("generations", if n > 34 { 2.0 } else { 0.0 });
+            s
+        })),
         Some(other) => panic!("history {other}"),
     }
 }

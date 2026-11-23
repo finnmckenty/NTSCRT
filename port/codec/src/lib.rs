@@ -49,12 +49,12 @@ mod tables;
 mod video1;
 
 pub use codec::{
-    CodecFrameKind, CodecGeometry, CodecPicture, CodecPlane, CodecState, DigitalCodec, FrameSettings, MotionVector,
-    SplitMix, Steps,
+    BitError, CodecFrameKind, CodecGeometry, CodecPicture, CodecPlane, CodecState, Concealment, DigitalCodec,
+    FrameSettings, LossPattern, MotionVector, SplitMix, Steps,
 };
 pub use params::{
     ChromaSubsampling, DigitalCodecKind, DigitalFormat, DigitalGroup, DigitalParam, DigitalParamKind, DigitalSettings,
-    STRUCTURE_IDS,
+    FieldMode, SensorKind, STRUCTURE_IDS,
 };
 pub use renderer::{CcdResponse, DigitalHistory, DigitalTiming, DigitalVideoRenderer, FrameVisitor};
 pub use video1::{Video1Codec, Video1Mode, V3};

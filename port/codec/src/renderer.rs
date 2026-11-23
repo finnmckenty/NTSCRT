@@ -13,8 +13,11 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::codec::{clampf, CodecFrameKind, CodecGeometry, CodecPicture, CodecState, DigitalCodec, FrameSettings, SplitMix, Steps};
-use crate::params::{hash_f64, swift_max, swift_min, DigitalCodecKind, DigitalSettings};
+use crate::codec::{
+    clampf, CodecFrameKind, CodecGeometry, CodecPicture, CodecState, Concealment, DigitalCodec, FrameSettings, LossPattern,
+    SplitMix, Steps,
+};
+use crate::params::{hash_f64, swift_max, swift_min, DigitalCodecKind, DigitalSettings, FieldMode, SensorKind};
 use crate::resample::scale_lanczos;
 use crate::tables::SRGB_TO_LINEAR_BITS;
 use crate::video1::Video1Codec;
@@ -147,6 +150,63 @@ impl SettingsFor<'_> {
     }
 }
 
+/// What the sensor readings kept between calls were made for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SensingKey {
+    source: (usize, usize),
+    width: usize,
+    height: usize,
+    aliasing: f64,
+    sensor: f64,
+}
+
+/// What the sensor reads of the frames one call needs: the current one, and
+/// earlier ones (decoded on demand, the last few kept), so an interlaced
+/// camera's earlier field doesn't cost another decode of the frame before.
+struct Sensing<'a, 'v> {
+    cache: Vec<(i64, Vec<u8>)>,
+    now: Vec<u8>,
+    n: i64,
+    earlier: Option<&'a mut FrameVisitor<'v>>,
+    size: (usize, usize),
+    optics: &'a DigitalSettings,
+    mode: FieldMode,
+}
+
+impl Sensing<'_, '_> {
+    /// What the sensor read of source frame `f`: `None` when it can't be had.
+    fn sensed_frame(&mut self, f: i64) -> Option<Vec<u8>> {
+        if f == self.n || self.earlier.is_none() {
+            return Some(self.now.clone());
+        }
+        if let Some(hit) = self.cache.iter().find(|e| e.0 == f) {
+            return Some(hit.1.clone());
+        }
+        let mut out: Option<Vec<u8>> = None;
+        let (size, optics) = (self.size, self.optics);
+        let ok = (self.earlier.as_mut().unwrap())(f, &mut |base, w, h, rb| {
+            out = Some(DigitalVideoRenderer::sense(base, w, h, rb, size, optics));
+        });
+        if !ok {
+            return None;
+        }
+        let out = out?;
+        self.cache.push((f, out.clone()));
+        if self.cache.len() > 3 {
+            self.cache.remove(0);
+        }
+        Some(out)
+    }
+
+    /// The picture the camera hands the codec for source frame `f`.
+    fn captured(&mut self, f: i64) -> Option<Vec<u8>> {
+        // (The earlier field first: frames are asked for in order.)
+        let before = if self.mode.is_interlaced() && f > 0 { self.sensed_frame(f - 1) } else { None };
+        let now = self.sensed_frame(f)?;
+        Some(DigitalVideoRenderer::fields(&now, before.as_deref(), self.size, self.mode))
+    }
+}
+
 /// The Digital video stage for one consumer (the preview, playback, or one
 /// export): a camera plus the codec, holding the stream's state between
 /// frames.
@@ -170,6 +230,11 @@ pub struct DigitalVideoRenderer {
     /// The decoded picture of `last_capture`, as RGBA at the capture size.
     shown: Vec<u8>,
     shown_size: (usize, usize),
+
+    /// What the sensor read for the last couple of source frames (before the
+    /// fields are put together). Valid for one sensing setup (`sensed_for`).
+    sensed: Vec<(i64, Vec<u8>)>,
+    sensed_for: Option<SensingKey>,
 
     checkpoints: HashMap<CheckpointKey, CodecState>,
     checkpoint_order: VecDeque<CheckpointKey>,
@@ -214,6 +279,8 @@ impl DigitalVideoRenderer {
             run_settings: None,
             shown: Vec::new(),
             shown_size: (0, 0),
+            sensed: Vec::new(),
+            sensed_for: None,
             checkpoints: HashMap::new(),
             checkpoint_order: VecDeque::new(),
             checkpoint_bytes: 0,
@@ -307,7 +374,7 @@ impl DigitalVideoRenderer {
     ) -> bool {
         let structure = settings;
         let timing = DigitalTiming::new(source_fps, structure);
-        let geometry = CodecGeometry::new(capture_size.0, capture_size.1, structure.chroma());
+        let geometry = CodecGeometry::with_block(capture_size.0, capture_size.1, structure.chroma(), structure.block_size());
         let key = StreamKey { geometry, timing, history: history.map(|h| h.id) };
         if Some(key) != self.stream {
             self.stream = Some(key);
@@ -321,8 +388,40 @@ impl DigitalVideoRenderer {
         let now = sf.at(c);
         self.last_run_length = 0;
 
-        // The current picture at the capture size, scaled once.
-        let current = Self::scale(pixels, width, height, row_bytes, capture_size, structure);
+        // What the sensor reads of the current frame, scaled once, and the
+        // capture made of it. An interlaced camera's frame is two fields a
+        // moment apart: this frame's even lines, the frame before's odd ones.
+        let sensing_key = SensingKey {
+            source: (width, height),
+            width: capture_size.0,
+            height: capture_size.1,
+            aliasing: structure.get("aliasing"),
+            sensor: structure.get("sensor"),
+        };
+        if Some(sensing_key) != self.sensed_for || earlier.is_none() {
+            self.sensed.clear();
+        }
+        self.sensed_for = Some(sensing_key);
+        let sensed_now = Self::sense(pixels, width, height, row_bytes, capture_size, structure);
+        // The same frame number reading differently is another clip (or
+        // another crop of it): nothing remembered belongs to it.
+        if self.sensed.iter().any(|e| e.0 == n && e.1 != sensed_now) {
+            self.sensed.clear();
+        }
+        let field_mode = structure.fields();
+        let mut sensing = Sensing {
+            cache: std::mem::take(&mut self.sensed),
+            now: sensed_now,
+            n,
+            earlier: earlier.take(),
+            size: capture_size,
+            optics: structure,
+            mode: field_mode,
+        };
+        let current = match sensing.captured(n) {
+            Some(c) => c,
+            None => Self::fields(&sensing.now, None, capture_size, field_mode),
+        };
 
         let last = self.last_capture;
         let mut deferred = false;
@@ -335,7 +434,7 @@ impl DigitalVideoRenderer {
                 let src: Option<Cow<[u8]>> = if timing.frame_of_capture(k) == n {
                     Some(Cow::Borrowed(&current))
                 } else {
-                    Self::earlier_capture(k, &timing, earlier.as_deref_mut(), &current, capture_size, structure)
+                    sensing.captured(timing.frame_of_capture(k)).map(Cow::Owned)
                 };
                 let Some(src) = src else {
                     ok = false;
@@ -344,12 +443,20 @@ impl DigitalVideoRenderer {
                 self.advance(k, &src, &geometry, &timing, &sf.at(k), key, history);
             }
             if !ok {
-                deferred = self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
+                deferred = self.rerun(c, n, &current, &geometry, &timing, key, history, &mut sensing, &sf);
             }
         } else {
-            deferred = self.rerun(c, n, &current, &geometry, &timing, key, history, earlier.as_deref_mut(), &sf);
+            deferred = self.rerun(c, n, &current, &geometry, &timing, key, history, &mut sensing, &sf);
         }
         self.last_settings = Some(now);
+        // Keep this frame (and the one before) for the next call.
+        let Sensing { mut cache, now: sensed_now, .. } = sensing;
+        cache.retain(|e| e.0 != n);
+        cache.push((n, sensed_now));
+        if cache.len() > 3 {
+            cache.remove(0);
+        }
+        self.sensed = cache;
         deferred
     }
 
@@ -367,7 +474,7 @@ impl DigitalVideoRenderer {
         timing: &DigitalTiming,
         key: StreamKey,
         history: Option<&DigitalHistory>,
-        mut earlier: Option<&mut FrameVisitor<'_>>,
+        sensing: &mut Sensing<'_, '_>,
         sf: &SettingsFor<'_>,
     ) -> bool {
         let g = timing.keyframe_every;
@@ -376,8 +483,13 @@ impl DigitalVideoRenderer {
         let mut restored: Option<CodecState> = None;
         if timing.intra_only() {
             // Each frame stands alone; only the one before (for patching lost
-            // blocks) matters.
-            start = swift_max(0, c - 1);
+            // blocks) matters — except on tape, where a patch holds what the
+            // decoder last showed: back to the last clean read (and the frame
+            // before that, which a stream's patch at it would use).
+            let now = sf.at(c);
+            let held = now.get("data_loss") > 0.0 && now.get("loss_pattern").round() as i64 != 0;
+            let clean = (c / DigitalCodec::TAPE_REFRESH) * DigitalCodec::TAPE_REFRESH;
+            start = swift_max(0, (if held { swift_min(c, clean) } else { c }) - 1);
         } else {
             let mut b = (c / g) * g;
             while b > 0 {
@@ -409,9 +521,9 @@ impl DigitalVideoRenderer {
         if first > c {
             // The checkpoint is the frame itself.
             let s = sf.at(c);
-            let step = Steps::new(s.get("quality"), 1.0).inter;
+            let step = Steps::with_block(s.get("quality"), 1.0, geometry.block).inter;
             let decoded = self.state.as_ref().unwrap().decoder.clone().unwrap();
-            self.shown = Self::render(&decoded, geometry, &s, step);
+            self.shown = Self::present(&decoded, geometry, &s, step);
             self.shown_size = (geometry.width, geometry.height);
             self.last_capture = Some(c);
             return false;
@@ -425,30 +537,11 @@ impl DigitalVideoRenderer {
             let src: Cow<[u8]> = if timing.frame_of_capture(k) == n {
                 Cow::Borrowed(current)
             } else {
-                Self::earlier_capture(k, timing, earlier.as_deref_mut(), current, (geometry.width, geometry.height), &sf.at(c))
-                    .unwrap_or(Cow::Borrowed(current))
+                sensing.captured(timing.frame_of_capture(k)).map(Cow::Owned).unwrap_or(Cow::Borrowed(current))
             };
             self.advance(k, &src, geometry, timing, &sf.at(k), key, history);
         }
         false
-    }
-
-    /// The capture-size picture for capture `k`, from an earlier frame — or
-    /// the current one when the picture never changes.
-    fn earlier_capture<'c>(
-        k: i64,
-        timing: &DigitalTiming,
-        earlier: Option<&mut FrameVisitor<'_>>,
-        current: &'c [u8],
-        size: (usize, usize),
-        optics: &DigitalSettings,
-    ) -> Option<Cow<'c, [u8]>> {
-        let Some(earlier) = earlier else { return Some(Cow::Borrowed(current)) };
-        let mut out: Option<Vec<u8>> = None;
-        let ok = earlier(timing.frame_of_capture(k), &mut |base, w, h, rb| {
-            out = Some(Self::scale(base, w, h, rb, size, optics));
-        });
-        if ok { out.map(Cow::Owned) } else { None }
     }
 
     /// Code capture `k` and keep what the decoder shows.
@@ -473,6 +566,13 @@ impl DigitalVideoRenderer {
             quality: settings.get("quality"),
             fixed_bitrate: settings.get("fixed_bitrate"),
             data_loss: settings.get("data_loss"),
+            loss_pattern: LossPattern::from_raw(settings.get("loss_pattern").round() as i64).unwrap_or(LossPattern::Packets),
+            concealment: Concealment::from_raw(settings.effective("concealment").round() as i64).unwrap_or(Concealment::LastPicture),
+            bit_errors: settings.effective("bit_errors"),
+            motion: settings.effective("mosh_motion").round() as i64,
+            motion_speed: settings.effective("mosh_speed"),
+            bits_per_pixel: settings.bits_per_pixel(),
+            buffer_frames: swift_max(0.0, settings.get("rate_buffer")) * timing.capture_fps,
         };
         let (shown, step) = match settings.codec() {
             DigitalCodecKind::Dct => DigitalCodec::step(state, &picture, kind, k, &frame),
@@ -480,7 +580,7 @@ impl DigitalVideoRenderer {
         };
         self.last_run_length += 1;
         self.last_capture = Some(k);
-        self.shown = Self::render(&shown, geometry, settings, step);
+        self.shown = Self::present(&shown, geometry, settings, step);
         self.shown_size = (geometry.width, geometry.height);
 
         // A run under one set of settings can be checkpointed at keyframes
@@ -530,7 +630,16 @@ impl DigitalVideoRenderer {
     /// at each sample, for strong moiré even from sources not much sharper
     /// than the camera. Then, for One field, every other line repeated.
     pub fn scale(base: &[u8], width: usize, height: usize, row_bytes: usize, size: (usize, usize), optics: &DigitalSettings) -> Vec<u8> {
+        Self::fields(&Self::sense(base, width, height, row_bytes, size, optics), None, size, optics.fields())
+    }
+
+    /// The sensor's reading of one source frame (see `scale`), before the
+    /// fields are put together. A one-chip sensor reads all three colors at
+    /// the same place (there is no prism to offset them) and then sees only
+    /// one of them at each pixel.
+    pub fn sense(base: &[u8], width: usize, height: usize, row_bytes: usize, size: (usize, usize), optics: &DigitalSettings) -> Vec<u8> {
         let (cw, ch) = size;
+        let one_chip = optics.get("sensor") >= 0.5;
         let mut out = vec![0u8; cw * ch * 4];
         if width == cw && height == ch {
             for y in 0..height {
@@ -566,8 +675,8 @@ impl DigitalVideoRenderer {
                 for x in 0..cw {
                     let center = (x as f64 + 0.5) * kx;
                     let xg = swift_min(width - 1, center as usize);
-                    let xr = swift_min(width as i64 - 1, swift_max(0, (center - kx / 3.0) as i64)) as usize;
-                    let xb = swift_min(width - 1, (center + kx / 3.0) as usize);
+                    let xr = if one_chip { xg } else { swift_min(width as i64 - 1, swift_max(0, (center - kx / 3.0) as i64)) as usize };
+                    let xb = if one_chip { xg } else { swift_min(width - 1, (center + kx / 3.0) as usize) };
                     let i = x * 4;
                     let pr = read(xr, 0);
                     let pg = read(xg, 1);
@@ -579,13 +688,329 @@ impl DigitalVideoRenderer {
                 }
             });
         }
-        if optics.get("fields") >= 0.5 {
-            // One field: the even lines, each shown twice.
-            let row = cw * 4;
-            let mut y = 1;
-            while y < ch {
-                out.copy_within((y - 1) * row..y * row, y * row);
-                y += 2;
+        match optics.sensor() {
+            SensorKind::ThreeChips => {}
+            SensorKind::Mosaic => Self::mosaic(&mut out, cw, ch),
+            SensorKind::Complementary => Self::complementary(&mut out, cw, ch),
+        }
+        out
+    }
+
+    /// A one-chip sensor: a mosaic of color filters (red and green on even
+    /// lines, green and blue on odd ones), so each pixel reads one color, and
+    /// the camera fills in the other two from the nearest pixels that have
+    /// them. Flat areas come out right; at an edge or in fine detail the
+    /// three colors are guessed from different places, which shows as false
+    /// color and a zipper along the edge.
+    pub fn mosaic(rgba: &mut [u8], w: usize, h: usize) {
+        if !(w >= 2 && h >= 2) {
+            return;
+        }
+        let src = rgba.to_vec();
+        // Neighbors past the edge are mirrored (keeping each one's color).
+        let mx = |x: isize| -> usize { (if x < 0 { -x } else if x >= w as isize { 2 * w as isize - 2 - x } else { x }) as usize };
+        let my = |y: isize| -> usize { (if y < 0 { -y } else if y >= h as isize { 2 * h as isize - 2 - y } else { y }) as usize };
+        // Channel `c` (0 red, 1 green, 2 blue) at a pixel.
+        let at = |x: isize, y: isize, c: usize| -> i64 { src[(my(y) * w + mx(x)) * 4 + c] as i64 };
+        const RED: usize = 0;
+        const GREEN: usize = 1;
+        const BLUE: usize = 2;
+        rgba.par_chunks_mut(w * 4).enumerate().for_each(|(y, o)| {
+            let yi = y as isize;
+            for x in 0..w {
+                let xi = x as isize;
+                let even_x = x % 2 == 0;
+                let even_y = y % 2 == 0;
+                let (r, g, b): (i64, i64, i64);
+                if even_x == even_y {
+                    // A red (even, even) or blue (odd, odd) pixel: green from
+                    // the four beside it, the other color from the four
+                    // diagonals.
+                    let own = if even_x { RED } else { BLUE };
+                    let other = if even_x { BLUE } else { RED };
+                    g = (at(xi - 1, yi, GREEN) + at(xi + 1, yi, GREEN) + at(xi, yi - 1, GREEN) + at(xi, yi + 1, GREEN) + 2) / 4;
+                    let d = (at(xi - 1, yi - 1, other) + at(xi + 1, yi - 1, other) + at(xi - 1, yi + 1, other) + at(xi + 1, yi + 1, other) + 2) / 4;
+                    let mine = at(xi, yi, own);
+                    r = if even_x { mine } else { d };
+                    b = if even_x { d } else { mine };
+                } else {
+                    // A green pixel: red and blue from the two beside it,
+                    // along the row or the column.
+                    g = at(xi, yi, GREEN);
+                    let across = if even_y { RED } else { BLUE };
+                    let along = if even_y { BLUE } else { RED };
+                    let a = (at(xi - 1, yi, across) + at(xi + 1, yi, across) + 1) / 2;
+                    let c = (at(xi, yi - 1, along) + at(xi, yi + 1, along) + 1) / 2;
+                    r = if even_y { a } else { c };
+                    b = if even_y { c } else { a };
+                }
+                o[x * 4] = r as u8;
+                o[x * 4 + 1] = g as u8;
+                o[x * 4 + 2] = b as u8;
+            }
+        });
+    }
+
+    // MARK: - the camcorder's one chip (complementary filters)
+    //
+    // Most one-chip camcorders of the 90s didn't use red, green and blue
+    // filters. Theirs were cyan, yellow, magenta and green — each passing two
+    // thirds of the light instead of one — laid out
+    //
+    //     Cy Ye Cy Ye
+    //     G  Mg G  Mg
+    //     Cy Ye Cy Ye
+    //     Mg G  Mg G
+    //
+    // and read two rows at a time, summed (field integration: one field pairs
+    // rows 0+1, 2+3…, the other 1+2, 3+4…). Along a summed line the pixels
+    // alternate between two sums, whose average is brightness (2R + 3G + 2B)
+    // and whose difference is one color-difference signal: 2R − G on one
+    // line, 2B − G on the field's next. Each line therefore has only one of
+    // the two, and takes the other from the line before it in its field (a
+    // one-line delay).
+    //
+    // Everything that makes these cameras look the way they do follows from
+    // that, with nothing added: color has half the detail across and comes a
+    // line late down the picture, so it smears and fringes at horizontal
+    // edges; a sharp vertical edge reads as a difference between neighboring
+    // pixels, which is what color is, so it picks up false color; brightness
+    // is softened a little both ways by the sums.
+
+    /// What the photosite at (x, y) reads of linear red, green and blue.
+    #[inline(always)]
+    pub fn complementary_site(x: isize, y: usize, r: f32, g: f32, b: f32) -> f32 {
+        let even_x = x & 1 == 0;
+        match y & 3 {
+            // Cy, Ye
+            0 | 2 => {
+                if even_x { g + b } else { r + g }
+            }
+            // G, Mg
+            1 => {
+                if even_x { g } else { r + b }
+            }
+            // Mg, G
+            _ => {
+                if even_x { r + b } else { g }
+            }
+        }
+    }
+
+    /// Linear RGB from complementary photosites, as the camera forms it. The
+    /// planes hold columns −2…w+2 and rows 0…h (`w + 5` by `h + 1`). Even
+    /// lines read `even`, odd lines `odd`: the two fields are separate
+    /// exposures, so their noise differs (a noise-free picture is passed as
+    /// both).
+    pub fn complementary_colors(even: &[f32], odd: &[f32], w: usize, h: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let pw = w + 5;
+        let mut luma = vec![0f32; w * h];
+        let mut color = vec![0f32; w * h]; // 2R − G or 2B − G, by line
+        luma.par_chunks_mut(w).zip(color.par_chunks_mut(w)).enumerate().for_each(|(y, (l, c))| {
+            let p = &(if y & 1 == 0 { even } else { odd })[y * pw..];
+            // The line as read: each pixel and the one below it.
+            let mut sum = vec![0f32; pw];
+            for k in 0..pw {
+                sum[k] = p[k] + p[k + pw];
+            }
+            // 2R − G lines pair an odd pixel less the even one before it;
+            // 2B − G lines the other way.
+            let red_line = y & 3 < 2;
+            for x in 0..w {
+                let k = x + 2;
+                l[x] = (sum[k - 1] + 2.0 * sum[k] + sum[k + 1]) / 4.0;
+                let mut acc = 0f32;
+                for (j, weight) in [(k - 2, 1f32), (k - 1, 3.0), (k, 3.0), (k + 1, 1.0)] {
+                    let step = sum[j + 1] - sum[j];
+                    acc += weight * (if ((j as isize - 2) & 1 == 0) == red_line { step } else { -step });
+                }
+                c[x] = acc / 8.0;
+            }
+        });
+        let mut r = vec![0f32; w * h];
+        let mut g = vec![0f32; w * h];
+        let mut b = vec![0f32; w * h];
+        for y in 0..h {
+            let red_line = y & 3 < 2;
+            // The other color difference: the line before in this field.
+            let from = if y >= 2 { y - 2 } else { y + 2 };
+            for x in 0..w {
+                let own = color[y * w + x];
+                let other = color[from * w + x];
+                let cr = if red_line { own } else { other };
+                let cb = if red_line { other } else { own };
+                let green = (2.0 * luma[y * w + x] - cr - cb) / 5.0;
+                g[y * w + x] = green;
+                r[y * w + x] = (cr + green) / 2.0;
+                b[y * w + x] = (cb + green) / 2.0;
+            }
+        }
+        (r, g, b)
+    }
+
+    /// A one-chip camcorder's reading of the picture (see above), in place.
+    pub fn complementary(rgba: &mut [u8], w: usize, h: usize) {
+        if !(w >= 4 && h >= 4) {
+            return;
+        }
+        let pw = w + 5;
+        let ph = h + 1;
+        let mut sites = vec![0f32; pw * ph];
+        for y in 0..ph {
+            let sy = swift_min(h - 1, y);
+            for k in 0..pw {
+                let x = k as isize - 2;
+                let i = (sy * w + swift_min(w as isize - 1, swift_max(0, x)) as usize) * 4;
+                sites[y * pw + k] = Self::complementary_site(
+                    x,
+                    y,
+                    srgb_to_linear(rgba[i] as usize),
+                    srgb_to_linear(rgba[i + 1] as usize),
+                    srgb_to_linear(rgba[i + 2] as usize),
+                );
+            }
+        }
+        let (r, g, b) = Self::complementary_colors(&sites, &sites, w, h);
+        for i in 0..(w * h) {
+            rgba[i * 4] = clampf(Self::linear_to_srgb(clampf(r[i], 0.0, 1.0)).round(), 0.0, 255.0) as u8;
+            rgba[i * 4 + 1] = clampf(Self::linear_to_srgb(clampf(g[i], 0.0, 1.0)).round(), 0.0, 255.0) as u8;
+            rgba[i * 4 + 2] = clampf(Self::linear_to_srgb(clampf(b[i], 0.0, 1.0)).round(), 0.0, 255.0) as u8;
+        }
+    }
+
+    // MARK: - a one-chip sensor's grain
+
+    /// Noise at a photosite for Sensor noise at 100%, on the 0–255 scale.
+    /// Three chips' grain is 7 in brightness and 11 along each color signal —
+    /// set by eye, stronger in color than three sensors' own noise would be
+    /// (that would be about equal in all three: 0.67, 0.62 and 0.66 of the
+    /// photosite's). So the two can't be matched part for part; this is the
+    /// photosite noise with the same total energy:
+    /// √((7² + 11² + 11²) / (0.67² + 0.62² + 0.66²)).
+    pub const PHOTOSITE_NOISE: f32 = 15.1;
+
+    /// Unit noise at every photosite, put through the sensor's own color
+    /// reconstruction: what its grain looks like in red, green and blue.
+    /// (The reconstruction is linear, so the picture's and the noise's can be
+    /// made apart and added.) On one chip each color is pieced together from
+    /// several photosites, so the grain isn't independent from pixel to
+    /// pixel: color noise comes out in blotches a few pixels across — which
+    /// color subsampling then can't average away — while brightness grain,
+    /// summed over more light, is finer and weaker.
+    pub fn sensor_grain(sensor: SensorKind, w: usize, h: usize, index: i64) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+        let plane = |tag: u64, pw: usize, ph: usize| -> Vec<f32> {
+            let mut out = vec![0f32; pw * ph];
+            out.par_chunks_mut(pw).enumerate().for_each(|(y, o)| {
+                let mut seeder = SplitMix::new(
+                    (index as u64).wrapping_mul(0x2545_F491_4F6C_DD1D)
+                        ^ (y as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        ^ tag.wrapping_mul(0xD6E8_FEB8_6659_FD93),
+                );
+                let mut rng = SplitMix::new(seeder.next());
+                for x in 0..pw {
+                    let a = rng.unit();
+                    let b = rng.unit();
+                    o[x] = (a + b - 1.0) as f32 * 2.449;
+                }
+            });
+            out
+        };
+        match sensor {
+            SensorKind::ThreeChips => None,
+            SensorKind::Mosaic => {
+                if !(w >= 2 && h >= 2) {
+                    return None;
+                }
+                Some(Self::mosaic_colors(&plane(1, w, h), w, h))
+            }
+            SensorKind::Complementary => {
+                if !(w >= 4 && h >= 4) {
+                    return None;
+                }
+                let even = plane(2, w + 5, h + 1);
+                let odd = plane(3, w + 5, h + 1);
+                Some(Self::complementary_colors(&even, &odd, w, h))
+            }
+        }
+    }
+
+    /// `mosaic`'s reconstruction on a plane of photosite values (for its
+    /// grain): each color where it was read, else the mean of the nearest
+    /// photosites that read it.
+    pub fn mosaic_colors(site: &[f32], w: usize, h: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut r = vec![0f32; w * h];
+        let mut g = vec![0f32; w * h];
+        let mut b = vec![0f32; w * h];
+        let mx = |x: isize| -> usize { (if x < 0 { -x } else if x >= w as isize { 2 * w as isize - 2 - x } else { x }) as usize };
+        let my = |y: isize| -> usize { (if y < 0 { -y } else if y >= h as isize { 2 * h as isize - 2 - y } else { y }) as usize };
+        let at = |x: isize, y: isize| -> f32 { site[my(y) * w + mx(x)] };
+        for y in 0..h {
+            for x in 0..w {
+                let (xi, yi) = (x as isize, y as isize);
+                let even_x = x % 2 == 0;
+                let even_y = y % 2 == 0;
+                let i = y * w + x;
+                if even_x == even_y {
+                    // A red (even, even) or blue (odd, odd) photosite.
+                    let cross = (at(xi - 1, yi) + at(xi + 1, yi) + at(xi, yi - 1) + at(xi, yi + 1)) / 4.0;
+                    let diagonal = (at(xi - 1, yi - 1) + at(xi + 1, yi - 1) + at(xi - 1, yi + 1) + at(xi + 1, yi + 1)) / 4.0;
+                    g[i] = cross;
+                    r[i] = if even_x { site[i] } else { diagonal };
+                    b[i] = if even_x { diagonal } else { site[i] };
+                } else {
+                    // A green photosite: red and blue from the two beside it.
+                    let across = (at(xi - 1, yi) + at(xi + 1, yi)) / 2.0;
+                    let along = (at(xi, yi - 1) + at(xi, yi + 1)) / 2.0;
+                    g[i] = site[i];
+                    r[i] = if even_y { across } else { along };
+                    b[i] = if even_y { along } else { across };
+                }
+            }
+        }
+        (r, g, b)
+    }
+
+    /// The frame the camera hands on, from what its sensor read: whole
+    /// (progressive), one field with each line shown twice, or both fields of
+    /// an interlaced frame — the even lines of this reading and the odd lines
+    /// of the one `before` (the same reading when there is none, so a still
+    /// picture is whole) — woven together or blended.
+    pub fn fields(now: &[u8], before: Option<&[u8]>, size: (usize, usize), mode: FieldMode) -> Vec<u8> {
+        let (cw, ch) = size;
+        let row = cw * 4;
+        let mut out = now.to_vec();
+        match mode {
+            FieldMode::Progressive => {}
+            FieldMode::OneField => {
+                // The even lines, each shown twice.
+                let mut y = 1;
+                while y < ch {
+                    out.copy_within((y - 1) * row..y * row, y * row);
+                    y += 2;
+                }
+            }
+            FieldMode::Woven | FieldMode::Blended => {
+                if let Some(before) = before.filter(|b| b.len() == now.len()) {
+                    let mut y = 1;
+                    while y < ch {
+                        out[y * row..(y + 1) * row].copy_from_slice(&before[y * row..(y + 1) * row]);
+                        y += 2;
+                    }
+                }
+                if mode == FieldMode::Blended {
+                    // A blend deinterlacer: each line mixed with the ones
+                    // above and below, which belong to the other field
+                    // (1-2-1).
+                    let woven = out.clone();
+                    out.par_chunks_mut(row).enumerate().for_each(|(y, o)| {
+                        let up = &woven[swift_max(0, y as isize - 1) as usize * row..];
+                        let mid = &woven[y * row..];
+                        let down = &woven[swift_min(ch - 1, y + 1) * row..];
+                        for i in 0..row {
+                            o[i] = ((up[i] as i64 + 2 * mid[i] as i64 + down[i] as i64 + 2) / 4) as u8;
+                        }
+                    });
+                }
             }
         }
         out
@@ -606,24 +1031,37 @@ impl DigitalVideoRenderer {
         let nr = settings.get("noise_reduction") as f32;
         let warm = settings.get("white_balance") as f32;
         let magenta = settings.get("tint") as f32;
-        let ccd = settings.get("ccd_response") as f32;
-        let curve = CcdResponse { strength: ccd };
+        let curve = CcdResponse::new(settings.get("ccd_response") as f32);
         let mut gain_r = 1.0 + 0.25 * warm;
         let mut gain_b = 1.0 - 0.25 * warm;
         let mut gain_g = 1.0 - 0.15 * magenta;
         let mut flare = 0f32;
+        // How far the camera has had to turn its gain up for this scene.
+        let sensor_gain = if (low_light > 0.0 && noise > 0.0) || curve.exposure > 0.0 {
+            Self::sensor_gain(Self::median_luma(rgba, w, h))
+        } else {
+            1.0
+        };
         if low_light > 0.0 && noise > 0.0 {
-            noise *= 1.0 + low_light * (Self::sensor_gain(Self::median_luma(rgba, w, h)) - 1.0);
+            noise *= 1.0 + low_light * (sensor_gain - 1.0);
         }
-        if ccd > 0.0 {
-            let exposure = curve.exposure(Self::metered_mean(rgba, w, h, (gain_r, gain_g, gain_b)));
+        if curve.exposure > 0.0 {
+            let exposure = curve.exposure_gain(Self::metered_mean(rgba, w, h, (gain_r, gain_g, gain_b)), sensor_gain);
             gain_r *= exposure;
             gain_g *= exposure;
             gain_b *= exposure;
-            flare = curve.flare(Self::metered_mean(rgba, w, h, (gain_r, gain_g, gain_b)));
         }
+        if curve.flare > 0.0 {
+            flare = curve.flare_light(Self::metered_mean(rgba, w, h, (gain_r, gain_g, gain_b)));
+        }
+        // A one-chip sensor's grain comes through its color reconstruction.
+        let sensor = settings.sensor();
+        let grain = if noise > 0.0 && sensor != SensorKind::ThreeChips { Self::sensor_grain(sensor, w, h, index) } else { None };
+        // Vertical smear: the light each column's brightest pixels leak into
+        // the whole column on its way off the chip.
+        let smear = Self::smear(rgba, w, h, settings.get("smear") as f32);
         // Gains act on light, so they need linear values (decoded sRGB).
-        let linear = gain_r != 1.0 || gain_g != 1.0 || gain_b != 1.0 || flare > 0.0;
+        let linear = gain_r != 1.0 || gain_g != 1.0 || gain_b != 1.0 || flare > 0.0 || smear.is_some() || curve.highlights > 0.0;
         let mut yf = vec![0f32; w * h];
         let mut cbf = vec![0f32; w * h];
         let mut crf = vec![0f32; w * h];
@@ -651,23 +1089,32 @@ impl DigitalVideoRenderer {
                     let mut gr = rgba[i * 4 + 1] as f32;
                     let mut b = rgba[i * 4 + 2] as f32;
                     if linear {
-                        r = Self::linear_to_srgb(srgb_to_linear(r as usize) * gain_r + flare);
-                        gr = Self::linear_to_srgb(srgb_to_linear(gr as usize) * gain_g + flare);
-                        b = Self::linear_to_srgb(srgb_to_linear(b as usize) * gain_b + flare);
+                        let veil = flare + smear.as_ref().map_or(0.0, |s| s[x]);
+                        let over = curve.recovered(swift_max(swift_max(r, gr), b), swift_min(swift_min(r, gr), b));
+                        r = Self::linear_to_srgb(srgb_to_linear(r as usize) * gain_r * over + veil);
+                        gr = Self::linear_to_srgb(srgb_to_linear(gr as usize) * gain_g * over + veil);
+                        b = Self::linear_to_srgb(srgb_to_linear(b as usize) * gain_b * over + veil);
                     }
                     if noise > 0.0 {
                         // Gain noise: worst in the shadows, and under the
                         // clip (a blown sky is clean).
                         let shade = 1.3 - 0.6 * swift_min(255.0, 0.299 * r + 0.587 * gr + 0.114 * b) / 255.0;
-                        let n = gauss() * 7.0 * noise * shade;
-                        let nb = gauss() * 11.0 * noise * shade;
-                        let nc = gauss() * 11.0 * noise * shade;
-                        // Luma noise plus color noise along Cb and Cr.
-                        r += n + 1.402 * nc;
-                        gr += n - 0.344136 * nb - 0.714136 * nc;
-                        b += n + 1.772 * nb;
+                        if let Some((grain_r, grain_g, grain_b)) = &grain {
+                            let k = Self::PHOTOSITE_NOISE * noise * shade;
+                            r += k * grain_r[i];
+                            gr += k * grain_g[i];
+                            b += k * grain_b[i];
+                        } else {
+                            let n = gauss() * 7.0 * noise * shade;
+                            let nb = gauss() * 11.0 * noise * shade;
+                            let nc = gauss() * 11.0 * noise * shade;
+                            // Luma noise plus color noise along Cb and Cr.
+                            r += n + 1.402 * nc;
+                            gr += n - 0.344136 * nb - 0.714136 * nc;
+                            b += n + 1.772 * nb;
+                        }
                     }
-                    if ccd > 0.0 {
+                    if curve.highlights > 0.0 {
                         r = curve.knee(r);
                         gr = curve.knee(gr);
                         b = curve.knee(b);
@@ -706,15 +1153,23 @@ impl DigitalVideoRenderer {
                 yf[i] = clampf(yf[i] + 2.2 * sharpening * (yf[i] - soft[i]), 0.0, 255.0);
             }
         }
-        let black = curve.setup() * 255.0;
-        let saturation = settings.get("saturation") as f32;
+        let black = curve.black();
+        let luma_scale = curve.luma_scale();
+        let saturation = settings.get("saturation") as f32 * curve.chroma_scale();
         if black > 0.0 || saturation != 1.0 {
             for i in 0..yf.len() {
-                yf[i] = black + yf[i] * (1.0 - black / 255.0);
+                yf[i] = black + yf[i] * luma_scale;
                 cbf[i] = 128.0 + (cbf[i] - 128.0) * saturation;
                 crf[i] = 128.0 + (crf[i] - 128.0) * saturation;
             }
         }
+        Self::picture(&yf, &cbf, &crf, g)
+    }
+
+    /// Full-resolution Y′, Cb and Cr (`g.width` × `g.height`) as the picture
+    /// the codec codes: padded to whole blocks, the color subsampled.
+    pub fn picture(yf: &[f32], cbf: &[f32], crf: &[f32], g: &CodecGeometry) -> CodecPicture {
+        let (w, h) = (g.width, g.height);
         let mut pic = CodecPicture::new(g);
         // Luma, padded by repeating the edge.
         let lw = pic.y.width;
@@ -745,6 +1200,48 @@ impl DigitalVideoRenderer {
             }
         }
         pic
+    }
+
+    /// A CCD's vertical smear, as light (linear) added to each column, or
+    /// `None` for none. While a frame is shifted down the chip to be read
+    /// out, every pixel passes under every other pixel of its column and
+    /// picks up a little of the light falling there, so a spot bright enough
+    /// to matter shows as a streak the full height of the picture. Sources
+    /// are footage already exposed, so "bright enough" is what sits at the
+    /// clip (sRGB 235 and up, counted in full at white); the streak follows
+    /// that column's share of such pixels, a pixel either side mixed in — by
+    /// its square root, since how far over white the light really was is
+    /// lost, and a lamp a few pixels tall was far further over than a sky
+    /// filling a third of the frame. A dark scene makes it stronger, as
+    /// Low-light noise's gain does: the camera has opened up, and the lamp is
+    /// that much further over white.
+    pub fn smear(rgba: &[u8], w: usize, h: usize, strength: f32) -> Option<Vec<f32>> {
+        if !(strength > 0.0 && w > 0 && h > 0) {
+            return None;
+        }
+        let mut share = vec![0f32; w];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let top = swift_max(swift_max(rgba[i], rgba[i + 1]), rgba[i + 2]);
+                if top >= 235 {
+                    share[x] += (top as i64 - 234) as f32 / 21.0;
+                }
+            }
+        }
+        let gain = Self::sensor_gain(Self::median_luma(rgba, w, h));
+        let scale = strength * 1.25 * (gain / 8.0).sqrt();
+        let mut out = vec![0f32; w];
+        let mut any = false;
+        for x in 0..w {
+            let part = (share[swift_max(0, x as isize - 1) as usize] + 2.0 * share[x] + share[swift_min(w - 1, x + 1)]) / 4.0 / h as f32;
+            let v = part.sqrt() * scale;
+            out[x] = swift_min(1.0, v);
+            if v > 0.0 {
+                any = true;
+            }
+        }
+        if any { Some(out) } else { None }
     }
 
     /// Linear light → sRGB code value (0–255), unclipped above white so the
@@ -869,6 +1366,84 @@ impl DigitalVideoRenderer {
 
     // MARK: - pixels out
 
+    /// What the viewer gets of the decoder's picture: rendered, then put
+    /// through the Generations control's further rounds of compression.
+    pub fn present(decoded: &CodecPicture, g: &CodecGeometry, settings: &DigitalSettings, step: f32) -> Vec<u8> {
+        let mut out = Self::render(decoded, g, settings, step);
+        let generations = settings.generations();
+        if generations > 0 {
+            for k in 1..=generations {
+                out = Self::regenerate(&out, g, settings, k);
+            }
+        }
+        out
+    }
+
+    /// One more generation: the decoded picture (RGBA at the capture size)
+    /// compressed again at the same Quality, every frame on its own, and
+    /// decoded — a video saved, cropped a little and uploaded again. The crop
+    /// is what does the damage: compressing the same picture twice on the
+    /// same blocks changes almost nothing the second time, but each
+    /// generation's blocks fall a few pixels away from the last one's, so the
+    /// old block edges are detail the new blocks have to spend on and get
+    /// wrong. The offset depends only on the generation's number, so one more
+    /// generation is one more pass on top of the same ones.
+    pub fn regenerate(rgba: &[u8], g: &CodecGeometry, settings: &DigitalSettings, k: usize) -> Vec<u8> {
+        let (w, h) = (g.width, g.height);
+        // The grid to move against: the codec's blocks (Video 1's are 4×4).
+        let grid = if settings.codec() == DigitalCodecKind::Dct { g.block } else { 4 };
+        let dx = 1 + (2 * k) % (grid - 1);
+        let dy = 1 + (4 * k + 1) % (grid - 1);
+        // The picture with a margin, its content (dx, dy) in; the edge pixels
+        // repeat into the margin.
+        let padded = CodecGeometry::with_block(w + grid, h + grid, g.chroma, g.block);
+        let (pw, ph) = (padded.width, padded.height);
+        let mut yf = vec![0f32; pw * ph];
+        let mut cbf = vec![0f32; pw * ph];
+        let mut crf = vec![0f32; pw * ph];
+        yf.par_chunks_mut(pw)
+            .zip(cbf.par_chunks_mut(pw))
+            .zip(crf.par_chunks_mut(pw))
+            .enumerate()
+            .for_each(|(y, ((yr, cbr), crr))| {
+                let sy = swift_min(h as isize - 1, swift_max(0, y as isize - dy as isize)) as usize;
+                for x in 0..pw {
+                    let i = (sy * w + swift_min(w as isize - 1, swift_max(0, x as isize - dx as isize)) as usize) * 4;
+                    let r = rgba[i] as f32;
+                    let gr = rgba[i + 1] as f32;
+                    let b = rgba[i + 2] as f32;
+                    yr[x] = 0.299 * r + 0.587 * gr + 0.114 * b;
+                    cbr[x] = 128.0 - 0.168736 * r - 0.331264 * gr + 0.5 * b;
+                    crr[x] = 128.0 + 0.5 * r - 0.418688 * gr - 0.081312 * b;
+                }
+            });
+        let source = Self::picture(&yf, &cbf, &crf, &padded);
+        let mut step = 0f32;
+        let coded: Arc<CodecPicture> = match settings.codec() {
+            DigitalCodecKind::Dct => {
+                let steps = Steps::with_block(settings.get("quality"), 1.0, g.block);
+                let mut coded = CodecPicture::new(&padded);
+                DigitalCodec::code_intra(&source, &mut coded, &steps);
+                step = steps.inter;
+                Arc::new(coded)
+            }
+            DigitalCodecKind::BlockColors => Video1Codec::step(
+                &mut CodecState::new(padded),
+                &source,
+                CodecFrameKind::Key,
+                0,
+                &FrameSettings::new(settings.get("quality"), 0.0, 0.0),
+            ),
+        };
+        let full = Self::render(&coded, &padded, settings, step);
+        let mut out = vec![255u8; w * h * 4];
+        for y in 0..h {
+            let from = ((y + dy) * pw + dx) * 4;
+            out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&full[from..from + w * 4]);
+        }
+        out
+    }
+
     /// The decoder's picture as RGBA8 at the capture size: deblocked (on a
     /// copy — the reference stays as coded), color interpolated back up.
     pub fn render(decoded: &CodecPicture, g: &CodecGeometry, settings: &DigitalSettings, step: f32) -> Vec<u8> {
@@ -876,7 +1451,7 @@ impl DigitalVideoRenderer {
         let deblocked;
         let picture = if deblocking > 0.0 {
             let mut p = decoded.clone();
-            DigitalCodec::deblock(&mut p, deblocking, step);
+            DigitalCodec::deblock(&mut p, deblocking, step, g.block);
             deblocked = p;
             &deblocked
         } else {
@@ -886,7 +1461,11 @@ impl DigitalVideoRenderer {
         let mut out = vec![255u8; w * h * 4];
         let fx = g.sx() as f32;
         let fy = g.sy() as f32;
+        let (sx, sy) = (g.sx(), g.sy());
         let (cb, cr, luma) = (&picture.cb, &picture.cr, &picture.y);
+        // Color decode, Blocky: each color sample repeated over the pixels it
+        // stands for, instead of interpolated.
+        let blocky = settings.effective("chroma_upsampling") >= 0.5;
         out.par_chunks_mut(w * 4).enumerate().for_each(|(y, o)| {
             let cyf = (y as f32 + 0.5) / fy - 0.5;
             let cy0 = cyf.floor() as isize;
@@ -896,6 +1475,9 @@ impl DigitalVideoRenderer {
                 let cx0 = cxf.floor() as isize;
                 let tx = cxf - cx0 as f32;
                 let bil = |p: &crate::codec::CodecPlane| -> f32 {
+                    if blocky {
+                        return p.clamped((x / sx) as isize, (y / sy) as isize);
+                    }
                     let a = p.clamped(cx0, cy0);
                     let b = p.clamped(cx0 + 1, cy0);
                     let c = p.clamped(cx0, cy0 + 1);
@@ -939,46 +1521,122 @@ impl DigitalVideoRenderer {
     }
 }
 
-/// The tone of a 90s 3-CCD camcorder (the VX1000), fitted to its footage:
-/// across six reference frames the darkest pixels sat at 20–45 (not 0),
-/// medians at 130–210, and 10–32% of each frame piled up in the top bins,
-/// with warm shots' red reaching white well before blue. `strength` blends
-/// every part from nothing (0) to the full response (1).
+/// A 90s DV camcorder's tone, in its four real parts. One slider (CCD
+/// response) sets all four today; each has its own strength here, so they
+/// can become separate controls without changing what they do.
+///
+/// The constants are fitted, not published: across six reference frames of
+/// VX1000 footage the darkest pixels sat at 20–45 (not 0), medians at
+/// 130–210, and 10–32% of each frame piled up in the top bins, with warm
+/// shots' red reaching white well before blue. (Sony's specs stop at the
+/// sensor; measuring a real camera needs footage straight off its tape.)
 #[derive(Clone, Copy, Debug)]
 pub struct CcdResponse {
-    pub strength: f32,
+    /// Auto exposure: how far the camera re-exposes the scene.
+    pub exposure: f32,
+    /// The knee and the clip: how hard highlights are squeezed.
+    pub highlights: f32,
+    /// Veiling flare from the lens.
+    pub flare: f32,
+    /// DV's levels shown as stored: black at 16, not 0.
+    pub levels: f32,
 }
 
 impl CcdResponse {
-    /// Auto exposure: bring the metered mean to a bright target — these
-    /// cameras exposed for faces and shadows and let skies go.
-    pub const TARGET: f32 = 0.40;
+    pub fn new(strength: f32) -> Self {
+        CcdResponse { exposure: strength, highlights: strength, flare: strength, levels: strength }
+    }
 
-    pub fn exposure(&self, metered_mean: f32) -> f32 {
-        let full = swift_min(4.0, swift_max(0.5, Self::TARGET / swift_max(metered_mean, 1e-4)));
-        full.powf(self.strength)
+    pub fn is_on(&self) -> bool {
+        self.exposure > 0.0 || self.highlights > 0.0 || self.flare > 0.0 || self.levels > 0.0
+    }
+
+    /// Auto exposure: bring the metered mean to a bright target — these
+    /// cameras exposed for faces and shadows and let skies go. Stopping down
+    /// is always possible. Opening up is only possible with the gain the
+    /// camera has left: in a dark scene it is already wide open with its
+    /// gain turned up (`sensor_gain`, 1 in daylight to its top of 8 at night,
+    /// the same measure Low-light noise uses), so a night scene stays night
+    /// instead of being pushed up to gray daylight.
+    pub const TARGET: f32 = 0.40;
+    pub const TOP_GAIN: f32 = 8.0;
+
+    pub fn exposure_gain(&self, metered_mean: f32, sensor_gain: f32) -> f32 {
+        let mut full = swift_min(4.0, swift_max(0.5, Self::TARGET / swift_max(metered_mean, 1e-4)));
+        if full > 1.0 {
+            full = swift_max(1.0, swift_min(full, Self::TOP_GAIN / swift_max(1.0, sensor_gain)));
+        }
+        full.powf(self.exposure)
     }
 
     /// Veiling flare from a cheap lens (and the fisheye adapters these were
     /// shot through): a share of the whole frame's light scattered over
     /// everything, so bright scenes lift their shadows most.
-    pub fn flare(&self, metered_mean: f32) -> f32 {
-        0.03 * self.strength * metered_mean
+    pub fn flare_light(&self, metered_mean: f32) -> f32 {
+        0.03 * self.flare * metered_mean
     }
 
     /// The knee: above it each channel is compressed, then clips at white.
     pub const KNEE_POINT: f32 = 0.72 * 255.0;
 
+    pub fn knee_slope(&self) -> f32 {
+        1.0 - 0.62 * self.highlights
+    }
+
     pub fn knee(&self, v: f32) -> f32 {
         if !(v > Self::KNEE_POINT) {
             return v;
         }
-        let slope = 1.0 - 0.62 * self.strength;
-        swift_min(255.0, Self::KNEE_POINT + (v - Self::KNEE_POINT) * slope)
+        swift_min(255.0, Self::KNEE_POINT + (v - Self::KNEE_POINT) * self.knee_slope())
     }
 
-    /// NTSC DV's 7.5 IRE setup, mishandled in transfer: black shows as gray.
-    pub fn setup(&self) -> f32 {
-        0.065 * self.strength
+    /// The light at which a channel clips, as a multiple of the source's
+    /// white: where the knee's line reaches 255 (2.37 at full strength — 1.2
+    /// stops of highlights squeezed in above the knee).
+    pub fn clip_light(&self) -> f32 {
+        let v = (Self::KNEE_POINT + (255.0 - Self::KNEE_POINT) / self.knee_slope()) / 255.0;
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+
+    /// What's white in the source was brighter than white: the camera that
+    /// shot it clipped there, and a lamp or the sun is far over. Such pixels
+    /// (from sRGB 235, in full at 255) are taken to be as far over as this
+    /// camera's own clip, so they clip here too. Without this the knee, which
+    /// makes room above white for highlights the source no longer has, would
+    /// turn every lamp and white wall gray whenever the exposure isn't pushed
+    /// up. Only what is near white counts (by the square of its lowest
+    /// channel against its highest): one channel at the top is a saturated
+    /// color, a blue sky or a red sign, not a blown highlight. Returns the
+    /// factor on the pixel's light, from its highest and lowest channels
+    /// (0–255).
+    pub fn recovered(&self, top: f32, low: f32) -> f32 {
+        if !(self.highlights > 0.0 && top >= 235.0) {
+            return 1.0;
+        }
+        let t = swift_min(1.0, (top - 234.0) / 21.0);
+        let white = low / top;
+        1.0 + (self.clip_light() - 1.0) * t * t * white * white
+    }
+
+    /// Levels. DV stores black at 16 and white at 235 of 255, and the camera
+    /// records on past white to its clip at about 109% (255). Shown on a
+    /// computer as stored, without stretching that range back out, black is
+    /// a milky gray (16 of 255, 6.3%), the picture keeps its highlights right
+    /// up to 255, and color comes out a few percent weak (its range is
+    /// 16–240). That is the lifted black of DV footage on the web — it was
+    /// fitted first as a 6.5% "setup" lift; this is where the number comes
+    /// from.
+    pub fn black(&self) -> f32 {
+        16.0 * self.levels
+    }
+
+    /// (The clip, 109% of white, lands on 255: luma spans 16…255.)
+    pub fn luma_scale(&self) -> f32 {
+        1.0 - self.levels * 16.0 / 255.0
+    }
+
+    /// (Color's ±112 around 128 for 100%, so ±1.09 × 112 at the clip.)
+    pub fn chroma_scale(&self) -> f32 {
+        1.0 - self.levels * (1.0 - 1.09 * 224.0 / 255.0)
     }
 }
