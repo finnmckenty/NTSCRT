@@ -232,6 +232,8 @@ public final class ReceiverSimulator {
     private let transport: TransportSimulator
     /// Creases each recent field's track crosses.
     private var foldCache: [(field: Int64, folds: [TapeSurface.Fold])] = []
+    /// Each deck's drum shape (drumLumps), by its seed.
+    private var lumpCache: [(seed: UInt64, lumps: [(size: Double, phase: Double)])] = []
     /// Within-field line where a healthy, locked set's vertical oscillator
     /// fires; the picture's vertical framing is relative to it.
     public let nominalTrigger: Int
@@ -288,8 +290,11 @@ public final class ReceiverSimulator {
         fileprivate let transport: TransportSimulator.Snapshot
     }
 
-    public func snapshot() -> Snapshot {
-        Snapshot(time: time, r: r, theta: theta, integ: integ, vPhase: vPhase, vInteg: vInteg,
+    /// `at`: the moment the set was advanced to, when the snapshot should
+    /// answer for it (an advance stops up to a line past its target, so the
+    /// set's own clock reads a little later).
+    public func snapshot(at moment: Double? = nil) -> Snapshot {
+        Snapshot(time: moment ?? time, r: r, theta: theta, integ: integ, vPhase: vPhase, vInteg: vInteg,
                  vAbove: vAbove, gateErr: gateErr, gateLog: gateLog,
                  triggers: triggers, thetaLog: thetaLog, deck: deck.snapshot(),
                  transport: transport.snapshot())
@@ -335,6 +340,9 @@ public final class ReceiverSimulator {
         } else {
             reset()
             advance(to: 0, settings: settingsAt(0))
+            // The warmed-up set at time zero: what a looping clip comes
+            // back to on every pass.
+            checkpoint?(snapshot(at: 0))
         }
         guard time > 0, frameDuration > 0 else { return }
         var nextCheckpoint = (self.time + 1).rounded(.down)
@@ -601,12 +609,10 @@ public final class ReceiverSimulator {
         e += drumFlutter(j, amount: k.transport.flutter, seed: seed)
         e += transport.line(j).tbe
         let read = trackPlace(j, u: 0)
-        if k.transport.strain != 0 {
-            // Stretched further than when recorded, the tape's lines arrive
-            // later the further along the track; the next head starts on
-            // its own track's start, and the picture jumps back: skew.
-            e += k.transport.strain * read.along / TapeGeometry.lineLength * H
-        }
+        // Stretched further than when recorded, the tape's lines arrive
+        // later the further along the track; the next head starts on its
+        // own track's start, and the picture jumps back: skew.
+        e += strain(j) * read.along / TapeGeometry.lineLength * H
         if k.tape.creases > 0 {
             // A fold shortens the track: everything after it arrives early.
             for fold in folds(field: read.field) where fold.shortening > 0 {
@@ -621,16 +627,79 @@ public final class ReceiverSimulator {
         return e
     }
 
-    /// The drum's speed wavering, as time-base error (µs): a once-a-turn
-    /// wobble (29.97 Hz), the servo hunting, the motor's cogging and bearing
-    /// noise.
+    /// The tape's stretch against the recording as line j plays. Wrong back
+    /// tension isn't steady: the tension arm and its band brake hunt, far
+    /// more when the tape is slack (nothing holds the arm against the reel's
+    /// wobble) than when it is tight. So the jump at the head switch changes
+    /// from field to field, the TV starts each picture a different distance
+    /// out, and the top of the picture waves from side to side — the "flag
+    /// waving" repair notes give as the sign of low back tension. The share
+    /// that wanders (±60% slack, ±15% tight) and its rates are choices.
+    ///
+    /// Plus what a sticky patch is doing to the tape there (StickyTape).
+    private func strain(_ j: Int64) -> Double {
+        let tr = knobs.transport
+        let sticky = transport.line(j).strain
+        guard tr.strain != 0 else { return sticky }
+        let t = fieldTime(j)
+        let hunt = tr.tension < 0 ? 0.6 : 0.15
+        return sticky + tr.strain * (1 + hunt * (0.65 * GlitchRandom.value(seed, 44, t * 2.3)
+                                                 + 0.35 * GlitchRandom.value(seed, 45, t * 7.1)))
+    }
+
+    /// The drum's speed wavering, as time-base error (µs).
+    ///
+    /// A drum is a flywheel: its speed can't change from one line to the
+    /// next, so the error is smooth — the picture's verticals bow and sway,
+    /// they don't go ragged. (Until 0.28 a third of this was noise at 180 Hz
+    /// and some of it noise from line to line; a TV follows everything
+    /// slower, so that noise was all that showed: every line displaced at
+    /// random, which read as a filter, and the same as a sticky tape's.)
+    ///
+    ///   - once a turn (29.97 Hz), the drum's eccentricity, and the servo
+    ///     hunting at a few Hz: the largest parts, and a TV's AFC follows
+    ///     nearly all of both;
+    ///   - the rest of what repeats every turn — motor cogging, a bearing's
+    ///     rough spot, the drum's own lumps — as the 2nd to 12th harmonics
+    ///     of the turn, each with its own size (smaller the higher, the odd
+    ///     ones smaller still: those differ between the two fields) and a
+    ///     phase that drifts over seconds. Tied to the turn, the bends stand
+    ///     in the picture instead of changing every field; with a dozen
+    ///     unrelated sizes they are this deck's own irregular shape, not a
+    ///     sine wave; drifting, the shape crawls and changes;
+    ///   - a little rumble, smooth noise up to ~150 Hz: it shimmers.
+    ///
+    /// The mix and the sizes are choices.
     private func drumFlutter(_ j: Int64, amount: Double, seed: UInt64) -> Double {
         guard amount > 0 else { return 0 }
         let t = fieldTime(j)
-        let turn = sin(2 * .pi * (NTSCTiming.fieldRate / 2) * t + 6.2832 * GlitchRandom.uniform(seed, 40, 0))
+        let turnHz = NTSCTiming.fieldRate / 2
+        let turn = sin(2 * .pi * turnHz * t + 6.2832 * GlitchRandom.uniform(seed, 40, 0))
+        var lumps = 0.0
+        for (i, lump) in drumLumps(seed).enumerated() {
+            let k = i + 2
+            let phase = lump.phase
+                + 2.5 * GlitchRandom.value(seed, 50 + UInt64(k), t * (0.4 + 0.1 * Double(k)))
+            lumps += lump.size * sin(2 * .pi * Double(k) * turnHz * t + phase)
+        }
         return amount * (0.8 * turn + 1.3 * GlitchRandom.value(seed, 41, t * 4)
-                         + 0.45 * GlitchRandom.value(seed, 42, t * 180)
-                         + 0.07 * GlitchRandom.gauss(seed, 43, j))
+                         + 0.45 * lumps + 0.15 * GlitchRandom.value(seed, 42, t * 300))
+    }
+
+    /// A drum's own shape: the size and resting phase of the 2nd to 12th
+    /// harmonics of its turn. Fixed for a deck (this one's, and each earlier
+    /// generation's), and asked for on every line, so worked out once.
+    private func drumLumps(_ seed: UInt64) -> [(size: Double, phase: Double)] {
+        if let known = lumpCache.first(where: { $0.seed == seed }) { return known.lumps }
+        var lumps: [(size: Double, phase: Double)] = []
+        for k in 2...12 {
+            let size = (0.4 + 0.6 * GlitchRandom.uniform(seed, 48, Int64(k))) / pow(Double(k) / 4, 0.8)
+                * (k % 2 == 0 ? 1 : 0.35)
+            let phase = 6.2832 * GlitchRandom.uniform(seed, 49, Int64(k))
+            lumps.append((size, phase))
+        }
+        lumpCache.append((seed, lumps))
+        return lumps
     }
 
     /// An earlier generation's deck, recorded into this copy: its heads'
@@ -675,7 +744,7 @@ public final class ReceiverSimulator {
     private func headDelta(_ j: Int64, along: Double, track g: Int64) -> Double {
         let k = knobs
         var d = transport.line(j).delta + trackShape(along)
-        d += k.transport.strain * along * cos(TapeGeometry.angle) / k.transport.format.advancePerField
+        d += strain(j) * along * cos(TapeGeometry.angle) / k.transport.format.advancePerField
         if k.transport.searching {
             let s = transport.search(field: g)
             d += s.phase + s.rate * along / TapeGeometry.trackLength
@@ -697,15 +766,25 @@ public final class ReceiverSimulator {
 
     /// Spacing a slack tape adds where it doesn't hug the drum, at the two
     /// ends of the heads' sweep (µm).
+    ///
+    /// Up to tension −1 the lift grows (0.6 µm there: the start of the
+    /// sweep, where vertical sync is read, sits just above the FM threshold
+    /// on a good tape). Slacker than that it grows very little more — or
+    /// every slack tape would lose vertical hold and roll, which is the
+    /// Vertical hold knob's look, not this one's — and instead reaches
+    /// further into the sweep: the top of the picture sinks into noise
+    /// over a taller and taller band. Both are choices.
     private func slackSpacing(_ along: Double) -> Double {
         let slack = max(0, -knobs.transport.tension)
         guard slack > 0 else { return 0 }
         // The tape lifts most where it wraps onto the drum — the start of
         // the sweep, the top of the picture — and a little where it leaves.
         let L = TapeGeometry.trackLength
-        let end = Double(max(TapeSurface.smoothstep(22, 0, Float(along)),
-                             0.6 * TapeSurface.smoothstep(Float(L - 10), Float(L), Float(along))))
-        return 0.6 * slack * end
+        let more = max(0, slack - 1)
+        let reach = 22 * (1 + 0.5 * more)
+        let end = Double(max(TapeSurface.smoothstep(Float(reach), 0, Float(along)),
+                             0.6 * TapeSurface.smoothstep(Float(L - 10 - 5 * more), Float(L), Float(along))))
+        return (0.6 * min(1, slack) + 0.02 * more) * end
     }
 
     /// What the playing head sees at line j, u µs in, at `mhz`: the carrier
@@ -722,7 +801,8 @@ public final class ReceiverSimulator {
         let p = TapeSurface.at(TapeGeometry.point(field: read.field, along: read.along,
                                                   across: -delta * fmt.trackPitch, format: fmt),
                                knobs.tape, detail: false, flakes: flakes)
-        let d = Double(p.lift + dk.wearSpacing(h) + dk.baselineDirt(h, seed: knobs.tape.seed)
+        let d = Double(p.lift + dk.wearSpacing(h, field: read.field, along: read.along, seed: knobs.tape.seed)
+                       + dk.baselineDirt(h, seed: knobs.tape.seed, field: read.field)
                        + heads[h].debris + max(p.film, heads[h].grease)) + slackSpacing(read.along)
         var a = Double(p.output * dk.efficiency(h)) * VcrChannel.channelGain(mhz: mhz, spacing: d, gap: Double(dk.gap(h)))
         if mhz < 1 { a *= Double(dk.colorBoost(h, tape: knobs.tape)) }
@@ -745,9 +825,16 @@ public final class ReceiverSimulator {
     /// carrier, its envelope dipping to own − crosstalk. (Counted as noise
     /// power, the few µm of neighbor an EP head always reads held a clean EP
     /// tape 4 dB above threshold, against SP's 23.)
+    ///
+    /// A flake over the sync pulse doesn't cost it while the deck's dropout
+    /// compensation is on: what the compensator replays from its one-line
+    /// delay is the line before, sync pulse and all. (Without that, every
+    /// flaw kicked the TV's horizontal lock, and Oxide flaws read as bands
+    /// of torn picture, not as dropouts.) Anything longer — mold, a crease,
+    /// a clog — outlasts it.
     func signalLoss(_ j: Int64) -> Double {
         guard knobs.vcr else { return 0 }
-        let c = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz)
+        let c = carrier(j, u: 2.0, mhz: VcrChannel.syncTipMHz, flakes: !knobs.dropoutCompensation)
         let noise = pow(10, -VcrChannel.carrierToNoiseDB / 10) * pow(knobs.transport.format.noiseScale, 2)
         let envelope = max(0, c.own - c.crosstalk)
         let cnr = 10 * log10(max(1e-12, envelope * envelope) / noise)
@@ -786,13 +873,14 @@ public final class ReceiverSimulator {
             let d1 = headDelta(j, along: read.along + 1, track: read.field)
             lines.append(VcrLine(
                 originBase: origin.base, originOffset: origin.offset, along0: Float(read.along),
-                spacing: k.deck.wearSpacing(h) + k.deck.baselineDirt(h, seed: k.tape.seed) + heads[h].debris
+                spacing: k.deck.wearSpacing(h, field: read.field, along: read.along, seed: k.tape.seed)
+                    + k.deck.baselineDirt(h, seed: k.tape.seed, field: read.field) + heads[h].debris
                     + Float(slackSpacing(read.along)),
                 grease: heads[h].grease,
                 gain: k.deck.efficiency(h),
                 head: UInt32(h),
                 delta0: Float(d0), deltaSlope: Float(d1 - d0),
-                colorBoost: k.deck.colorBoost(h, tape: k.tape)))
+                colorBoost: k.deck.colorBoost(h, tape: k.tape), colorNoise: k.deck.colorNoise(h)))
         }
         var plan = VcrFieldPlan(lines: lines, tape: k.tape, deck: k.deck, format: fmt)
         if k.generations > 0 {
@@ -918,6 +1006,8 @@ struct Knobs {
     /// Copies the tape was dubbed through before this one (0: the original).
     let generations: Int
     let headSwitch: Double
+    /// The deck's dropout compensator is on.
+    let dropoutCompensation: Bool
     let captions: Bool
     /// Burst-key loop rate per raster line (~6 NTSC lines).
     let gateAlpha: Double
@@ -971,6 +1061,7 @@ struct Knobs {
         transport = TransportParams(settings)
         generations = min(3, max(0, Int(settings["tape_generation"].rounded())))
         headSwitch = settings["head_switch"]
+        dropoutCompensation = settings.flag("dropout_compensation")
         captions = settings.flag("closed_captions")
         gateAlpha = 1 - exp(-1 / (6 * s))
         chromaAlpha = 1 - exp(-1 / (4 * s))

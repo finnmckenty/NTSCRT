@@ -205,7 +205,10 @@ public struct TapeParams: Equatable {
     /// SP, LP and EP tear), with its color spared (`DeckParams.colorBoost`).
     static let curves: [String: [Float]] = [
         "tape_wear": [0, 0.259, 0.648, 0.955, 1.202, 1.391, 1.540, 1.640, 1.724, 1.785, 1.850],
-        "tape_dropouts": [0, 0.195, 0.473, 0.754, 0.931, 1.120, 1.322, 1.607, 2.124, 2.480, 3.0],
+        // (Measured again when flaws became dropouts — dashes, not bands:
+        // their numbers grow as the amount squared, cubed past 1, so the
+        // realistic range is the first sixth of the travel.)
+        "tape_dropouts": [0, 0.679, 1.13, 1.396, 1.631, 1.87, 2.108, 2.333, 2.51, 2.732, 3.0],
         "tape_scratches": [0, 0.759, 1.281, 1.822, 2.073, 2.289, 2.516, 2.777, 3.069, 3.430, 4.0],
         "tape_edge_damage": [0, 0.703, 0.743, 0.800, 0.888, 0.934, 0.987, 1.056, 1.190, 1.329, 1.45],
     ]
@@ -220,9 +223,29 @@ public struct TapeParams: Equatable {
         return c[i] + (c[i + 1] - c[i]) * (x - Float(i))
     }
 
+    /// Oxide flaws' curve through 0.28: where its slider stood for a given
+    /// amount then.
+    static let curvesIn028: [String: [Float]] = [
+        "tape_dropouts": [0, 0.195, 0.473, 0.754, 0.931, 1.120, 1.322, 1.607, 2.124, 2.480, 3.0],
+    ]
+
+    /// Where the slider stood in 0.28 for `amount`: what the tape choices
+    /// and looks from before the curves are given. For Oxide flaws that is
+    /// no longer the same amount — the same flakes show far less now that
+    /// they are dropouts the deck compensates, not bands that tear the
+    /// picture — so a look keeps its place on the slider, its share of the
+    /// control's full effect, instead.
+    public static func knobIn028(_ key: String, forAmount amount: Double) -> Double {
+        knob(forAmount: amount, on: curvesIn028[key] ?? curves[key], key: key)
+    }
+
     /// The slider position that gives `amount` (the inverse of `amount`).
     public static func knob(_ key: String, forAmount amount: Double) -> Double {
-        guard let c = curves[key] else { return knob(forAmount: amount, gain: Double(topEndGains[key] ?? 0)) }
+        knob(forAmount: amount, on: curves[key], key: key)
+    }
+
+    private static func knob(forAmount amount: Double, on curve: [Float]?, key: String) -> Double {
+        guard let c = curve else { return knob(forAmount: amount, gain: Double(topEndGains[key] ?? 0)) }
         let a = Float(min(Double(c[10]), max(0, amount)))
         for i in 0..<10 where a <= c[i + 1] {
             let span = c[i + 1] - c[i]
@@ -261,8 +284,15 @@ public struct TapeParams: Equatable {
     public var roughness: Float { 0.015 + 0.1 * wear }
     /// Chance that a 0.1 mm square holds a pinhole.
     public var pinholeChance: Float { (0.05 + 6 * dropouts + 2 * wear) * 0.01 }
-    /// Chance that a 1 mm square holds a flake of missing coating.
-    public var flakeChance: Float { 0.001 + 0.6 * dropouts * dropouts + 0.06 * wear + 0.06 * mold }
+    /// Flakes of missing coating per 0.3 × 0.33 mm cell (up to three; the
+    /// fraction is the chance of the next one). The square of the knob's
+    /// amount up to the realistic worst, its cube above.
+    public var flakeChance: Float {
+        min(3, 0.0001 + 0.12 * dropouts * dropouts * max(1, dropouts) + 0.012 * wear + 0.012 * mold)
+    }
+    /// What one flake sheds. Evened out above one flake a cell, so the
+    /// top of the knob is more dropouts, not a deck that clogs at once.
+    public var flakeShed: Float { 1.2 / max(1, flakeChance) }
 }
 
 /// What the head finds at one point of the tape.
@@ -338,6 +368,11 @@ public enum TapeSurface {
     /// (pinholes, scratches), which only matter to the picture, not to sync
     /// or to what the heads pick up. `flakes: false` leaves out the flakes
     /// too, for the deck's color loops, which hold through a dropout.
+    /// What a new tape sheds (the same units as `TapePoint.shed`): enough
+    /// that a deck never cleaned (Dirt buildup at full) clogs for a moment
+    /// every half minute or so on any tape, and a cleaned one about never.
+    static let baseShed: Float = 0.018
+
     public static func at(_ p: TapePosition, _ t: TapeParams, detail: Bool = true,
                           flakes: Bool = true) -> TapePoint {
         let s = t.seed
@@ -345,9 +380,10 @@ public enum TapeSurface {
         var lift = t.roughness
         var out = t.remanence
         var film: Float = 0
-        // Worn coating sheds a little everywhere; a hydrolyzed binder sheds
-        // gummy oxide all along the tape.
-        var shed: Float = 0.02 * t.wear + 0.9 * t.sticky * t.sticky
+        // Any tape sheds a trace as it runs; worn coating sheds a little
+        // more everywhere; a hydrolyzed binder sheds gummy oxide all along
+        // the tape.
+        var shed: Float = baseShed + 0.02 * t.wear + 0.9 * t.sticky * t.sticky
 
         // Coating thickness varies a little from place to place.
         do {
@@ -375,25 +411,39 @@ public enum TapeSurface {
             }
         }
 
-        // Flakes: patches of coating 40–320 µm across gone, shedding.
+        // Flakes: bits of coating gone (or held off the head by a speck of
+        // debris), most of them about a track wide and a tenth of a line
+        // long, a few several tracks wide and most of a line long: each is
+        // a dropout, a short dash in the picture. Longer across the tape
+        // than along it, as the tent around a speck is. The knob's top end
+        // is more of them, not bigger ones (up to three to a cell a third
+        // of a millimeter square), so a wrecked tape is a blizzard of
+        // dashes, not bands.
         if flakes && t.flakeChance > 0 {
-            let (cx, _) = cell(p, 10)
-            let cy = Int32(y.rounded(.down))
+            let (cx, _) = cell(p, 3)
+            let cy = Int32((y * 3).rounded(.down))
+            let most = Int(t.flakeChance.rounded(.up))
             for j in -1...1 {
                 for i in -1...1 {
                     let ci = cx &+ Int32(i), cj = cy &+ Int32(j)
-                    guard uni(s, 21, ci, cj) < t.flakeChance else { continue }
-                    let ddx = dx(p, cell: ci, q: 10, frac: uni(s, 22, ci, cj)) * 0.1
-                    let ddy = Float(cj) + uni(s, 23, ci, cj) - y
-                    let u = uni(s, 24, ci, cj)
-                    // Past the realistic range (dropouts over 1: the top of
-                    // the knob) the flakes grow, since a square holds one.
-                    let r = 0.04 * powf(8, u * u) * (1 + 0.6 * max(0, t.dropouts - 1))
-                    let e = 0.6 + 0.8 * uni(s, 25, ci, cj)
-                    let d = ((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e)).squareRoot()
-                    if d < r * 1.5 {
-                        out *= smoothstep(r * 0.8, r, d)
-                        shed += 0.5 * (1 - smoothstep(r, r * 1.5, d))
+                    for k in 0..<most {
+                        // The cell's k-th flake (its own draws).
+                        let sk = s &+ UInt32(k) &* 0x9E37_79B9
+                        guard uni(sk, 21, ci, cj) < t.flakeChance - Float(k) else { continue }
+                        let ddx = dx(p, cell: ci, q: 3, frac: uni(sk, 22, ci, cj)) * 0.1
+                        let ddy = (Float(cj) + uni(sk, 23, ci, cj)) * 0.33333334 - y
+                        let u = uni(sk, 24, ci, cj)
+                        let r = 0.018 * powf(9, u * u)
+                        let e = 0.5 + 0.6 * uni(sk, 25, ci, cj)
+                        let d = ((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e)).squareRoot()
+                        if d < r * 1.5 {
+                            // Half are gone outright; the rest keep a little
+                            // signal (a dropout too shallow for the deck's
+                            // compensator: sparkles, where the signal is weak).
+                            let depth = min(1, 0.55 + 0.9 * uni(sk, 26, ci, cj))
+                            out *= 1 - depth * (1 - smoothstep(r * 0.8, r, d))
+                            shed += t.flakeShed * depth * (1 - smoothstep(r, r * 1.5, d))
+                        }
                     }
                 }
             }
@@ -405,7 +455,18 @@ public enum TapeSurface {
         // side holds the head off a little. A scratch isn't uniform: the
         // tape weaved sideways in the guide that made it (tens of µm, about
         // a picture line), and its depth and width vary, with skips.
+        //
+        // Past the realistic worst (scratches over 1: most of the knob)
+        // there are more of them, up to one in every quarter-millimeter
+        // lane, and more of them wide enough to show (at the realistic
+        // worst three in four are narrower than half a track, and only
+        // weaken a line; at the top most are a track wide) — but a scratch
+        // stays a scratch, a line or three of the picture: the ridges of
+        // debris beside it stop growing (`strong`) and its width nearly
+        // does, or the top of the knob was bands of noise, like every other
+        // kind of damage.
         if detail && t.scratches > 0 {
+            let strong = min(1, t.scratches)
             let lane = Int32((y * 4).rounded(.down))
             let (sx, fx) = cell(p, 3000)
             let (c80, f80) = cell(p, 80), (c15, f15) = cell(p, 15)
@@ -420,16 +481,17 @@ public enum TapeSurface {
                 let weave = 0.03 * (2 * noise1(ss, 37, c80, f80) - 1) + 0.012 * (2 * noise1(ss, 38, c15, f15) - 1)
                 let yc = (Float(li) + 0.15 + 0.7 * uni(s, 34, li, sx)) * 0.25 + weave
                 let u = uni(s, 35, li, sx)
-                let w = (0.006 + 0.074 * u * u * u) * (0.6 + 0.4 * t.scratches)
+                let w = (0.006 + 0.074 * powf(u, 3 - 0.6667 * (t.scratches - strong)))
+                    * (0.6 + 0.4 * strong + 0.15 * (t.scratches - strong))
                     * (0.5 + noise1(ss, 39, c200, f200))
                 let depth = smoothstep(0.3, 0.55, noise1(ss, 40, c120, f120))
                 guard depth > 0 else { continue }
                 let dy = abs(y - yc)
                 if dy < w * 0.5 {
                     out *= 1 - 0.95 * depth
-                    lift += 0.15 * depth * t.scratches
+                    lift += 0.15 * depth * strong
                 } else if dy < w * 1.5 {
-                    lift += 0.35 * depth * t.scratches * (1 - (dy - w * 0.5) / w)
+                    lift += 0.35 * depth * strong * (1 - (dy - w * 0.5) / w)
                 }
             }
         }

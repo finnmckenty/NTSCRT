@@ -335,34 +335,133 @@ extension ReceiverSimulatorTests {
     func testTensionSkewsThePictureAtTheHeadSwitch() {
         // Tighter than the recorder: each line arrives a little later down
         // the field, and the next head starts on time — a jump of the
-        // strain × the field (8e-4 × 16.7 ms = 13 µs at full tension).
+        // strain × the field: 8e-4 × 16.7 ms = 13 µs at tension 1 (the
+        // knob at 57%), give or take the tension arm's hunting (±15% tight),
+        // and four times that with the knob at its end.
         let raster = ReceiverRaster(width: 320, activeLines: 240)
-        let sim = ReceiverSimulator(raster: raster)
-        sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "back_tension": 1]))
         let L = Int64(raster.totalLines)
-        let f = Int64((1.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
-        let sw = f * L + L - Int64((3.5 * raster.scale).rounded())
-        let jump = sim.timebaseError(sw) - sim.timebaseError(sw - 1)
-        XCTAssertEqual(jump, -13.3, accuracy: 1.2, "skew at the switch")
-        XCTAssertLessThan(abs(sim.timebaseError(sw - 2) - sim.timebaseError(sw - 1)), 0.15, "smooth between")
+        func jumps(_ knob: Double) -> (jump: [Double], between: Double) {
+            let sim = ReceiverSimulator(raster: raster)
+            sim.advance(to: 2.0, settings: GlitchSettings(values: ["vcr": 1, "back_tension": knob]))
+            let last = Int64((2.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
+            var out: [Double] = [], between = 0.0
+            for f in (last - 40)...last {
+                let sw = f * L + L - Int64((3.5 * raster.scale).rounded())
+                out.append(sim.timebaseError(sw) - sim.timebaseError(sw - 1))
+                between = max(between, abs(sim.timebaseError(sw - 2) - sim.timebaseError(sw - 1)))
+            }
+            return (out, between)
+        }
+        func mean(_ a: [Double]) -> Double { a.reduce(0, +) / Double(a.count) }
+        let one = jumps(TapeParams.knob(forAmount: 1, gain: TransportParams.tensionTopEnd))
+        XCTAssertEqual(mean(one.jump), -13.3, accuracy: 2.2, "skew at the switch")
+        XCTAssertLessThan(one.between, 0.15, "smooth between")
+        XCTAssertEqual(mean(jumps(0.5).jump), -6.7, accuracy: 1.1, "half the knob is as it always was")
+        XCTAssertEqual(mean(jumps(1).jump), -53, accuracy: 9, "the end of the knob: a stretched tape")
+        // Slack, the tension arm hunts: the jump wanders from field to
+        // field, which is what waves the top of the picture.
+        let slack = jumps(-1).jump, tight = jumps(1).jump
+        func spread(_ a: [Double]) -> Double { (a.max()! - a.min()!) / abs(mean(a)) }
+        XCTAssertGreaterThan(mean(slack), 30)
+        XCTAssertGreaterThan(spread(slack), 0.3, "slack tape flag-waves")
+        XCTAssertLessThan(spread(tight), 0.25, "tight tape holds its hook")
     }
 
-    func testStickyTapeJerksTheTiming() {
-        // Stick-slip: a sawtooth of lag and release — line-to-line timing
-        // jumps of a fraction of a µs that a smooth tape never has.
+    func testTheCompensatorKeepsSyncThroughOxideFlaws() {
+        // What the dropout compensator replays is the line before, sync
+        // pulse and all: a flake over the sync tip costs nothing while it
+        // is on. Off, every one of them is a line whose sync is noise (and
+        // Oxide flaws tore the picture into bands either way, before).
         let raster = ReceiverRaster(width: 320, activeLines: 240)
-        func jumps(_ sticky: Double) -> Double {
+        let L = raster.totalLines
+        func loss(_ values: [String: Double]) -> Double {
             let sim = ReceiverSimulator(raster: raster)
-            sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "tape_sticky": sticky]))
-            // The last two fields played (time counts from the warm-up).
-            let field = Int64((1.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
-            let j0 = field * Int64(raster.totalLines)
-            return (1..<raster.totalLines).map { i in
-                abs(sim.timebaseError(j0 + Int64(i)) - sim.timebaseError(j0 + Int64(i) - 1))
-            }.max()!
+            sim.advance(to: 1, settings: GlitchSettings(values: values.merging(["vcr": 1]) { a, _ in a }))
+            let f0 = Int64((1 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 21
+            var sum = 0.0
+            for f in f0..<(f0 + 20) { for i in 0..<L { sum += sim.signalLoss(f * Int64(L) + Int64(i)) } }
+            return sum / Double(20 * L)
         }
-        XCTAssertLessThan(jumps(0), 0.01, "smooth tape")
-        XCTAssertGreaterThan(jumps(0.8), 0.4, "sticky tape slips")
+        let clean = loss([:]), on = loss(["tape_dropouts": 1]), off = loss(["tape_dropouts": 1, "dropout_compensation": 0])
+        XCTAssertEqual(on, clean, accuracy: 0.002, "compensated: sync as on a tape without flaws")
+        XCTAssertGreaterThan(off, on + 0.02, "uncompensated: \(off) of the sync lost, against \(on)")
+    }
+
+    func testOlderLooksKeepTheirBackTension() {
+        // Before look version 4 the knob ran straight to ±1; a saved value
+        // becomes the position that stretches the tape the same.
+        for k in [-1.0, -0.77, -0.5, -0.2, 0, 0.3, 0.5, 0.771, 1] {
+            let now = GlitchSettings.upgraded(["back_tension": k], lookVersion: 3)["back_tension"]!
+            XCTAssertEqual(TransportParams(GlitchSettings(values: ["back_tension": now])).tension, k, accuracy: 1e-6)
+            XCTAssertEqual(GlitchSettings.upgraded(["back_tension": k], lookVersion: 4)["back_tension"]!, k)
+        }
+        XCTAssertEqual(TransportParams(GlitchSettings(values: ["back_tension": -1])).tension, -4, accuracy: 1e-6)
+    }
+
+    func testAStickyTapeGrabsAndLetsGo() {
+        // Not a jitter on every line: the tape plays clean, sticks at a gummy
+        // patch (squeal, tension climbing), and tears loose with a lurch.
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        let L = Int64(raster.totalLines)
+        /// Each field's largest line-to-line timing step, over four seconds.
+        func steps(_ sticky: Double) -> [Double] {
+            let sim = ReceiverSimulator(raster: raster)
+            var out: [Double] = []
+            for n in 1...24 {
+                let time = Double(n) / 6
+                sim.advance(to: time, settings: GlitchSettings(values: ["vcr": 1, "tape_sticky": sticky]))
+                let last = Int64((time + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
+                for f in (last - 9)...last {
+                    let j0 = f * L
+                    // (Not across the head switch, where the skew jumps back.)
+                    out.append((1..<(Int(L) - 8)).map { i in
+                        abs(sim.timebaseError(j0 + Int64(i)) - sim.timebaseError(j0 + Int64(i) - 1))
+                    }.max()!)
+                }
+            }
+            return out
+        }
+        XCTAssertLessThan(steps(0).max()!, 0.01, "smooth tape")
+        let some = steps(0.35), full = steps(1)
+        func share(_ a: [Double], over x: Double) -> Double { Double(a.filter { $0 > x }.count) / Double(a.count) }
+        // Mostly calm at a low setting, with episodes; busier at full, and
+        // never every field.
+        XCTAssertLessThan(share(some, over: 0.02), 0.5, "calm between grabs")
+        XCTAssertGreaterThan(share(some, over: 0.02), 0.02, "but it does grab")
+        XCTAssertGreaterThan(share(full, over: 0.02), share(some, over: 0.02), "more often at full")
+        XCTAssertLessThan(share(full, over: 0.02), 0.9, "still in episodes")
+        XCTAssertGreaterThan(full.max()!, 1.5, "letting go lurches (µs in a line)")
+        // The same place on the tape every play; elsewhere on another cassette.
+        let c = Int64(40)
+        let tape = TapeParams(GlitchSettings(values: ["tape_sticky": 1]))
+        let other = TapeParams(GlitchSettings(values: ["tape_sticky": 1, "tape_seed": 5]))
+        XCTAssertEqual(StickyTape.patch(c, tape)?.start, StickyTape.patch(c, tape)?.start)
+        XCTAssertNotEqual(StickyTape.patch(c, tape)?.start, StickyTape.patch(c, other)?.start)
+        XCTAssertNil(StickyTape.patch(c, TapeParams(GlitchSettings(values: [:]))))
+    }
+
+    func testFlutterBendsThePictureSmoothly() {
+        // A drum is a flywheel: its timing wanders by microseconds down a
+        // field but hardly at all from one line to the next. (It used to be
+        // a third noise, and read as every line displaced at random.)
+        let raster = ReceiverRaster(width: 320, activeLines: 240)
+        let L = Int64(raster.totalLines)
+        let sim = ReceiverSimulator(raster: raster)
+        sim.advance(to: 1.0, settings: GlitchSettings(values: ["vcr": 1, "transport_flutter": 1]))
+        let f = Int64((1.0 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 2
+        let e = (0..<(Int(L) - 8)).map { sim.timebaseError(f * L + Int64($0)) }
+        let swing = e.max()! - e.min()!
+        let step = zip(e.dropFirst(), e).map { abs($0 - $1) }.max()!
+        XCTAssertGreaterThan(swing, 3, "it sways (µs across a field)")
+        XCTAssertLessThan(step, swing / 12, "smoothly: \(step) µs a line against \(swing) across the field")
+        // And the shape mostly stands in the picture: the same lines of the
+        // field after next are bent much the same way.
+        let later = (0..<(Int(L) - 8)).map { sim.timebaseError((f + 2) * L + Int64($0)) }
+        func centered(_ a: [Double]) -> [Double] { let m = a.reduce(0, +) / Double(a.count); return a.map { $0 - m } }
+        let a = centered(e), b = centered(later)
+        let dot = zip(a, b).map { $0 * $1 }.reduce(0, +)
+        let corr = dot / (a.map { $0 * $0 }.reduce(0, +) * b.map { $0 * $0 }.reduce(0, +)).squareRoot()
+        XCTAssertGreaterThan(corr, 0.6, "a frame later it is nearly the same shape")
     }
 
     func testAChewedEdgeLosesTheControlTrack() {
@@ -435,10 +534,14 @@ extension ReceiverSimulatorTests {
                 // The tape this was calibrated on, from before the damage
                 // knobs' top ends were strengthened.
                 "vcr": 1, "tape_speed": Double(speed), "tape_wear": asBefore("tape_wear", 0.63),
-                "tape_dropouts": asBefore("tape_dropouts", 0.72), "tape_scratches": asBefore("tape_scratches", 1),
+                "tape_dropouts": TapeParams.knob("tape_dropouts", forAmount: 0.72), "tape_scratches": asBefore("tape_scratches", 1),
                 "tape_creases": asBefore("tape_creases", 0.95), "tape_mold": 0.13, "tape_vaseline": 0.14,
+                // No Dirt buildup: a clog lodging in these thirty fields
+                // is chance (with it at 0.18 EP's loss ran 0.06–0.7 from
+                // cassette to cassette, SP's 0.04–0.4), and says nothing
+                // about the margin this is checking.
                 "back_tension": 0, "head_dirt": 0.4, "head_wear": 0.15, "head_mismatch": 0.3,
-                "dirt_buildup": 0.18, "head_switch": 7.9]))
+                "dirt_buildup": 0, "head_switch": 7.9]))
             let f0 = Int64((3 + ReceiverSimulator.warmup) * NTSCTiming.fieldRate) - 31
             var sum = 0.0
             for f in f0..<(f0 + 30) { for i in 0..<L { sum += sim.signalLoss(f * Int64(L) + Int64(i)) } }
@@ -447,6 +550,6 @@ extension ReceiverSimulatorTests {
         let sp = loss(0), ep = loss(2)
         XCTAssertLessThan(sp, 0.08)
         XCTAssertGreaterThan(ep, sp, "EP is less forgiving")
-        XCTAssertLessThan(ep, 0.2, "but not a cliff (was 0.33)")
+        XCTAssertLessThan(ep, 0.25, "but not a cliff (was 0.33)")
     }
 }

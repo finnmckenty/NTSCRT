@@ -185,7 +185,7 @@ enum DescribeCommand {
         case "tracking_offset":
             c["note"] = "Signed: ±1 is a whole track either way. Runs on a curve, so the picture holds over most of the travel and breaks up near the ends (|value| ≳ 0.6)."
         case "back_tension":
-            c["note"] = "Signed: positive is tighter than the recording deck (skew, the top of the picture hooks sideways), negative is slacker (noise at the top and bottom). 0 matches it."
+            c["note"] = "Signed: positive is tighter than the recording deck (skew, the top of the picture hooks sideways), negative is slacker (the top of the picture waves from side to side and gets noisy). 0 matches it. Up to ±0.5 is a deck out of adjustment; beyond, the effect grows four times as fast (a stretched tape: strong hooking, noise bars on LP and EP)."
         case "search_speed":
             c["note"] = "1 is normal play; 2–9 is fast-forward picture search."
         default: break

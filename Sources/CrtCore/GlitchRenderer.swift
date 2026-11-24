@@ -65,15 +65,35 @@ public final class GlitchRenderer {
         let key: CheckpointKey
         let time: Double
         let raster: ReceiverRaster
+        let settings: GlitchSettings
+        /// The checkpoints it started from, and the one it resumed at.
+        let kept: [ReceiverSimulator.Snapshot]
+        let resume: ReceiverSimulator.Snapshot?
         private let lock = NSLock()
         private var _cancelled = false
-        init(key: CheckpointKey, time: Double, raster: ReceiverRaster) {
-            self.key = key; self.time = time; self.raster = raster
+        private var _done: (sim: ReceiverSimulator, taken: [ReceiverSimulator.Snapshot])?
+        init(key: CheckpointKey, time: Double, raster: ReceiverRaster, settings: GlitchSettings,
+             kept: [ReceiverSimulator.Snapshot], resume: ReceiverSimulator.Snapshot?) {
+            self.key = key; self.time = time; self.raster = raster; self.settings = settings
+            self.kept = kept; self.resume = resume
         }
         var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
         func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
+        func finish(_ sim: ReceiverSimulator, _ taken: [ReceiverSimulator.Snapshot]) {
+            lock.lock(); _done = (sim, taken); lock.unlock()
+        }
+        /// The finished simulation, handed over once.
+        func takeResult() -> (sim: ReceiverSimulator, taken: [ReceiverSimulator.Snapshot])? {
+            lock.lock(); defer { lock.unlock() }
+            let d = _done
+            _done = nil
+            return d
+        }
     }
     private var rerun: Rerun?
+    /// The time of the frame drawn last, for telling how far playback moved
+    /// while a re-run is in flight.
+    private var lastTime: Double?
     /// CRT_RERUN_LOG=1: report background re-runs landing.
     private static let logReruns = ProcessInfo.processInfo.environment["CRT_RERUN_LOG"] != nil
     private func cancelRerun() { rerun?.cancel(); rerun = nil }
@@ -92,6 +112,11 @@ public final class GlitchRenderer {
                        settings: GlitchSettings,
                        history: @autoclosure () -> GlitchHistory? = nil) throws -> MTLTexture {
         let raster = ReceiverRaster(width: chainInput.width, activeLines: chainInput.height)
+        // A finished background re-run is taken up by the next frame drawn.
+        // (Waiting for its own hop to the main queue held the old state on
+        // screen for half a second and more during playback, when the main
+        // thread has little time between frames.)
+        if let job = rerun, job.raster == raster { adopt(job) }
         let sim: ReceiverSimulator
         var fresh = false
         if let s = simulator, s.raster == raster {
@@ -119,8 +144,13 @@ public final class GlitchRenderer {
             if rerunsInBackground, span > Self.backgroundRerunAbove {
                 if let r = rerun, r.key == key, r.raster == raster, r.time <= time + 2 * lineTime {
                     // Already on its way to here, or to a moment before it
-                    // (playing on, or scrubbing forward): keep showing what
-                    // we have; from where it lands, the rest is a short step.
+                    // (playing on, or scrubbing forward); from where it
+                    // lands, the rest is a short step. Until then the state
+                    // we have runs on by as much as the playhead moved, so
+                    // a playing picture doesn't stand still meanwhile.
+                    if let last = lastTime, time > last, time - last <= Self.maxStep {
+                        sim.advance(to: sim.time + (time - last), settings: settings)
+                    }
                 } else {
                     showMeanwhile(sim, at: time, settings: settings, retuned: retuned, fresh: fresh)
                     startRerun(key: key, to: time, settings: settings, history: h, raster: raster)
@@ -146,6 +176,7 @@ public final class GlitchRenderer {
             }
         }
         lastSettings = settings
+        lastTime = time
         let plan = sim.plan()
         lastPlan = plan
         return try render(into: cb, chainInput: chainInput, plan: plan)
@@ -161,6 +192,7 @@ public final class GlitchRenderer {
         checkpoints = []
         checkpointKey = nil
         lastSettings = nil
+        lastTime = nil
     }
 
     /// While a background re-run works: the knobs applied to the state the
@@ -185,10 +217,11 @@ public final class GlitchRenderer {
                             history: GlitchHistory?, raster: ReceiverRaster) {
         cancelRerun()
         if Self.logReruns { fputs(String(format: "RERUN start to %.2f s\n", time), stderr) }
-        let job = Rerun(key: key, time: time, raster: raster)
-        rerun = job
         let kept = key == checkpointKey ? checkpoints : []
         let resume = kept.last(where: { $0.time <= time })
+        let job = Rerun(key: key, time: time, raster: raster, settings: settings,
+                        kept: kept, resume: resume)
+        rerun = job
         nonisolated(unsafe) let history = history
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let sim = ReceiverSimulator(raster: raster)
@@ -198,7 +231,12 @@ public final class GlitchRenderer {
                                settingsAt: history.settingsAt, resumeFrom: resume,
                                checkpoint: { taken.append($0) }, isCancelled: { job.cancelled })
             } else {
-                if let resume { sim.restore(resume) }
+                if let resume {
+                    sim.restore(resume)
+                } else {
+                    sim.advance(to: 0, settings: settings)
+                    taken.append(sim.snapshot(at: 0))
+                }
                 var next = max(1, ((resume?.time ?? 0) + 1).rounded(.down))
                 while next < time, !job.cancelled {
                     sim.advance(to: next, settings: settings)
@@ -211,20 +249,29 @@ public final class GlitchRenderer {
                 if Self.logReruns { fputs("RERUN cancelled\n", stderr) }
                 return
             }
-            nonisolated(unsafe) let done = (sim, taken)
+            job.finish(sim, taken)
             DispatchQueue.main.async {
-                guard let self, self.rerun === job, !job.cancelled else { return }
-                self.rerun = nil
-                self.simulator = done.0
-                self.checkpointKey = key
-                var all = kept.filter { $0.time <= (resume?.time ?? -.infinity) }
-                for snap in done.1 where snap.time > (all.last?.time ?? -.infinity) { all.append(snap) }
-                self.checkpoints = all
-                self.lastSettings = settings
-                if Self.logReruns { fputs(String(format: "RERUN landed at %.2f s\n", time), stderr) }
+                // A playing preview has usually taken it up already (the
+                // next frame drawn does); a paused one is asked to redraw.
+                guard let self, !job.cancelled else { return }
+                if self.rerun === job { self.adopt(job) }
                 self.onSettled?()
             }
         }
+    }
+
+    /// Take up a background re-run's simulation and checkpoints, if it has
+    /// finished and nothing has superseded it.
+    private func adopt(_ job: Rerun) {
+        guard rerun === job, !job.cancelled, let done = job.takeResult() else { return }
+        rerun = nil
+        simulator = done.sim
+        checkpointKey = job.key
+        var all = job.kept.filter { $0.time <= (job.resume?.time ?? -.infinity) }
+        for snap in done.taken where snap.time > (all.last?.time ?? -.infinity) { all.append(snap) }
+        checkpoints = all
+        lastSettings = job.settings
+        if Self.logReruns { fputs(String(format: "RERUN landed at %.2f s\n", job.time), stderr) }
     }
 
     /// Deterministic re-run to `time`, resuming from the latest checkpoint
@@ -246,8 +293,16 @@ public final class GlitchRenderer {
             return
         }
         // Constant settings: the state at any moment is a pure function of
-        // time, so checkpoints can sit on whole seconds.
-        if let resume { sim.restore(resume) } else { sim.reset() }
+        // time, so checkpoints can sit on whole seconds — time zero among
+        // them, the warmed-up set a looping clip returns to on every pass
+        // (without it each loop re-ran the two-second warm-up).
+        if let resume {
+            sim.restore(resume)
+        } else {
+            sim.reset()
+            sim.advance(to: 0, settings: settings)
+            if checkpoints.isEmpty { checkpoints.append(sim.snapshot(at: 0)) }
+        }
         var next = max(1, ((resume?.time ?? 0) + 1).rounded(.down))
         while next < time {
             sim.advance(to: next, settings: settings)

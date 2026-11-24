@@ -47,7 +47,9 @@ FLAT_HALF, FLAT_THREE_QUARTERS = 0.10, 0.30
 # Effects that need motion: on the still test picture Data loss patches from
 # an identical picture and Datamosh has nothing to drag, so their curves
 # can't be judged here.
-NEEDS_MOTION = {'digital.data_loss', 'digital.datamosh'}
+# Sticky shed grabs in episodes at places along the tape: one instant either
+# catches a patch under the guides or doesn't, at any setting.
+NEEDS_MOTION = {'digital.data_loss', 'digital.datamosh', 'vcr.tape_sticky'}
 TOLERANCE = 1.6     # strength may move by this factor either way
 TIME = '2.0'        # the VCR and the TV change over time
 

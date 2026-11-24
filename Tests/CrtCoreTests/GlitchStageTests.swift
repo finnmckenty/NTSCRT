@@ -309,6 +309,91 @@ final class GlitchCheckpointTests: XCTestCase {
         XCTAssertEqual(back.rows, freshBack.rows)
     }
 
+    private let worn = GlitchSettings(values: ["vcr": 1, "tracking_offset": 0.3, "back_tension": 0.2,
+                                               "tape_sticky": 0.5, "dirt_buildup": 0.6, "tape_mold": 0.4,
+                                               "signal_strength": 0.4])
+
+    /// A looping clip comes back to its first frame every few seconds. The
+    /// preview has the warmed-up set of time zero on hand, so the frame is
+    /// exact at once: nothing to wait for. (Each loop used to re-run the
+    /// warm-up in the background and hold the last frame's picture until it
+    /// landed: the tape looked frozen for the clip's first second or two.)
+    func testALoopBackToTheStartIsExactAtOnce() throws {
+        let frame = 1.0 / 24
+        let preview = try GlitchRenderer(context: context)
+        preview.rerunsInBackground = true
+        _ = try plan(preview, 0, worn)
+        settle(preview)
+        for k in 0...60 { _ = try plan(preview, Double(k) * frame, worn) }   // plays on
+        let export = try GlitchRenderer(context: context)
+        for k in 0...3 {                                                     // and loops
+            let looped = try plan(preview, Double(k) * frame, worn)
+            let exact = try plan(export, Double(k) * frame, worn)
+            XCTAssertEqual(looped.rows, exact.rows, "frame \(k) after the loop")
+            XCTAssertEqual(looped.vcr?.lines, exact.vcr?.lines, "frame \(k) after the loop")
+        }
+    }
+
+    /// The same with keyframed knobs.
+    func testALoopBackToTheStartIsExactAtOnceWithKeyframedSettings() throws {
+        let frame = 1.0 / 24
+        let history = GlitchHistory(frameDuration: frame, id: 11) { t in
+            GlitchSettings(values: ["vcr": 1, "tracking_offset": min(0.6, t / 5),
+                                    "tape_sticky": min(1, t / 3), "signal_strength": 0.4])
+        }
+        let preview = try GlitchRenderer(context: context)
+        preview.rerunsInBackground = true
+        _ = try plan(preview, 0, history.settingsAt(0), history)
+        settle(preview)
+        for k in 0...60 { _ = try plan(preview, Double(k) * frame, history.settingsAt(Double(k) * frame), history) }
+        let export = try GlitchRenderer(context: context)
+        for k in 0...3 {
+            let t = Double(k) * frame
+            let looped = try plan(preview, t, history.settingsAt(t), history)
+            let exact = try plan(export, t, history.settingsAt(t), history)
+            XCTAssertEqual(looped.rows, exact.rows, "frame \(k) after the loop")
+            XCTAssertEqual(looped.vcr?.lines, exact.vcr?.lines, "frame \(k) after the loop")
+        }
+    }
+
+    /// A finished background re-run is taken up by the next frame drawn,
+    /// without waiting for the main queue (which a playing preview keeps
+    /// busy). Nothing here lets the main queue run.
+    func testAFinishedRerunIsTakenUpByTheNextFrame() throws {
+        let preview = try GlitchRenderer(context: context)
+        preview.rerunsInBackground = true
+        let exact = try plan(try GlitchRenderer(context: context), 6.0, worn)
+        var shown = try plan(preview, 6.0, worn)          // starts the re-run
+        let deadline = Date().addingTimeInterval(30)
+        while shown.rows != exact.rows, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+            shown = try plan(preview, 6.0, worn)
+        }
+        XCTAssertEqual(shown.rows, exact.rows)
+        XCTAssertEqual(shown.vcr?.lines, exact.vcr?.lines)
+    }
+
+    /// While a re-run is in flight a playing picture keeps moving: the state
+    /// on hand runs on by as much as the playhead did.
+    func testAPlayingPictureKeepsMovingWhileARerunIsInFlight() throws {
+        let frame = 1.0 / 24
+        let preview = try GlitchRenderer(context: context)
+        preview.rerunsInBackground = true
+        var last = try plan(preview, 40.0, worn)          // a long re-run starts
+        for k in 1...4 {
+            let next = try plan(preview, 40.0 + Double(k) * frame, worn)
+            XCTAssertNotEqual(next.rows, last.rows, "frame \(k) stood still")
+            last = next
+        }
+        // Paused, it holds still.
+        let held = try plan(preview, 40.0 + 4 * frame, worn)
+        if held.rows != last.rows {
+            // (unless the re-run landed in between, which is exact)
+            let exact = try plan(try GlitchRenderer(context: context), 40.0 + 4 * frame, worn)
+            XCTAssertEqual(held.rows, exact.rows)
+        }
+    }
+
     func testBackgroundRerunAfterAJumpMatchesAFullRerunWithKeyframedSettings() throws {
         let history = GlitchHistory(frameDuration: 1.0 / 24, id: 9) { t in
             GlitchSettings(values: ["vcr": 1, "tracking_offset": min(0.6, t / 5),

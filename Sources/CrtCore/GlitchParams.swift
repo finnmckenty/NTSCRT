@@ -121,11 +121,11 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "tape_dropouts", label: "Oxide flaws", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Pinholes and flakes missing from the magnetic coating. A flaw wider than one 58 µm track shows in the same place for a few fields in a row; one smaller than a track only weakens the signal, and is seen only when the signal is weak already."),
+            help: "Pinholes and flakes missing from the magnetic coating: dropouts. Each is a short dash that starts with a spark, somewhere new every field; turn it up for more of them, a blizzard at the top. With Dropout compensation on the deck fills each dash from the line above; off, they are black and white streaks and they jog the picture. A flaw smaller than one 58 µm track only weakens the signal, and is seen only when the signal is weak already."),
         GlitchParam(
             id: "tape_scratches", label: "Scratches", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Scratches along the tape from worn guides. Height across the tape is height in the picture, so a lengthwise scratch is a streak at the same height in every field."),
+            help: "Scratches along the tape from worn guides. Height across the tape is height in the picture, so a lengthwise scratch is a thin sparkling line right across, at the same height in every field. Turn it up for more lines, not thicker ones."),
         GlitchParam(
             id: "tape_creases", label: "Creases", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
@@ -141,7 +141,7 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "tape_sticky", label: "Sticky shed", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "The binder holding the oxide on has soaked up moisture and gone gummy. The tape drags on the guides and moves in tiny stick-and-slip jerks — the picture's edges go jagged and it may squeal — the drag pulls the tracking off, and gummy oxide clogs the heads."),
+            help: "The binder holding the oxide on has soaked up moisture and gone gummy in patches. The tape plays clean until a patch reaches the guides; then it sticks — edges shiver as it squeals, the top of the picture leans and noise creeps in as the tape drags — and tears loose with a sideways lurch. Turn it up for patches that come more often and hold harder. The gummy oxide also clogs the heads."),
         GlitchParam(
             id: "tape_vaseline", label: "Vaseline", group: .tape,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
@@ -151,17 +151,17 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "head_wear", label: "Head wear", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Worn heads stand less proud of the drum, so they press into the tape less, and their gaps erode wider. Both lose the top of the signal first: black streaks trail bright edges, then the picture gets noisy.",
+            help: "Worn heads stand less proud of the drum and lose their grip on the tape. Black streaks trail bright edges first; then bands of snow and tearing drift through the picture and come and go, worst at the top and bottom, and the color gets noisy.",
             section: "Heads"),
         GlitchParam(
             id: "head_dirt", label: "Head dirt", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "Debris already on the heads when play starts. It holds them off the tape; each head carries its own, so one can be clogged while the other is clear — every other field fails.",
+            help: "Debris already on the heads when play starts. It holds them off the tape; each head carries its own, so one can be clogged while the other is clear — every other field fails. It shifts a little as the tape drags over it, so each head's picture drifts between worse and better.",
             section: "Heads"),
         GlitchParam(
             id: "dirt_buildup", label: "Dirt buildup", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "How readily the heads collect what the tape sheds — low for a deck that's had a head-cleaning tape, high for one that never has. Shedding tapes (mold, wear, flaws, sticky shed) clog it as they play; clogs sometimes knock loose.",
+            help: "How readily the heads collect what the tape sheds — low for a deck that's had a head-cleaning tape, high for one that never has. Every tape sheds a little, so an uncleaned deck clogs for a moment now and then on any tape; shedding tapes (mold, wear, flaws, sticky shed) clog it far more, and worn heads clog more easily. Clogs wipe off or knock loose.",
             section: "Heads"),
         GlitchParam(
             id: "head_mismatch", label: "Head mismatch", group: .deck,
@@ -178,12 +178,12 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "back_tension", label: "Back tension", group: .deck,
             kind: .slider(min: -1, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "How hard the supply reel holds the tape back, against the deck that recorded it. Tighter stretches the tape, so each field's lines arrive a little later than the last, and the heads switch with a jump: skew, the top of the picture hooking sideways. Too slack and the tape stops hugging the heads at the ends of their sweep, so the top and bottom of the picture get noisy.",
+            help: "How hard the supply reel holds the tape back, against the deck that recorded it. Tighter stretches the tape, so each field's lines arrive a little later than the last, and the heads switch with a jump: skew, the top of the picture hooking sideways (further on a TV with a slow AFC response). Too slack and the tension wanders, so the top of the picture waves from side to side, and the tape stops hugging the heads where they meet it, so the top of the picture gets noisy. Up to half is a deck out of adjustment; past that is a stretched tape or a reel hardly braked at all, and the heads can no longer follow the tracks the whole way down (noise bars, worst on LP and EP).",
             section: "Transport"),
         GlitchParam(
             id: "transport_flutter", label: "Flutter", group: .deck,
             kind: .slider(min: 0, max: 1, percent: true, unit: ""), defaultValue: 0,
-            help: "A tired transport: a worn drum motor and bearings, stretched belts, a lumpy pinch roller. The drum's speed wavers, so the picture's timing wanders — wavy verticals on a TV with slow AFC, ragged lines on a fast one — and the tape's speed wavers, so the tracking breathes.",
+            help: "A tired transport: a worn drum motor and bearings, stretched belts, a lumpy pinch roller. The drum's speed wavers smoothly, so the picture's verticals bow and sway, in a shape that crawls and changes — broad bends on a TV with slow AFC, tighter ones on a fast one — and the tape's speed wavers, so the tracking breathes. The second half of the travel goes well past any deck still in use.",
             section: "Transport"),
 
         // ...and the controls on its front.
@@ -200,7 +200,7 @@ public struct GlitchParam: Identifiable, Sendable {
         GlitchParam(
             id: "dropout_compensation", label: "Dropout compensation", group: .deck,
             kind: .toggle, defaultValue: 1,
-            help: "The deck watches the signal coming off the heads and, where it drops out, repeats the picture from the line before. On, dropouts become short smears of the line above; off, they show as the demodulator's streaks.",
+            help: "The deck watches the signal coming off the heads and, where it drops out, repeats the line before — its sync pulse too. On, a dropout is a spark and a short smear of the line above; off, it shows as the demodulator's black and white streaks, and one that lands on a sync pulse jogs the picture sideways.",
             section: "Controls"),
     ]
 
@@ -224,7 +224,7 @@ public struct GlitchParam: Identifiable, Sendable {
 /// knobs' top ends were strengthened (TapeParams.topEndGains), for values
 /// that must keep their look: the tape choices and migrated old looks.
 func asBefore(_ key: String, _ amount: Double) -> Double {
-    TapeParams.knob(key, forAmount: amount)
+    TapeParams.knobIn028(key, forAmount: amount)
 }
 
 public struct VcrCondition: Identifiable, Sendable {
@@ -339,12 +339,12 @@ public struct GlitchSettings: Equatable, Sendable {
     /// Knobs that change the simulation's evolving state: anything touching
     /// sync, timing or signal level, and everything about the tape and deck
     /// (the tape decides where sync is lost; the heads collect dirt as it
-    /// plays). The rest — ghost, brightness, caption data, dropout
-    /// compensation — are applied when the field is drawn, so changing them
-    /// never needs the history re-run.
+    /// plays; the dropout compensator decides whether a flaw costs sync).
+    /// The rest — ghost, brightness, caption data — are applied when the
+    /// field is drawn, so changing them never needs the history re-run.
     public static let timingIDs: Set<String> = Set(
         ["signal_strength", "vertical_hold", "horizontal_hold", "afc_speed", "hum"]
-        + GlitchParam.vcr.map(\.id).filter { $0 != "dropout_compensation" })
+        + GlitchParam.vcr.map(\.id))
 
     public var timing: [String: Double] { values.filter { Self.timingIDs.contains($0.key) } }
 
@@ -363,15 +363,27 @@ public struct GlitchSettings: Equatable, Sendable {
     /// A look's values as this version reads them, from a look saved as
     /// `lookVersion`: before version 3 (0.27.0 and earlier) Wear, Oxide
     /// flaws, Scratches and Edge damage followed straight lines above half
-    /// (see TapeParams.curves); each becomes the slider position that damages
-    /// the tape the same. (Before `migrated`: older looks' tape keys come
-    /// out of that already on these curves.)
+    /// (see TapeParams.curves); each becomes the slider position that damaged
+    /// the tape the same in 0.28 (TapeParams.knobIn028: Oxide flaws' curve
+    /// has moved since, and looks keep their place on the slider). (Before
+    /// `migrated`: older looks' tape keys come out of that already on these
+    /// curves.)
+    ///
+    /// Before version 4 Back tension ran straight to its ends; above half
+    /// it now goes four times as far (TransportParams.tensionTopEnd), so an
+    /// older look's setting becomes the position that stretches the tape as
+    /// much as it did.
     public static func upgraded(_ values: [String: Double], lookVersion: Int) -> [String: Double] {
-        guard lookVersion < 3 else { return values }
+        guard lookVersion < 4 else { return values }
         var v = values
+        if let k = v["back_tension"] {
+            let a = min(1, max(-1, k))
+            v["back_tension"] = (a < 0 ? -1 : 1) * TapeParams.knob(forAmount: abs(a), gain: TransportParams.tensionTopEnd)
+        }
+        guard lookVersion < 3 else { return v }
         for key in TapeParams.curves.keys {
             guard let k = v[key] else { continue }
-            v[key] = TapeParams.knob(key, forAmount: TapeParams.amountIn027(key, min(1, max(0, k))))
+            v[key] = TapeParams.knobIn028(key, forAmount: TapeParams.amountIn027(key, min(1, max(0, k))))
         }
         return v
     }

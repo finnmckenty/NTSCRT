@@ -2152,7 +2152,8 @@ final class AppState {
     func lookDictionary() -> [String: Any] {
         var look: [String: Any] = [
             // 2: Digital video's Quality on its even curve (0.19).
-            "version": 3,
+            // 4: Back tension's longer travel (GlitchSettings.upgraded).
+            "version": 4,
             "downscale": [
                 "enabled": downscaleEnabled,
                 "width": downscaleWidth,

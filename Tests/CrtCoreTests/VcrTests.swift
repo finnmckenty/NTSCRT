@@ -120,6 +120,67 @@ final class VcrTests: XCTestCase {
         XCTAssertLessThan(goodTape, dirtyDeck / 3, "a good tape doesn't shed much")
     }
 
+    /// Clogs (a chunk lodging: debris up by more than 0.1 µm in a field)
+    /// over ten minutes of play.
+    private func clogs(_ v: [String: Double]) -> Int {
+        let d = DeckSimulator(settings: GlitchSettings(values: v))
+        d.reset(atField: 0)
+        var n = 0, last: [Float] = [0, 0]
+        for f in Int64(1)...36000 {
+            d.advance(toField: f)
+            let now = d.heads(forField: f + 1).map(\.debris)
+            for h in 0..<2 where now[h] - last[h] > 0.1 { n += 1 }
+            last = now
+        }
+        return n
+    }
+
+    func testAnUncleanedDeckClogsNowAndThenOnAnyTape() {
+        // Every tape sheds a trace, so Dirt buildup does something whatever
+        // the tape: a clog every half minute or so on a new one in a deck
+        // never cleaned, about never in one just cleaned.
+        let never = clogs(["dirt_buildup": 1]), half = clogs(["dirt_buildup": 0.5]), cleaned = clogs(["dirt_buildup": 0])
+        XCTAssertGreaterThan(never, 12, "every 50 s or oftener")
+        XCTAssertLessThan(never, 50, "every 12 s or rarer")
+        XCTAssertLessThanOrEqual(cleaned, 2)
+        // The knob rises evenly: half way, about a third of full.
+        XCTAssertGreaterThan(Double(half), Double(never) * 0.2, "\(half) of \(never)")
+        XCTAssertLessThan(Double(half), Double(never) * 0.6)
+        let deck = { (b: Double) in DeckParams(GlitchSettings(values: ["dirt_buildup": b])).pickup(0) }
+        XCTAssertEqual(deck(0.5) / deck(1), 0.36, accuracy: 0.03)
+        // A shedding tape still clogs it far more.
+        XCTAssertGreaterThan(clogs(["dirt_buildup": 1, "tape_mold": 0.6]), never * 3)
+    }
+
+    func testWornHeadsClogMoreEasily() {
+        let new = DeckParams(GlitchSettings(values: ["dirt_buildup": 0.5]))
+        let worn = DeckParams(GlitchSettings(values: ["dirt_buildup": 0.5, "head_wear": 1]))
+        XCTAssertEqual(worn.pickup(0), 2 * new.pickup(0), accuracy: 1e-4)
+        XCTAssertGreaterThan(Double(clogs(["dirt_buildup": 1, "head_wear": 1])),
+                             Double(clogs(["dirt_buildup": 1])) * 1.4)
+    }
+
+    func testBakedOnDirtShiftsOnEachHeadByItself() {
+        let deck = DeckParams(GlitchSettings(values: ["head_dirt": 1]))
+        var sum: [Float] = [0, 0], lo = Float.infinity, hi = -Float.infinity, apart: Float = 0, step: Float = 0
+        let n = 6000
+        for f in 0..<n {
+            let a = DeckParams.dirtShift(0, field: Int64(f), seed: 3), b = DeckParams.dirtShift(1, field: Int64(f), seed: 3)
+            sum[0] += a; sum[1] += b; lo = min(lo, a, b); hi = max(hi, a, b)
+            apart = max(apart, abs(a - b))
+            step = max(step, abs(a - DeckParams.dirtShift(0, field: Int64(f + 1), seed: 3)))
+        }
+        XCTAssertEqual(sum[0] / Float(n), 1, accuracy: 0.05)
+        XCTAssertEqual(sum[1] / Float(n), 1, accuracy: 0.05)
+        XCTAssertGreaterThanOrEqual(lo, 0.79); XCTAssertLessThanOrEqual(hi, 1.21)
+        XCTAssertGreaterThan(apart, 0.15, "the heads drift apart")
+        XCTAssertLessThan(step, 0.02, "slowly")
+        // It is the same dirt, moved: the layer's own size times the shift.
+        XCTAssertEqual(deck.baselineDirt(0, seed: 3, field: 40),
+                       deck.baselineDirt(0, seed: 3) * DeckParams.dirtShift(0, field: 40, seed: 3), accuracy: 1e-6)
+        XCTAssertEqual(DeckParams(GlitchSettings(values: [:])).baselineDirt(0, seed: 3, field: 40), 0)
+    }
+
     func testVaselineRubsOffOntoTheHeads() {
         let d = DeckSimulator(settings: GlitchSettings(values: ["tape_vaseline": 1]))
         d.reset(atField: 0)
@@ -135,8 +196,8 @@ final class VcrTests: XCTestCase {
         XCTAssertEqual(m["vcr"], 1)
         XCTAssertEqual(m["head_dirt"]!, 0.45, accuracy: 1e-9)
         XCTAssertEqual(m["tape_creases"], 0.4)
-        XCTAssertEqual(Double(TapeParams.amount("tape_dropouts", Float(m["tape_dropouts"]!))), 0.3, accuracy: 1e-5,
-                       "the same flaws, on Oxide flaws' curve")
+        XCTAssertEqual(m["tape_dropouts"]!, TapeParams.knobIn028("tape_dropouts", forAmount: 0.3), accuracy: 1e-9,
+                       "where Oxide flaws' slider stood for it in 0.28")
         XCTAssertNil(m["head_clog"])
         XCTAssertEqual(m["dropout_compensation"], 0)
         XCTAssertEqual(GlitchSettings.migrated(["vertical_hold": 0.3])["vcr"], 0, "no tape, no VCR")
@@ -249,17 +310,200 @@ final class VcrPlaybackTests: XCTestCase {
         XCTAssertEqual(ep.luma, src.luma, accuracy: 0.03)
     }
 
+    /// The color of a flat patch: its strength (the mean color, which noise
+    /// averages out of) and its noise (how far pixels stray from it).
+    private func color(_ px: [UInt8]) -> (level: Double, noise: Double) {
+        var cs: [(Double, Double)] = []
+        for y in 60..<180 { for x in 60..<260 { let c = yiq(px, x, y); cs.append((c.1, c.2)) } }
+        let n = Double(cs.count)
+        let mi = cs.reduce(0) { $0 + $1.0 } / n, mq = cs.reduce(0) { $0 + $1.1 } / n
+        let v = cs.reduce(0) { $0 + ($1.0 - mi) * ($1.0 - mi) + ($1.1 - mq) * ($1.1 - mq) } / n
+        return ((mi * mi + mq * mq).squareRoot(), v.squareRoot())
+    }
+
     func testWearWearsThePictureButNotTheColor() throws {
         // Worn tape and heads lose up to 20 dB, which on EP used to sink the
         // color-under below the color killer. People turn wear up for a
         // worn picture, not a black-and-white one.
         // (At the realistic worst; full Wear goes on to wreck the picture.)
         let input = texture { _, _ in (0.7, 0.45, 0.3) }
-        let new = patch(try render(input, ["vcr": 1, "tape_speed": 2]))
-        let worn = patch(try render(input, ["vcr": 1, "tape_speed": 2, "tape_wear": asBefore("tape_wear", 1),
-                                            "head_wear": 0.5]))
-        XCTAssertGreaterThan(worn.noise, new.noise * 1.5, "the picture is worn")
-        XCTAssertEqual(worn.chroma, new.chroma, accuracy: 0.03, "the color isn't")
+        let new = try render(input, ["vcr": 1, "tape_speed": 2])
+        let worn = try render(input, ["vcr": 1, "tape_speed": 2, "tape_wear": asBefore("tape_wear", 1),
+                                      "head_wear": 0.5])
+        XCTAssertGreaterThan(patch(worn).noise, patch(new).noise * 1.5, "the picture is worn")
+        // (Not faded. Where a worn head's contact sinks the picture below
+        // the FM threshold for a moment, the TV's own color control reads a
+        // noisy burst and turns the color up a little, as it does behind
+        // any band of noise.)
+        XCTAssertGreaterThan(color(worn).level, color(new).level - 0.03, "the color isn't")
+        XCTAssertLessThan(color(worn).level, color(new).level + 0.05)
+    }
+
+    func testAWornHeadMakesTheColorNoisy() throws {
+        // The deck holds the color's strength up (ACC); the head's noise
+        // comes up with what the head lost. What the tape lost is made up
+        // against the same noise, as before.
+        let input = texture { _, _ in (0.7, 0.45, 0.3) }
+        let new = color(try render(input, ["vcr": 1]))
+        let head = color(try render(input, ["vcr": 1, "head_wear": 1]))
+        XCTAssertGreaterThan(head.noise, new.noise * 1.6, "a worn head's color is noisier: \(new.noise) → \(head.noise)")
+        XCTAssertEqual(head.level, new.level, accuracy: 0.04, "and as strong")
+        let fresh = DeckParams(GlitchSettings(values: [:]))
+        let worn = DeckParams(GlitchSettings(values: ["head_wear": 1]))
+        let wornTape = TapeParams(GlitchSettings(values: ["tape_wear": 0.5]))
+        XCTAssertEqual(fresh.colorNoise(0), 1)
+        XCTAssertGreaterThan(fresh.colorBoost(0, tape: wornTape), 1.5, "a worn tape's color is raised")
+        XCTAssertEqual(fresh.colorNoise(0), 1, "but not the noise with it")
+        XCTAssertGreaterThan(worn.colorNoise(0), 1.8)
+        XCTAssertLessThan(worn.colorNoise(0), 3)
+        XCTAssertEqual(worn.colorBoost(0, tape: TapeParams(GlitchSettings(values: [:]))), worn.colorNoise(0),
+                       accuracy: 1e-4, "a worn head's noise rises by all it lost")
+    }
+
+    func testAWornHeadsNoiseComesAndGoes() throws {
+        // A worn tip rides on what the tape is doing, so its noise drifts
+        // through the picture and over time — not the same sheet of grain on
+        // every frame. A clean deck's noise is the same on every frame.
+        let input = texture { _, _ in (0.5, 0.5, 0.5) }
+        func noise(_ wear: Double) throws -> [Double] {
+            try (0..<8).map { patch(try render(input, time: 1 + Double($0) * 0.3,
+                                               ["vcr": 1, "head_wear": wear])).noise }
+        }
+        let clean = try noise(0), worn = try noise(0.85)
+        XCTAssertLessThan(clean.max()!, clean.min()! * 1.15, "steady: \(clean)")
+        XCTAssertGreaterThan(worn.max()!, worn.min()! * 1.5, "comes and goes: \(worn)")
+        XCTAssertGreaterThan(worn.min()!, clean.max()!, "but never clean")
+        // And any moment plays the same again.
+        XCTAssertEqual(try render(input, time: 2.2, ["vcr": 1, "head_wear": 0.85]),
+                       try render(input, time: 2.2, ["vcr": 1, "head_wear": 0.85]))
+    }
+
+    func testAWornTipsContactAveragesOutAndIsWorstAtTheEnds() {
+        let L = TapeGeometry.trackLength
+        var sum = 0.0, lo = Float.infinity, hi = -Float.infinity, n = 0.0
+        var top = 0.0, middle = 0.0
+        for f in stride(from: Int64(0), to: 3000, by: 7) {
+            for i in 0..<20 {
+                let c = DeckParams.contact(field: f, along: (Double(i) + 0.5) / 20 * L, seed: 5)
+                sum += Double(c); n += 1; lo = min(lo, c); hi = max(hi, c)
+                if i == 0 { top += Double(c) }
+                if i == 10 { middle += Double(c) }
+            }
+        }
+        XCTAssertEqual(sum / n, 1.05, accuracy: 0.1, "about its average")
+        XCTAssertGreaterThanOrEqual(lo, 0.15)
+        XCTAssertLessThan(hi, 2.6)
+        XCTAssertGreaterThan(top, middle * 1.15, "it meets the tape late")
+        // Smooth in time: a field later it has barely moved.
+        let a = DeckParams.contact(field: 100, along: L / 2, seed: 5)
+        let b = DeckParams.contact(field: 101, along: L / 2, seed: 5)
+        XCTAssertEqual(a, b, accuracy: 0.25)
+        // No wear, no spacing, whatever the moment.
+        XCTAssertEqual(DeckParams(GlitchSettings(values: [:])).wearSpacing(0, field: 9, along: 3, seed: 5), 0)
+    }
+
+    func testTheDecksNoiseCancellerTakesFineGrainAndTheFaintestDetail() throws {
+        // Fine vertical stripes, faint and strong: the canceller takes the
+        // faint ones for noise; the strong ones keep nearly all they had.
+        func stripes(_ depth: Float) throws -> Double {
+            let input = texture { x, _ in let v = 0.5 + ((x / 2) % 2 == 0 ? depth : -depth); return (v, v, v) }
+            let px = try render(input, ["vcr": 1])
+            var even = 0.0, odd = 0.0, n = 0.0
+            for y in 100..<140 { for x in stride(from: 80, to: 240, by: 4) {
+                even += yiq(px, x, y).0 + yiq(px, x + 1, y).0
+                odd += yiq(px, x + 2, y).0 + yiq(px, x + 3, y).0; n += 2
+            } }
+            return abs(even - odd) / n / Double(2 * depth)
+        }
+        let faint = try stripes(0.012), strong = try stripes(0.2)
+        XCTAssertLessThan(faint, strong * 0.6, "faint detail fades: \(faint) against \(strong)")
+        XCTAssertGreaterThan(strong, 0.3, "strong detail stays")
+        // A new tape's grain is all but gone from a flat picture.
+        let flat = texture { _, _ in (0.5, 0.5, 0.5) }
+        XCTAssertLessThan(patch(try render(flat, ["vcr": 1])).noise, 0.006, "48 dB or better")
+    }
+
+    func testTheLumaFilterIsSteep() {
+        // Both sections, both ways: 3 dB down at 2.4 MHz, 20 at the color
+        // subcarrier.
+        func gain(_ mhz: Double) -> Double {
+            let w = 2 * Double.pi * mhz / VcrChannel.sampleRate
+            var g = 1.0
+            for q in [VcrChannel.lumaQ.0, VcrChannel.lumaQ.1] {
+                let c = VcrChannel.lowPass(VcrChannel.lumaMHz, q: q).map(Double.init)
+                let nr = c[0] + c[1] * cos(w) + c[2] * cos(2 * w), ni = -c[1] * sin(w) - c[2] * sin(2 * w)
+                let dr = 1 + c[3] * cos(w) + c[4] * cos(2 * w), di = -c[3] * sin(w) - c[4] * sin(2 * w)
+                g *= (nr * nr + ni * ni) / (dr * dr + di * di)      // one way squared: both ways
+            }
+            return 20 * log10(g)      // g: both ways, so an amplitude gain
+        }
+        XCTAssertEqual(gain(0.5), 0, accuracy: 0.05)
+        XCTAssertEqual(gain(2.4), -3, accuracy: 0.5)
+        XCTAssertLessThan(gain(NTSCTiming.subcarrierMHz), -20)
+    }
+
+    /// Where a damaged tape's picture differs from the same tape undamaged:
+    /// for each row, the share of it that is damaged.
+    private func damage(_ values: [String: Double], time: Double = 1.0) throws -> [Double] {
+        let input = texture { _, _ in (0.7, 0.45, 0.3) }
+        let clean = try render(input, time: time, ["vcr": 1])
+        let px = try render(input, time: time, values.merging(["vcr": 1]) { a, _ in a })
+        return (0..<A).map { y in
+            var n = 0
+            for x in 20..<(W - 20) {
+                let i = (y * W + x) * 4
+                let d = abs(Int(px[i]) - Int(clean[i])) + abs(Int(px[i + 1]) - Int(clean[i + 1])) + abs(Int(px[i + 2]) - Int(clean[i + 2]))
+                if d > 60 { n += 1 }
+            }
+            return Double(n) / Double(W - 40)
+        }
+    }
+
+    /// Runs of consecutive rows with damage: their heights.
+    private func bands(_ rows: [Double], over share: Double = 0.02) -> [Int] {
+        var out: [Int] = [], run = 0
+        for r in rows + [0] {
+            if r > share { run += 1 } else if run > 0 { out.append(run); run = 0 }
+        }
+        return out
+    }
+
+    func testEachKindOfTapeDamageKeepsItsOwnShape() throws {
+        // At the top of their knobs Oxide flaws, Scratches and Mold had all
+        // become bands of noise with torn picture between (0.27–0.28).
+        // Flaws are dropouts: dashes, a line tall and mostly a fraction of
+        // the picture wide, all over it. Scratches are lines right across,
+        // a line or three tall, at the same heights from field to field.
+        // Mold is patches: bands many lines tall.
+        let flaws = try damage(["tape_dropouts": 1])
+        let scratches = try damage(["tape_scratches": 1])
+        let mold = try damage(["tape_mold": 1])
+        func hit(_ rows: [Double]) -> [Double] { rows.filter { $0 > 0.02 } }
+        func median(_ a: [Double]) -> Double { a.isEmpty ? 0 : a.sorted()[a.count / 2] }
+        // Flaws: many rows touched, each over a small share of its width;
+        // hardly any row gone right across. (Measured 121 rows, median
+        // 18% of the width, 7 rows over 80%.)
+        XCTAssertGreaterThan(hit(flaws).count, 60)
+        XCTAssertLessThan(median(hit(flaws)), 0.35, "dashes, not lines")
+        XCTAssertLessThan(flaws.filter { $0 > 0.8 }.count, 20)
+        // Scratches: right across, never taller than a few lines.
+        // (Measured 52 rows, median 71%, tallest 4.)
+        XCTAssertGreaterThan(hit(scratches).count, 25)
+        XCTAssertGreaterThan(median(hit(scratches)), 0.5, "lines right across")
+        XCTAssertLessThanOrEqual(bands(scratches).max() ?? 0, 6, "a scratch stays a line")
+        // Mold: bands. (Measured seven bands, 4–11 rows tall, median 97%.)
+        XCTAssertGreaterThan(median(hit(mold)), 0.8)
+        XCTAssertGreaterThanOrEqual(bands(mold).sorted()[bands(mold).count / 2], 6, "patches many lines tall")
+        // Two fields on (the same head again), a scratch is at the same
+        // heights; a flake has moved on three lines or gone.
+        let later = try damage(["tape_scratches": 1], time: 1.0 + 2 / NTSCTiming.fieldRate)
+        let flawsLater = try damage(["tape_dropouts": 1], time: 1.0 + 2 / NTSCTiming.fieldRate)
+        func same(_ a: [Double], _ b: [Double], over s: Double) -> Double {
+            let ia = Set(a.indices.filter { a[$0] > s }), ib = Set(b.indices.filter { b[$0] > s })
+            return Double(ia.intersection(ib).count) / Double(max(1, ia.count))
+        }
+        XCTAssertGreaterThan(same(scratches, later, over: 0.3), 0.75, "scratches stay put (0.95)")
+        XCTAssertLessThan(same(flaws, flawsLater, over: 0.3), 0.5, "flaws don't (0.26)")
     }
 
     func testAFlawOverTheBurstDoesNotFloodTheNextLinesWithColor() throws {
@@ -327,7 +571,11 @@ final class VcrPlaybackTests: XCTestCase {
         func tape(_ name: String) -> TapeParams {
             TapeParams(GlitchSettings(values: VcrCondition.tapes.first { $0.name == name }!.values))
         }
-        XCTAssertEqual(tape("Used").dropouts, 0.15, accuracy: 1e-5)
+        // (Oxide flaws keeps the slider position it had in 0.28, not the
+        // amount: TapeParams.knobIn028.)
+        let used = VcrCondition.tapes.first { $0.name == "Used" }!.values["tape_dropouts"]!
+        XCTAssertEqual(used, TapeParams.knobIn028("tape_dropouts", forAmount: 0.15), accuracy: 1e-9)
+        XCTAssertEqual(used, 0.0769, accuracy: 1e-3)
         XCTAssertEqual(tape("Worn out").scratches, 0.45, accuracy: 1e-5)
         XCTAssertEqual(tape("Worn out").wear, 0.75, accuracy: 1e-5)
         XCTAssertEqual(tape("Chewed").creases, 0.7, accuracy: 1e-5)
@@ -348,9 +596,15 @@ final class VcrPlaybackTests: XCTestCase {
             for k in stride(from: 0.0, through: 1.0, by: 0.05) {
                 let a = Double(TapeParams.amount(key, Float(k)))
                 XCTAssertEqual(TapeParams.knob(key, forAmount: a), k, accuracy: 1e-5, "\(key) inverts at \(k)")
+                // A 0.27.0 look: the same damage — except Oxide flaws,
+                // whose look keeps the slider position 0.28 gave it.
                 let old = GlitchSettings.upgraded([key: k], lookVersion: 2)[key]!
-                XCTAssertEqual(Double(TapeParams.amount(key, Float(old))), TapeParams.amountIn027(key, k),
-                               accuracy: 1e-4, "\(key): a 0.27.0 look at \(k)")
+                if TapeParams.curvesIn028[key] == nil {
+                    XCTAssertEqual(Double(TapeParams.amount(key, Float(old))), TapeParams.amountIn027(key, k),
+                                   accuracy: 1e-4, "\(key): a 0.27.0 look at \(k)")
+                } else {
+                    XCTAssertEqual(old, TapeParams.knobIn028(key, forAmount: TapeParams.amountIn027(key, k)), accuracy: 1e-9)
+                }
             }
         }
         XCTAssertEqual(GlitchSettings.upgraded(["tape_wear": 0.4], lookVersion: 3)["tape_wear"], 0.4,

@@ -32,10 +32,32 @@ public enum VcrChannel {
     static let emphasisPoleMHz = 5 / (2 * Double.pi * 1.3)
     /// Recorded FM is clipped at these levels after emphasis (IRE).
     static let whiteClipIRE: Float = 226, darkClipIRE: Float = -82
-    /// The FM band's analytic band-pass, and the demodulated luma low-pass.
+    /// The FM band's analytic band-pass, and the demodulated luma low-pass:
+    /// fourth-order Butterworth run both ways, 3 dB down at 2.4 MHz and
+    /// 20 dB down at the color subcarrier — a deck's carrier filter is
+    /// steep, so what an FM demodulator's noise has most of (it rises with
+    /// frequency) goes with the carrier, and none of it lands on the TV's
+    /// color.
     static let fmBandMHz = (1.3, 6.6)
-    static let lumaMHz = 3.0
+    static let lumaMHz = 2.7
+    static let lumaQ = (0.5411961, 1.3065630)
+    /// The playback noise canceller every VHS deck has after de-emphasis:
+    /// whatever of the picture lies above `cancellerMHz` (3 dB down there:
+    /// a one-pole low-pass run both ways, 0.6436 of each pass's corner) and
+    /// within ±`cancellerIRE` is taken for noise and subtracted. Fine grain
+    /// goes from flat areas, and so does the faintest fine detail; anything
+    /// larger keeps all but that sliver. Its level is a choice in the range
+    /// decks used (a few percent of the picture).
+    static let cancellerMHz = 0.9
+    static let cancellerIRE: Float = 1.5
     static let chromaMHz = 0.55
+    /// The dropout detector's envelope follower: its time constant, µs. The
+    /// carrier has to stay down about twice this long before the compensator
+    /// switches in, so every dropout starts with a tick of the demodulator's
+    /// noise — the spark at the head of a dropout's dash. (A choice: decks'
+    /// detectors took a microsecond or two; at the 0.27 µs this had, the
+    /// compensator hid a flaw from its first sample.)
+    static let dropoutDetectorUS = 0.9
 
     /// Spacing-loss filters: a bank over spacing 0–4 µm (square-root steps),
     /// each the spacing loss's Cauchy kernel (exp(−2π d/λ) in frequency)
@@ -111,13 +133,14 @@ public enum VcrChannel {
         return out
     }
 
-    /// Butterworth low-pass biquad (b0, b1, b2, a1, a2) at `mhz`.
-    static func lowPass(_ mhz: Double) -> [Float] {
+    /// Low-pass biquad (b0, b1, b2, a1, a2) at `mhz`: Butterworth, or with
+    /// `q` one section of a higher-order one.
+    static func lowPass(_ mhz: Double, q: Double = 0.5.squareRoot()) -> [Float] {
         let k = tan(Double.pi * mhz / sampleRate)
-        let norm = 1 / (1 + 2.squareRoot() * k + k * k)
+        let norm = 1 / (1 + k / q + k * k)
         let b0 = k * k * norm
         return [Float(b0), Float(2 * b0), Float(b0),
-                Float(2 * (k * k - 1) * norm), Float((1 - 2.squareRoot() * k + k * k) * norm)]
+                Float(2 * (k * k - 1) * norm), Float((1 - k / q + k * k) * norm)]
     }
 
     /// First-order shelf (b0, b1, a1) with a zero and a pole, bilinear.
@@ -129,7 +152,7 @@ public enum VcrChannel {
 }
 
 /// One active line as the VCR reads it: where on the tape, by which head,
-/// in what state. Mirrors the GPU struct (10 × 4 bytes).
+/// in what state. Mirrors the GPU struct (11 × 4 bytes).
 public struct VcrLine: Equatable {
     /// The track's start on the tape (see `TapePosition`).
     public var originBase: Int32
@@ -149,12 +172,16 @@ public struct VcrLine: Equatable {
     public var deltaSlope: Float
     /// What the color-under is raised by on playback (`DeckParams.colorBoost`).
     public var colorBoost: Float
+    /// And what the head's noise is raised by with it (`DeckParams.colorNoise`).
+    public var colorNoise: Float
 
     public init(originBase: Int32, originOffset: Float, along0: Float, spacing: Float, grease: Float,
-                gain: Float, head: UInt32, delta0: Float = 0, deltaSlope: Float = 0, colorBoost: Float = 1) {
+                gain: Float, head: UInt32, delta0: Float = 0, deltaSlope: Float = 0, colorBoost: Float = 1,
+                colorNoise: Float = 1) {
         self.originBase = originBase; self.originOffset = originOffset; self.along0 = along0
         self.spacing = spacing; self.grease = grease; self.gain = gain; self.head = head
         self.delta0 = delta0; self.deltaSlope = deltaSlope; self.colorBoost = colorBoost
+        self.colorNoise = colorNoise
     }
 }
 
@@ -331,7 +358,7 @@ public final class VcrStage {
         let fmt = plan.format
         let em = VcrChannel.shelf(zeroMHz: VcrChannel.emphasisZeroMHz, poleMHz: VcrChannel.emphasisPoleMHz)
         let de = VcrChannel.shelf(zeroMHz: VcrChannel.emphasisPoleMHz, poleMHz: VcrChannel.emphasisZeroMHz)
-        let lp = VcrChannel.lowPass(VcrChannel.lumaMHz)
+        let lp = VcrChannel.lowPass(VcrChannel.lumaMHz, q: VcrChannel.lumaQ.0)
         let cp = VcrChannel.lowPass(VcrChannel.chromaMHz)
         let ck = VcrChannel.lowPass(Self.inputChromaMHz)
         var u = Uniforms(
@@ -517,6 +544,7 @@ public final class VcrStage {
     struct VcrLine {
         int originBase; float originOffset; float along0; float spacing;
         float grease; float gain; uint head; float delta0; float deltaSlope; float colorBoost;
+        float colorNoise;
     };
 
     // (cos, sin) of an angle a turned on by q quarter turns.
@@ -529,6 +557,12 @@ public final class VcrStage {
     inline int turns(int sense, int row) { return sense * row; }
     inline float sincf(float x) { return fabs(x) < 1e-4 ? 1.0 : sin(x) / x; }
 
+    // The luma low-pass's second section (the first is U.lb…), and the noise
+    // canceller: its clip level (IRE) and its high-pass's step per sample.
+    constant float LP2[5] = { \(VcrChannel.lowPass(VcrChannel.lumaMHz, q: VcrChannel.lumaQ.1).map { "\($0)" }.joined(separator: ", ")) };
+    constant float DOC_STEP = \(Float(1 - exp(-1 / (VcrChannel.dropoutDetectorUS * VcrChannel.sampleRate))));
+    constant float NC_CLIP = \(VcrChannel.cancellerIRE);
+    constant float NC_STEP = \(Float(1 - exp(-2 * Double.pi * VcrChannel.cancellerMHz / 0.6436 / VcrChannel.sampleRate)));
     constant float SYNC_END = 4.7;
     constant float BURST_S = 5.3;
     constant float BURST_E = 7.8;
@@ -622,21 +656,29 @@ public final class VcrStage {
             }
         }
         if (U.flake > 0.0) {
-            Cell c = tcell(p, 10);
-            int cy = int(floor(y));
+            Cell c = tcell(p, 3);
+            int cy = int(floor(y * 3.0));
+            int most = int(ceil(U.flake));
             for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
                 int ci = c.c + i, cj = cy + j;
-                if (tuni(s, 21u, ci, cj) >= U.flake) continue;
-                float ddx = tdx(p, ci, 10, tuni(s, 22u, ci, cj)) * 0.1;
-                float ddy = float(cj) + tuni(s, 23u, ci, cj) - y;
-                float u = tuni(s, 24u, ci, cj);
-                float r = 0.04 * pow(8.0, u * u) * (1.0 + 0.6 * max(0.0, U.dropouts - 1.0));
-                float e = 0.6 + 0.8 * tuni(s, 25u, ci, cj);
-                float d = sqrt((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e));
-                if (d < r * 1.5) out *= sstep(r * 0.8, r, d);
+                for (int k = 0; k < most; k++) {
+                    uint sk = s + uint(k) * 0x9E3779B9u;
+                    if (tuni(sk, 21u, ci, cj) >= U.flake - float(k)) continue;
+                    float ddx = tdx(p, ci, 3, tuni(sk, 22u, ci, cj)) * 0.1;
+                    float ddy = (float(cj) + tuni(sk, 23u, ci, cj)) * 0.33333334 - y;
+                    float u = tuni(sk, 24u, ci, cj);
+                    float r = 0.018 * pow(9.0, u * u);
+                    float e = 0.5 + 0.6 * tuni(sk, 25u, ci, cj);
+                    float d = sqrt((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e));
+                    if (d < r * 1.5) {
+                        float depth = min(1.0, 0.55 + 0.9 * tuni(sk, 26u, ci, cj));
+                        out *= 1.0 - depth * (1.0 - sstep(r * 0.8, r, d));
+                    }
+                }
             }
         }
         if (U.scratches > 0.0) {
+            float strong = min(1.0, U.scratches);
             int lane = int(floor(y * 4.0));
             Cell sx = tcell(p, 3000);
             Cell c80 = tcell(p, 80), c15 = tcell(p, 15), c200 = tcell(p, 200), c120 = tcell(p, 120);
@@ -649,15 +691,15 @@ public final class VcrStage {
                 float weave = 0.03 * (2.0 * noise1(ss, 37u, c80.c, c80.f) - 1.0) + 0.012 * (2.0 * noise1(ss, 38u, c15.c, c15.f) - 1.0);
                 float yc = (float(li) + 0.15 + 0.7 * tuni(s, 34u, li, sx.c)) * 0.25 + weave;
                 float u = tuni(s, 35u, li, sx.c);
-                float w = (0.006 + 0.074 * u * u * u) * (0.6 + 0.4 * U.scratches) * (0.5 + noise1(ss, 39u, c200.c, c200.f));
+                float w = (0.006 + 0.074 * pow(u, 3.0 - 0.6667 * (U.scratches - strong))) * (0.6 + 0.4 * strong + 0.15 * (U.scratches - strong)) * (0.5 + noise1(ss, 39u, c200.c, c200.f));
                 float depth = sstep(0.3, 0.55, noise1(ss, 40u, c120.c, c120.f));
                 if (depth <= 0.0) continue;
                 float dy = fabs(y - yc);
                 if (dy < w * 0.5) {
                     out *= 1.0 - 0.95 * depth;
-                    lift += 0.15 * depth * U.scratches;
+                    lift += 0.15 * depth * strong;
                 } else if (dy < w * 1.5) {
-                    lift += 0.35 * depth * U.scratches * (1.0 - (dy - w * 0.5) / w);
+                    lift += 0.35 * depth * strong * (1.0 - (dy - w * 0.5) / w);
                 }
             }
         }
@@ -1004,7 +1046,7 @@ public final class VcrStage {
             prev = c;
             float mhz = clamp(dphi / (6.2831853 * U.dt), 1.0, 7.5);
             luma[row + i] = (mhz - 3.4) * 140.0 - 40.0;
-            env += 0.12 * (length(c) - env);
+            env += DOC_STEP * (length(c) - env);
             ref = env > ref ? ref + 0.05 * (env - ref) : ref * 0.99885;
             // Floors against the head's own noise (a narrow LP or EP head's
             // carrier and noise are both lower): below them it is noise.
@@ -1015,33 +1057,53 @@ public final class VcrStage {
             } else if (env < on) { flagged = true; hold = 14; }
             chroma[row + i] = float2(flagged ? 1.0 : 0.0, 0.0);
         }
-        // Luma: zero-phase low-pass (forward, then backward), de-emphasis.
-        float4 s = float4(luma[row], luma[row], luma[row], luma[row]);
-        for (uint i = 0; i < N; i++) luma[row + i] = biquad(s, luma[row + i], U.lb0, U.lb1, U.lb2, U.la1, U.la2);
-        s = float4(luma[row + N - 1]);
-        for (int i = int(N) - 1; i >= 0; i--) luma[row + uint(i)] = biquad(s, luma[row + uint(i)], U.lb0, U.lb1, U.lb2, U.la1, U.la2);
-        float xp = luma[row], yp = luma[row];
+        // Luma: zero-phase low-pass (two sections forward, then backward),
+        // de-emphasis, and the noise canceller.
+        float4 s = float4(luma[row]), s2 = float4(luma[row]);
+        for (uint i = 0; i < N; i++)
+            luma[row + i] = biquad(s2, biquad(s, luma[row + i], U.lb0, U.lb1, U.lb2, U.la1, U.la2),
+                                   LP2[0], LP2[1], LP2[2], LP2[3], LP2[4]);
+        s = float4(luma[row + N - 1]); s2 = s;
+        for (int i = int(N) - 1; i >= 0; i--)
+            luma[row + uint(i)] = biquad(s2, biquad(s, luma[row + uint(i)], U.lb0, U.lb1, U.lb2, U.la1, U.la2),
+                                         LP2[0], LP2[1], LP2[2], LP2[3], LP2[4]);
+        float xp = luma[row], yp = luma[row], low = luma[row];
         for (uint i = 0; i < N; i++) {
             float x = luma[row + i];
             float v = U.deB0 * x + U.deB1 * xp - U.deA1 * yp;
             xp = x; yp = v;
+            luma[row + i] = v;
+            // (The canceller's low-pass, forward; chroma.y is free here.)
+            low += NC_STEP * (v - low);
+            chroma[row + i].y = low;
+        }
+        // The canceller: what lies above its corner, clipped, comes off.
+        // (Its low-pass runs both ways, as the luma filter does, so what it
+        // takes from an edge it takes evenly from both sides.)
+        low = chroma[row + N - 1].y;
+        for (int i = int(N) - 1; i >= 0; i--) {
+            low += NC_STEP * (chroma[row + uint(i)].y - low);
+            float v = luma[row + uint(i)];
+            v -= clamp(v - low, -NC_CLIP, NC_CLIP);
             // Flagged samples are stored as v + 10000 (decoded in vcr_out).
-            luma[row + i] = chroma[row + i].x > 0.5 ? v + 10000.0 : v;
+            luma[row + uint(i)] = chroma[row + uint(i)].x > 0.5 ? v + 10000.0 : v;
         }
         // Color-under: mix down, turning this line's phase back the way the
         // head's own track turned it, then zero-phase low-pass twice (8th
         // order).
         // Tape and head wear don't fade the color (DeckParams.colorBoost):
-        // the color path hears this line's playback as if the tape and head
-        // were new, against the same head noise (recomputed, the same
-        // samples vcr_play added). The picture keeps its worn signal.
+        // the color path hears this line's playback raised to what a new
+        // tape and head would give. The head's noise (recomputed, the same
+        // samples vcr_play added) comes up only by the head's own share
+        // (colorNoise), as under a deck's ACC: a worn head's color gets
+        // noisy, a worn tape's doesn't. The picture keeps its worn signal.
         int q = turns(lines[y].head == 0u ? 1 : -1, int(y));
-        float boost = lines[y].colorBoost;
+        float boost = lines[y].colorBoost, rise = lines[y].colorNoise;
         for (uint i = 0; i < N; i++) {
             float a = U.cuStep * float(i);
             float2 cs = quarter(cos(a), sin(a), q);
             float x = pb[row + i];
-            if (boost != 1.0) x = boost * x - (boost - 1.0) * U.noise * gauss(U.seed ^ 0x51u, U.field, int(i), int(y));
+            if (boost != 1.0) x = boost * x - (boost - rise) * U.noise * gauss(U.seed ^ 0x51u, U.field, int(i), int(y));
             chroma[row + i] = x * float2(cs.x, -cs.y);
         }
         for (int pass = 0; pass < 2; pass++) {
@@ -1098,7 +1160,7 @@ public final class VcrStage {
         if (tid != 0u) return;
         float2 ref = BURST_DIR * U.burstAmp;
         float nominal = U.burstAmp;
-        float gain = 1.0, phase = 0.0, killer = 1.0;
+        float gain = 1.0, phase = 0.0, killer = 1.0, level = -1.0;
         bool on = true;
         uint b0 = uint((BURST_S + 0.3) / U.dt), b1 = min(U.n, uint((BURST_E - 0.3) / U.dt) + 1u);
         for (uint y = 0; y < U.rows; y++) {
@@ -1111,9 +1173,21 @@ public final class VcrStage {
             uint prev = y > 0u ? y - 1u : y;
             for (uint i = b0; i < b1 && !lost; i++)
                 lost = luma[y * U.n + i] > 5000.0 || luma[prev * U.n + i] > 5000.0;
+            float2 b = burst[y];
+            float mag = length(b);
+            // Nor do they follow a burst that dips for a line or two (a
+            // shallow dropout or a scratch the detector didn't flag): the
+            // ACC detector's capacitor holds its level, and only a burst
+            // that stays down brings it down (about four lines). Following
+            // every dip, each small flaw over a burst left a few lines of
+            // oversaturated color behind it.
             if (!lost) {
-                float2 b = burst[y];
-                float mag = length(b);
+                if (level < 0.0) level = mag;
+                bool dip = mag < 0.6 * level;
+                level += (dip ? 0.12 : 0.5) * (mag - level);
+                lost = dip;
+            }
+            if (!lost) {
                 // Phase error against the reference burst direction.
                 float err = atan2(ref.x * b.y - ref.y * b.x, ref.x * b.x + ref.y * b.y);
                 if (mag > 0.08 * nominal) phase += 0.35 * (err - phase);

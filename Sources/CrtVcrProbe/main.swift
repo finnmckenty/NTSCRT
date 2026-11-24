@@ -107,7 +107,9 @@ func ms(_ a: [Double]) -> String {
     guard !s.isEmpty else { return String(format: "%.2f", (a.first ?? 0) * 1000) }
     return String(format: "median %.2f max %.2f", s[s.count / 2] * 1000, s.last! * 1000)
 }
-print("frames \(frames)  cpu ms \(ms(cpuTimes))  gpu ms \(ms(gpuTimes))")
+// The first frame's CPU time is the run up to --start (the set's warm-up
+// included); the rest are one frame's step each.
+print("frames \(frames)  first cpu ms \(String(format: "%.1f", (cpuTimes.first ?? 0) * 1000))  cpu ms \(ms(cpuTimes))  gpu ms \(ms(gpuTimes))")
 
 // CRT_VCR_DUMP=1: the tape along the last frame's track, and the heads.
 if ProcessInfo.processInfo.environment["CRT_VCR_DUMP"] == "1", let plan = renderer.lastPlan, let v = plan.vcr {
