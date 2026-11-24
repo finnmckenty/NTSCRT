@@ -353,6 +353,9 @@ final class GlitchCheckpointTests: XCTestCase {
             let exact = try plan(export, t, history.settingsAt(t), history)
             XCTAssertEqual(looped.rows, exact.rows, "frame \(k) after the loop")
             XCTAssertEqual(looped.vcr?.lines, exact.vcr?.lines, "frame \(k) after the loop")
+            // And with that frame's knobs, not the last frame's before the loop.
+            XCTAssertEqual(looped.vcr?.tape, exact.vcr?.tape, "frame \(k) after the loop")
+            XCTAssertEqual(looped.vcr?.deck, exact.vcr?.deck, "frame \(k) after the loop")
         }
     }
 

@@ -344,7 +344,12 @@ public final class ReceiverSimulator {
             // back to on every pass.
             checkpoint?(snapshot(at: 0))
         }
-        guard time > 0, frameDuration > 0 else { return }
+        guard time > 0, frameDuration > 0 else {
+            // (A snapshot doesn't hold the knobs: resumed where it stops,
+            // the set takes that moment's. No line is stepped.)
+            if resumeFrom != nil, frameDuration > 0 { advance(to: time, settings: settingsAt(time)) }
+            return
+        }
         var nextCheckpoint = (self.time + 1).rounded(.down)
         while true {
             if let isCancelled, k % 30 == 0, isCancelled() { return }
