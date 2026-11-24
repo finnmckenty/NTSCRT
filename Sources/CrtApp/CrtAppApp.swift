@@ -43,6 +43,9 @@ struct CrtAppApp: App {
         }
         .windowResizability(.contentSize)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About NTSCRT") { AboutPanel.show() }
+            }
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { UpdateChecker.shared.checkNow() }
                 Toggle("Check for Updates Automatically", isOn: $checkForUpdatesAutomatically)
@@ -84,6 +87,9 @@ struct CrtAppApp: App {
                 state.ntscEnabled = true
             }
             appState = state
+            if let out = ProcessInfo.processInfo.environment["CRT_ABOUT_SNAPSHOT"] {
+                await AboutPanel.snapshotAndExit(to: out)
+            }
             UpdateChecker.shared.checkAtLaunch()
         } catch {
             bootstrapError = "\(error.localizedDescription)\n\nlibrashader dylib + slang-shaders submodule must be discoverable. See README."

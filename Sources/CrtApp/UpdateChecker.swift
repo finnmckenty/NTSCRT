@@ -11,6 +11,8 @@ import CrtCore
 /// GitHub's release format), `CRT_UPDATE_VERSION` (pretend to be this
 /// version), `CRT_UPDATE_CHECK=0` (never check at launch). Other `CRT_*`
 /// hooks (scripted runs) skip the launch check unless `CRT_UPDATE_URL` is set.
+/// `CRT_UPDATE_SNAPSHOT=<out.png>` captures the prompt offering a release
+/// and prints its credit line's links, then exits.
 @MainActor
 final class UpdateChecker {
     static let shared = UpdateChecker()
@@ -111,7 +113,7 @@ final class UpdateChecker {
         let alert = NSAlert()
         alert.messageText = "NTSCRT \(release.version) is available"
         alert.informativeText = "You have \(current). Download it from the release page, then replace NTSCRT in Applications."
-        if !release.notes.isEmpty { alert.accessoryView = notesView(release.notes) }
+        alert.accessoryView = accessory(notes: release.notes)
         alert.addButton(withTitle: "Download…")
         alert.addButton(withTitle: "Skip This Version")
         alert.addButton(withTitle: "Later")
@@ -127,6 +129,24 @@ final class UpdateChecker {
             default: break
             }
         }
+        if let out = env["CRT_UPDATE_SNAPSHOT"] {
+            Task { await AboutPanel.snapshotCreditAndExit("UPDATE", to: out) }
+        }
+    }
+
+    /// Under the prompt's text: the release notes (when there are any), then
+    /// who makes NTSCRT, with links (`AboutPanel.creditLine`).
+    private func accessory(notes: String) -> NSView {
+        let credit = AboutPanel.creditLineView(width: 420)
+        guard !notes.isEmpty else { return credit }
+        let scroll = notesView(notes)
+        let gap: CGFloat = 10
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 420,
+                                       height: scroll.frame.height + gap + credit.frame.height))
+        scroll.setFrameOrigin(NSPoint(x: 0, y: credit.frame.height + gap))
+        box.addSubview(scroll)
+        box.addSubview(credit)
+        return box
     }
 
     private func tell(_ title: String, _ text: String, extra: (String, URL)? = nil) {
