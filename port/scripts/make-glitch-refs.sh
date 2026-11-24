@@ -28,6 +28,8 @@ transport 3.3 vcr=1 tape_speed=2 tape_sticky=0.6 tape_mold=0.3 back_tension=0.7 
 slack 2.0 vcr=1 tape_speed=1 back_tension=-0.8 tape_wear=0.7 tape_scratches=0.6
 search 2.0 vcr=1 search_speed=4 tape_speed=1 tape_creases=0.4
 dub 1.5 vcr=1 tape_generation=3 tape_speed=1 tape_wear=0.6 head_switch=1
+heads 2.7 vcr=1 tape_speed=2 head_wear=0.8 head_dirt=0.7 dirt_buildup=0.6 head_mismatch=0.4 tape_dropouts=0.6 dropout_compensation=0
+sticky 2.4 vcr=1 tape_sticky=0.9 back_tension=-1 transport_flutter=0.9 tape_mold=0.4
 CASES
 ffmpeg -loglevel error -y -i TestAssets/testpattern.png -vf scale=320:240:flags=area "$renders/in.png"
 while read -r name time knobs; do
@@ -44,6 +46,8 @@ vcr-ep 1.3 vcr=1 tape_speed=2 tape_wear=0.5 tape_scratches=0.7 tape_sticky=0.4 b
 vcr-dub 1.3 vcr=1 tape_generation=2 tape_speed=1 tape_wear=0.35 tape_dropouts=0.15
 vcr-search 1.3 vcr=1 search_speed=3 transport_flutter=0.5
 vcr-wrecked 1.3 vcr=1 tape_speed=2 tape_generation=1 tape_wear=0.9 tape_dropouts=0.9 tape_scratches=0.8 head_wear=0.6 tape_edge_damage=0.4 transport_flutter=0.8
+vcr-heads 1.3 vcr=1 head_wear=0.8 head_dirt=0.5 tape_dropouts=0.5 tape_scratches=0.9
+vcr-sticky 1.3 vcr=1 tape_speed=1 tape_sticky=0.9 back_tension=-1 transport_flutter=0.7 tape_dropouts=1 dropout_compensation=0
 CASES
 rm -rf "$tmp"
 echo "made $(ls $plans/*.json | wc -l) plans, $(ls $renders/*.png | wc -l) renders"

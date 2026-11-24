@@ -32,8 +32,25 @@ pub const NOISE: f32 = 0.022;
 const EMPHASIS_ZERO_MHZ: f64 = 1.0 / (2.0 * PI * 1.3);
 const EMPHASIS_POLE_MHZ: f64 = 5.0 / (2.0 * PI * 1.3);
 const FM_BAND: (f64, f64) = (1.3, 6.6);
-const LUMA_MHZ: f64 = 3.0;
+/// The demodulated luma low-pass: fourth-order Butterworth run both ways —
+/// a deck's carrier filter is steep, so what an FM demodulator's noise has
+/// most of (it rises with frequency) goes with the carrier, and none of it
+/// lands on the TV's color.
+const LUMA_MHZ: f64 = 2.7;
+const LUMA_Q: (f64, f64) = (0.5411961, 1.3065630);
+/// The playback noise canceller every VHS deck has after de-emphasis:
+/// whatever of the picture lies above CANCELLER_MHZ (3 dB down there: a
+/// one-pole low-pass run both ways, 0.6436 of each pass's corner) and within
+/// ±CANCELLER_IRE is taken for noise and subtracted. Its level is a choice
+/// in the range decks used (a few percent of the picture).
+const CANCELLER_MHZ: f64 = 0.9;
+const CANCELLER_IRE: f32 = 1.5;
 const CHROMA_MHZ: f64 = 0.55;
+/// The dropout detector's envelope follower: its time constant, µs. The
+/// carrier has to stay down about twice this long before the compensator
+/// switches in, so every dropout starts with a tick of the demodulator's
+/// noise — the spark at the head of a dropout's dash. (A choice.)
+const DROPOUT_DETECTOR_US: f64 = 0.9;
 pub const LEVELS: u32 = 64;
 pub const REACH: u32 = 40;
 pub const MAX_SPACING: f32 = 4.0;
@@ -101,12 +118,17 @@ pub fn fm_band_taps() -> Vec<[f32; 2]> {
         .collect()
 }
 
+/// Butterworth low-pass biquad (b0, b1, b2, a1, a2) at `mhz`.
 pub(crate) fn low_pass(mhz: f64) -> [f32; 5] {
+    low_pass_q(mhz, 0.5f64.sqrt())
+}
+
+/// A low-pass biquad with `q`: one section of a higher-order Butterworth.
+pub(crate) fn low_pass_q(mhz: f64, q: f64) -> [f32; 5] {
     let k = (PI * mhz / sample_rate()).tan();
-    let s2 = 2f64.sqrt();
-    let norm = 1.0 / (1.0 + s2 * k + k * k);
+    let norm = 1.0 / (1.0 + k / q + k * k);
     let b0 = k * k * norm;
-    [b0 as f32, (2.0 * b0) as f32, b0 as f32, (2.0 * (k * k - 1.0) * norm) as f32, ((1.0 - s2 * k + k * k) * norm) as f32]
+    [b0 as f32, (2.0 * b0) as f32, b0 as f32, (2.0 * (k * k - 1.0) * norm) as f32, ((1.0 - k / q + k * k) * norm) as f32]
 }
 
 fn shelf(zero: f64, pole: f64) -> [f32; 3] {
@@ -115,7 +137,7 @@ fn shelf(zero: f64, pole: f64) -> [f32; 3] {
     [((1.0 + a) / (1.0 + b)) as f32, ((1.0 - a) / (1.0 + b)) as f32, ((1.0 - b) / (1.0 + b)) as f32]
 }
 
-/// One active line as the VCR reads it (mirrors the GPU struct, 40 bytes).
+/// One active line as the VCR reads it (mirrors the GPU struct, 44 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VcrLine {
@@ -134,12 +156,14 @@ pub struct VcrLine {
     pub delta_slope: f32,
     /// What the color-under is raised by on playback (DeckParams::color_boost).
     pub color_boost: f32,
+    /// And what the head's noise is raised by with it (DeckParams::color_noise).
+    pub color_noise: f32,
 }
 
 impl Default for VcrLine {
     fn default() -> Self {
         Self { origin_base: 0, origin_offset: 0.0, along0: 0.0, spacing: 0.0, grease: 0.0, gain: 0.0, head: 0,
-               delta0: 0.0, delta_slope: 0.0, color_boost: 1.0 }
+               delta0: 0.0, delta_slope: 0.0, color_boost: 1.0, color_noise: 1.0 }
     }
 }
 
@@ -183,13 +207,19 @@ fn input_chroma_delay() -> i32 {
     (2.0 * 2f64.sqrt() / (2.0 * PI * INPUT_CHROMA_MHZ) * sample_rate()).round() as i32
 }
 
-/// The uniforms (mirrors `VcrU` in vcr.wgsl: 12 u32, 52 f32, 2 u32, 10 f32).
+/// The uniforms (mirrors `VcrU` in vcr.wgsl: 12 u32, 52 f32, 2 u32, 18 f32).
 fn uniforms(plan: &VcrFieldPlan, compensate: bool, raster: &Raster, width: u32, rows: u32, field: u32) -> Vec<u8> {
     let t = &plan.tape;
     let fmt = plan.format;
     let em = shelf(EMPHASIS_ZERO_MHZ, EMPHASIS_POLE_MHZ);
     let de = shelf(EMPHASIS_POLE_MHZ, EMPHASIS_ZERO_MHZ);
-    let lp = low_pass(LUMA_MHZ);
+    let lp = low_pass_q(LUMA_MHZ, LUMA_Q.0);
+    // The luma low-pass's second section, the dropout detector's step, and
+    // the noise canceller's clip level and its high-pass's step per sample
+    // (constants in the Mac's shader source).
+    let lp2 = low_pass_q(LUMA_MHZ, LUMA_Q.1);
+    let doc_step = (1.0 - (-1.0 / (DROPOUT_DETECTOR_US * sample_rate())).exp()) as f32;
+    let nc_step = (1.0 - (-2.0 * PI * CANCELLER_MHZ / 0.6436 / sample_rate()).exp()) as f32;
     let cp = low_pass(CHROMA_MHZ);
     let ck = low_pass(INPUT_CHROMA_MHZ);
     let trap = input_trap();
@@ -263,8 +293,11 @@ fn uniforms(plan: &VcrFieldPlan, compensate: bool, raster: &Raster, width: u32, 
         0.0,
     ];
     let link: [u32; 2] = [plan.linked as u32, (input_chroma_delay() - plan.yc_mismatch).clamp(0, 31) as u32];
-    let tail: [f32; 10] = [trap[0], trap[1], trap[2], trap[3], trap[4], ck[0], ck[1], ck[2], ck[3], ck[4]];
-    let mut out = Vec::with_capacity(304);
+    let tail: [f32; 18] = [
+        trap[0], trap[1], trap[2], trap[3], trap[4], ck[0], ck[1], ck[2], ck[3], ck[4],
+        lp2[0], lp2[1], lp2[2], lp2[3], lp2[4], doc_step, CANCELLER_IRE, nc_step,
+    ];
+    let mut out = Vec::with_capacity(336);
     u32s.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
     f32s.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
     link.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));

@@ -1,7 +1,13 @@
 //! Video in for NTSCRT on Windows: Media Foundation's source reader, frames
 //! as RGBA8. Frames are numbered the Mac's way (`VideoSource.swift`): the
 //! clip has round(duration × fps) frames, and frame n is the one showing at
-//! n ÷ round(fps) seconds.
+//! n × the frame length (1001/30000 s at 29.97 fps) — one index, one time,
+//! whether the frame is played to, scrubbed to or exported. (Through 0.28.1
+//! frame n was the one at n ÷ round(fps) seconds, 0.1% early at 29.97 and
+//! 23.976 fps: every thousandth frame was skipped and the clip's last
+//! frames couldn't be reached.)
+//!
+//! And a clip's sound for the preview (audio.rs).
 
 use anyhow::Result;
 
@@ -24,13 +30,33 @@ impl VideoInfo {
     pub fn frames_for(duration: f64, fps: f64) -> usize {
         ((duration * fps).round() as usize).max(1)
     }
-    /// The timescale frames are placed on: round(fps), as the Mac's CMTime.
+    /// The whole-number rate nearest the clip's: 30 for 29.97. Not a
+    /// frame's place in time (`seconds`).
     pub fn timescale(&self) -> f64 {
         self.fps.round().max(1.0)
     }
-    /// The frame a timestamp (seconds) belongs to.
+    /// One frame's length in seconds, from the rate as stored (1001/30000 s
+    /// at 29.97 fps).
+    pub fn frame_seconds(&self) -> f64 {
+        let (num, den) = self.fps_rational;
+        if num > 0 && den > 0 {
+            den as f64 / num as f64
+        } else {
+            1.0 / self.fps.max(1.0)
+        }
+    }
+    /// When frame `index` shows (seconds from the clip's first frame).
+    pub fn seconds(&self, index: usize) -> f64 {
+        let (num, den) = self.fps_rational;
+        if num > 0 && den > 0 {
+            index as f64 * den as f64 / num as f64
+        } else {
+            index as f64 / self.fps.max(1.0)
+        }
+    }
+    /// The frame a timestamp (seconds from the first frame's) belongs to.
     pub fn frame_at(&self, seconds: f64) -> usize {
-        (seconds * self.timescale()).round().max(0.0) as usize
+        (seconds / self.frame_seconds()).round().max(0.0) as usize
     }
 }
 
@@ -64,10 +90,15 @@ pub fn rotate(w: u32, h: u32, rgba: &[u8], degrees: u32) -> (u32, u32, Vec<u8>) 
     (ow as u32, oh as u32, out)
 }
 
+pub mod audio;
+#[cfg(windows)]
+mod audio_win;
 #[cfg(windows)]
 mod mf;
 #[cfg(windows)]
 mod mf_writer;
+
+pub use audio::VideoAudio;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
@@ -226,13 +257,44 @@ impl VideoReader {
 mod tests {
     use super::*;
 
+    fn clip(fps_rational: (u32, u32), frames: usize) -> VideoInfo {
+        let fps = fps_rational.0 as f64 / fps_rational.1 as f64;
+        let duration = frames as f64 / fps;
+        VideoInfo { width: 1, height: 1, fps, fps_rational, total_frames: VideoInfo::frames_for(duration, fps), duration, rotation: 0 }
+    }
+
     #[test]
     fn frame_numbers_follow_the_mac() {
-        let info = VideoInfo { width: 1, height: 1, fps: 29.97, fps_rational: (30000, 1001), total_frames: VideoInfo::frames_for(4.004, 29.97), duration: 4.004, rotation: 0 };
+        let info = clip((30000, 1001), 120);
         assert_eq!(info.total_frames, 120);
         assert_eq!(info.timescale(), 30.0);
-        assert_eq!(info.frame_at(1.0), 30);
-        assert_eq!(info.frame_at(0.0333), 1);
+        assert!((info.frame_seconds() - 1001.0 / 30000.0).abs() < 1e-12);
+        assert_eq!(info.frame_at(1.001), 30);
+        assert_eq!(info.frame_at(0.0334), 1);
+    }
+
+    /// Every frame's own timestamp is its own index, to the end of a long
+    /// clip. (Placed at index ÷ round(fps), frame 500 of a 29.97 fps clip
+    /// read as 501 and frame 17 990 as 18 008.)
+    #[test]
+    fn one_frame_index_is_one_time() {
+        for (rate, frames) in [((30000, 1001), 18_000), ((24000, 1001), 14_400), ((25, 1), 15_000), ((30, 1), 18_000), ((60000, 1001), 36_000)] {
+            let info = clip(rate, frames);
+            assert_eq!(info.total_frames, frames, "{rate:?}");
+            for n in [0, 1, 2, 499, 500, 501, 999, 1000, 1001, 1500, 5000, frames - 2, frames - 1] {
+                let stamp = n as f64 * rate.1 as f64 / rate.0 as f64;
+                assert_eq!(info.frame_at(stamp), n, "{rate:?} frame {n}");
+                assert_eq!(info.frame_at(info.seconds(n)), n, "{rate:?} frame {n}");
+                // Media Foundation's stamps are whole 100 ns, and a file's own
+                // clock may be coarser still (1/600 s, QuickTime's default).
+                assert_eq!(info.frame_at((stamp * 1e7).round() / 1e7), n, "{rate:?} frame {n} at 100 ns");
+                assert_eq!(info.frame_at((stamp * 600.0).round() / 600.0), n, "{rate:?} frame {n} at 1/600 s");
+            }
+        }
+        // The rate missing (a file that doesn't say): the nominal one.
+        let odd = VideoInfo { fps_rational: (0, 0), ..clip((30, 1), 90) };
+        assert_eq!(odd.frame_at(1.0), 30);
+        assert!((odd.seconds(45) - 1.5).abs() < 1e-12);
     }
 
     #[test]

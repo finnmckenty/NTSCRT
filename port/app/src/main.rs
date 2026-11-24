@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod claude;
 mod cli;
 mod clip_frames;
@@ -232,6 +233,25 @@ struct App {
     updates: update::Updates,
     /// Help > Connect to Claude… (connect_ui.rs).
     connect: connect_ui::ConnectWindow,
+    /// Help > About NTSCRT (about.rs).
+    about: about::AboutWindow,
+    /// The open clip's sound (None: it isn't a clip, or this build has no
+    /// sound). It plays whenever the clip plays, following the frames as
+    /// they are shown; no controls.
+    audio: Option<ntscrt_media::VideoAudio>,
+    /// `playing` as the sound last saw it, to tell when playback starts,
+    /// stops or starts again somewhere else.
+    audio_playing: Option<(Instant, usize)>,
+    /// NTSCRT_PROFILE: when the sound's place was last printed.
+    audio_logged: Instant,
+    /// When each of the last few frames was asked for while playing (by
+    /// request number): a frame is picked by the clock when it is asked
+    /// for, so that is the steady measure of where the picture is.
+    audio_asked: std::collections::VecDeque<(u64, Instant)>,
+    /// How long a frame takes from asked-for to on screen (seconds):
+    /// smoothed, and the value the sound is held back by (moved only when
+    /// the smoothed one has left it by 50 ms, so it doesn't creep).
+    audio_latency: Option<(f64, f64)>,
 }
 
 impl App {
@@ -344,6 +364,12 @@ impl App {
             auto_screen_loop: std::env::var("NTSCRT_SCREEN_LOOP").as_deref() == Ok("1") || std::env::var_os("NTSCRT_SCREEN_LOOP_RENDER").is_some(),
             updates: update::Updates::new(ctx, scripted),
             connect: connect_ui::ConnectWindow::from_env(),
+            about: about::AboutWindow::from_env(),
+            audio: None,
+            audio_playing: None,
+            audio_logged: Instant::now(),
+            audio_asked: Default::default(),
+            audio_latency: None,
         }
     }
 
@@ -435,6 +461,7 @@ impl App {
         self.source_pixels = None;
         self.source_path = Some(path.to_path_buf());
         self.still = None;
+        self.audio = None;
         if matches!(ext.as_str(), "mp4" | "mov" | "m4v") {
             // The worker opens it and reports its size (see Event::Opened).
             self.source = Some((name, 0, 0));
@@ -474,6 +501,7 @@ impl App {
         self.still = None;
         self.video = None;
         self.playing = None;
+        self.audio = None;
         self.texture = None;
         self.source_texture = None;
         self.source_pixels = None;
@@ -1167,7 +1195,7 @@ impl App {
                     self.video_frame = f;
                     self.sync_playhead_to_frame();
                 }
-                ui.monospace(format!("{}/{} · {:.2}s", self.video_frame + 1, v.total_frames, self.video_frame as f64 / v.timescale()));
+                ui.monospace(format!("{}/{} · {:.2}s", self.video_frame + 1, v.total_frames, v.seconds(self.video_frame)));
                 if self.cached_frames > 0 {
                     ui.weak(format!("{} cached", if self.cached_frames >= v.total_frames { "all".to_string() } else { format!("{}", self.cached_frames) }))
                         .on_hover_text("Frames with Digital video and NTSC already done under these settings: they play back without decoding.");
@@ -1376,6 +1404,57 @@ impl App {
         self.snapshot.is_some() && self.snapshot_after.is_none_or(|(t, s)| t.elapsed().as_secs_f64() >= s)
     }
 
+    /// The clip's frame at `media_time` (seconds), asked for as request
+    /// `seq`, has just gone on screen: tell its sound. With NTSCRT_PROFILE=1,
+    /// once a second, where the sound is against it.
+    ///
+    /// The sound is told when the frame was due, not when it arrived: the
+    /// moment it was asked for (it was picked by the clock then) plus the
+    /// usual time from there to the screen. Arrival times jitter by a
+    /// render or more on a slow GPU, which read as a picture running slow
+    /// and silenced the sound; and holding the sound back by the usual
+    /// delay keeps it with the picture on screen.
+    fn follow_with_sound(&mut self, media_time: f64, seq: u64) {
+        let now = Instant::now();
+        let asked = self.audio_asked.iter().find(|(s, _)| *s == seq).map(|(_, t)| *t);
+        let when = match asked {
+            Some(asked) => {
+                let took = now.duration_since(asked).as_secs_f64().min(1.0);
+                let (smooth, used) = match self.audio_latency {
+                    None => (took, took),
+                    Some((smooth, used)) => {
+                        let smooth = smooth + 0.2 * (took - smooth);
+                        (smooth, if (smooth - used).abs() > 0.05 { smooth } else { used })
+                    }
+                };
+                self.audio_latency = Some((smooth, used));
+                asked + Duration::from_secs_f64(used)
+            }
+            None => now,
+        };
+        let log = self.profile.is_some() && self.audio_logged.elapsed() >= Duration::from_secs(1);
+        if log {
+            self.audio_logged = Instant::now();
+        }
+        let Some(a) = &mut self.audio else {
+            if log {
+                eprintln!("[audio] none");
+            }
+            return;
+        };
+        a.frame_shown_at(media_time, when);
+        if log {
+            use ntscrt_media::audio::Status;
+            match a.status(media_time) {
+                Status::Playing(off) => eprintln!("[audio] at {media_time:.2} s, {:+.0} ms from the picture", off * 1000.0),
+                Status::Silenced => eprintln!("[audio] at {media_time:.2} s, silent (picture slower than real time)"),
+                Status::NotPlaying => eprintln!("[audio] at {media_time:.2} s, not playing"),
+                Status::Opening => eprintln!("[audio] at {media_time:.2} s, still opening"),
+                Status::NoSound => eprintln!("[audio] the clip has no sound"),
+            }
+        }
+    }
+
     fn toggle_play(&mut self) {
         self.playing = match self.playing {
             Some(_) => None,
@@ -1483,6 +1562,12 @@ impl App {
             });
             self.sent = Some(want);
             self.sent_at = Instant::now();
+            if self.playing.is_some() && self.audio.is_some() {
+                self.audio_asked.push_back((self.seq, self.sent_at));
+                while self.audio_asked.len() > 8 {
+                    self.audio_asked.pop_front();
+                }
+            }
         }
 
         // Where the picture is drawn: its fit rectangle, or zoomed in, that
@@ -1609,6 +1694,16 @@ impl eframe::App for App {
         if let Some(p) = &mut self.profile {
             p.painted();
         }
+        // Playback stopped, started, or started again somewhere else (Play,
+        // a scrub, Screen Loop opening) since the last pass: the sound is
+        // quiet until the next frame of the clip goes on screen.
+        if self.playing != self.audio_playing {
+            self.audio_playing = self.playing;
+            self.audio_asked.clear();
+            if let Some(a) = &mut self.audio {
+                a.restart();
+            }
+        }
         let events: Vec<Event> = self.events.try_iter().collect();
         for e in events {
             let (seq, result, millis) = match e {
@@ -1627,6 +1722,9 @@ impl eframe::App for App {
                         (src.1, src.2) = (info.width, info.height);
                     }
                     self.video_frame = 0;
+                    // Its sound, if it has any (opened and decoded on a
+                    // thread of its own; nothing waits for it here).
+                    self.audio = self.source_path.as_deref().and_then(ntscrt_media::VideoAudio::open);
                     if let Some(wait) = self.autoplay {
                         self.autoplay_at = Some(Instant::now() + Duration::from_secs_f64(wait));
                     }
@@ -1650,7 +1748,15 @@ impl eframe::App for App {
                         let late = (self.video_frame + total - shown % total) % total;
                         if late > PLAYBACK_LAG && late <= total / 2 {
                             self.playing = Some((Instant::now(), (shown + 2) % total));
+                            // The same playback, held back: the sound hears
+                            // of it from the frames (a picture that keeps
+                            // slipping goes silent), not as a new start.
+                            self.audio_playing = self.playing;
                         }
+                    }
+                    // The frame going on screen now: the sound follows it.
+                    if let (Some(shown), Some(_), Some(v)) = (frame, self.playing, self.video) {
+                        self.follow_with_sound(v.seconds(shown % v.total_frames.max(1)), seq);
                     }
                     if let Some(src) = source {
                         // While a clip plays this is every frame: refill the
@@ -1754,6 +1860,7 @@ impl eframe::App for App {
         self.export_window(&ctx);
         self.updates.show(&ctx);
         self.connect.show(&ctx);
+        self.about.show(&ctx);
         if self.auto_screen_loop && self.original_size.is_some() && self.shown_seq != 0 {
             self.auto_screen_loop = false;
             // For the UI snapshot: the window inside the main one, where the
@@ -1795,6 +1902,10 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("Help", |ui| {
+                        if ui.button("About NTSCRT").clicked() {
+                            self.about.open();
+                            ui.close();
+                        }
                         if ui.button("Connect to Claude…").on_hover_text("Let Claude Desktop or Claude Code use NTSCRT (its MCP server).").clicked() {
                             self.connect.open();
                             ui.close();

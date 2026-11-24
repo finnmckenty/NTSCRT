@@ -100,9 +100,9 @@ pub const PARAMS: [GlitchParam; 31] = [
     GlitchParam { id: "tape_wear", label: "Wear", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
         help: "Age and plays. The magnetic coating weakens and roughens, so the heads read a weaker signal over a slightly larger gap — noisier pictures, then sparkles where the signal sinks to the FM threshold — and pinholes appear in the oxide.", section: None },
     GlitchParam { id: "tape_dropouts", label: "Oxide flaws", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "Pinholes and flakes missing from the magnetic coating. A flaw wider than one 58 µm track shows in the same place for a few fields in a row; one smaller than a track only weakens the signal, and is seen only when the signal is weak already.", section: None },
+        help: "Pinholes and flakes missing from the magnetic coating: dropouts. Each is a short dash that starts with a spark, somewhere new every field; turn it up for more of them, a blizzard at the top. With Dropout compensation on the deck fills each dash from the line above; off, they are black and white streaks and they jog the picture. A flaw smaller than one 58 µm track only weakens the signal, and is seen only when the signal is weak already.", section: None },
     GlitchParam { id: "tape_scratches", label: "Scratches", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "Scratches along the tape from worn guides. Height across the tape is height in the picture, so a lengthwise scratch is a streak at the same height in every field.", section: None },
+        help: "Scratches along the tape from worn guides. Height across the tape is height in the picture, so a lengthwise scratch is a thin sparkling line right across, at the same height in every field. Turn it up for more lines, not thicker ones.", section: None },
     GlitchParam { id: "tape_creases", label: "Creases", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
         help: "Folds across the tape. The heads cross each one a little earlier every field, so it sweeps up through the picture as a band of noise over a few seconds; the fold also shortens the track, a timing jump the TV has to chase.", section: None },
     GlitchParam { id: "tape_edge_damage", label: "Edge damage", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
@@ -110,29 +110,29 @@ pub const PARAMS: [GlitchParam; 31] = [
     GlitchParam { id: "tape_mold", label: "Mold", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
         help: "Fungus colonies, thickest near the edges where it grows in the wound pack. Each one lifts the tape off the heads and eats into the coating, and it sheds — what it sheds collects on the heads.", section: None },
     GlitchParam { id: "tape_sticky", label: "Sticky shed", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "The binder holding the oxide on has soaked up moisture and gone gummy. The tape drags on the guides and moves in tiny stick-and-slip jerks — the picture's edges go jagged and it may squeal — the drag pulls the tracking off, and gummy oxide clogs the heads.", section: None },
+        help: "The binder holding the oxide on has soaked up moisture and gone gummy in patches. The tape plays clean until a patch reaches the guides; then it sticks — edges shiver as it squeals, the top of the picture leans and noise creeps in as the tape drags — and tears loose with a sideways lurch. Turn it up for patches that come more often and hold harder. The gummy oxide also clogs the heads.", section: None },
     GlitchParam { id: "tape_vaseline", label: "Vaseline", group: Group::Tape, kind: slider(0.0, 1.0, true, ""), default: 0.0,
         help: "A film smeared on the tape, holding the heads off it. Spacing costs the short-wavelength picture signal far more than the long-wavelength color, so the picture breaks into noise while color survives and smears. It rubs off onto the heads, too.", section: None },
     GlitchParam { id: "head_wear", label: "Head wear", group: Group::Deck, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "Worn heads stand less proud of the drum, so they press into the tape less, and their gaps erode wider. Both lose the top of the signal first: black streaks trail bright edges, then the picture gets noisy.", section: Some("Heads") },
+        help: "Worn heads stand less proud of the drum and lose their grip on the tape. Black streaks trail bright edges first; then bands of snow and tearing drift through the picture and come and go, worst at the top and bottom, and the color gets noisy.", section: Some("Heads") },
     GlitchParam { id: "head_dirt", label: "Head dirt", group: Group::Deck, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "Debris already on the heads when play starts. It holds them off the tape; each head carries its own, so one can be clogged while the other is clear — every other field fails.", section: Some("Heads") },
+        help: "Debris already on the heads when play starts. It holds them off the tape; each head carries its own, so one can be clogged while the other is clear — every other field fails. It shifts a little as the tape drags over it, so each head's picture drifts between worse and better.", section: Some("Heads") },
     GlitchParam { id: "dirt_buildup", label: "Dirt buildup", group: Group::Deck, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "How readily the heads collect what the tape sheds — low for a deck that's had a head-cleaning tape, high for one that never has. Shedding tapes (mold, wear, flaws, sticky shed) clog it as they play; clogs sometimes knock loose.", section: Some("Heads") },
+        help: "How readily the heads collect what the tape sheds — low for a deck that's had a head-cleaning tape, high for one that never has. Every tape sheds a little, so an uncleaned deck clogs for a moment now and then on any tape; shedding tapes (mold, wear, flaws, sticky shed) clog it far more, and worn heads clog more easily. Clogs wipe off or knock loose.", section: Some("Heads") },
     GlitchParam { id: "head_mismatch", label: "Head mismatch", group: Group::Deck, kind: slider(0.0, 1.0, true, ""), default: 0.0,
         help: "How unevenly the two heads have aged: one reads a weaker signal than the other, and since they take turns, field by field, the picture flickers between them.", section: Some("Heads") },
     GlitchParam { id: "head_switch", label: "Head switching", group: Group::Deck, kind: slider(0.0, 8.0, false, "µs"), default: 0.0,
         help: "How far the two heads are from exactly opposite on the drum, as a timing jump when the deck changes heads just before vertical sync. The bottom lines jump sideways and the TV's AFC chases the jump into the top of the next field — the bend called flagging.", section: Some("Heads") },
     GlitchParam { id: "back_tension", label: "Back tension", group: Group::Deck, kind: slider(-1.0, 1.0, true, ""), default: 0.0,
-        help: "How hard the supply reel holds the tape back, against the deck that recorded it. Tighter stretches the tape, so each field's lines arrive a little later than the last, and the heads switch with a jump: skew, the top of the picture hooking sideways. Too slack and the tape stops hugging the heads at the ends of their sweep, so the top and bottom of the picture get noisy.", section: Some("Transport") },
+        help: "How hard the supply reel holds the tape back, against the deck that recorded it. Tighter stretches the tape, so each field's lines arrive a little later than the last, and the heads switch with a jump: skew, the top of the picture hooking sideways (further on a TV with a slow AFC response). Too slack and the tension wanders, so the top of the picture waves from side to side, and the tape stops hugging the heads where they meet it, so the top of the picture gets noisy. Up to half is a deck out of adjustment; past that is a stretched tape or a reel hardly braked at all, and the heads can no longer follow the tracks the whole way down (noise bars, worst on LP and EP).", section: Some("Transport") },
     GlitchParam { id: "transport_flutter", label: "Flutter", group: Group::Deck, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "A tired transport: a worn drum motor and bearings, stretched belts, a lumpy pinch roller. The drum's speed wavers, so the picture's timing wanders — wavy verticals on a TV with slow AFC, ragged lines on a fast one — and the tape's speed wavers, so the tracking breathes.", section: Some("Transport") },
+        help: "A tired transport: a worn drum motor and bearings, stretched belts, a lumpy pinch roller. The drum's speed wavers smoothly, so the picture's verticals bow and sway, in a shape that crawls and changes — broad bends on a TV with slow AFC, tighter ones on a fast one — and the tape's speed wavers, so the tracking breathes. The second half of the travel goes well past any deck still in use.", section: Some("Transport") },
     GlitchParam { id: "tracking_offset", label: "Tracking", group: Group::Deck, kind: slider(-1.0, 1.0, true, ""), default: 0.0,
         help: "The tracking control: it shifts when the tracking servo expects the control-track pulses, moving the tape along so the heads ride beside their tracks instead of on them (±100% is a whole track). The picture holds up until a head is mostly on its neighbor's track, recorded at the other azimuth — then noise bands break out wherever the tracks bend furthest from the heads' path. Tapes recorded on another deck need a little.", section: Some("Controls") },
     GlitchParam { id: "search_speed", label: "Search", group: Group::Deck, kind: slider(1.0, 9.0, false, "×"), default: 1.0,
         help: "Fast-forward picture search: the tape runs n× as fast, so each head's sweep crosses n−1 tracks. On the tracks of its own azimuth it reads picture; on the others, noise, with the color gone where the comb filter cancels it. The bars stand still at odd speeds and drift between them.", section: Some("Controls") },
     GlitchParam { id: "dropout_compensation", label: "Dropout compensation", group: Group::Deck, kind: Kind::Toggle, default: 1.0,
-        help: "The deck watches the signal coming off the heads and, where it drops out, repeats the picture from the line before. On, dropouts become short smears of the line above; off, they show as the demodulator's streaks.", section: Some("Controls") },
+        help: "The deck watches the signal coming off the heads and, where it drops out, repeats the line before — its sync pulse too. On, a dropout is a spark and a short smear of the line above; off, it shows as the demodulator's black and white streaks, and one that lands on a sync pulse jogs the picture sideways.", section: Some("Controls") },
 ];
 
 pub fn param(id: &str) -> Option<&'static GlitchParam> {
@@ -147,12 +147,13 @@ pub fn controls(group: Group) -> impl Iterator<Item = &'static GlitchParam> {
 
 /// Knobs that change the simulation's evolving state: anything touching
 /// sync, timing or signal level, and everything about the tape and deck (the
-/// tape decides where sync is lost; the heads collect dirt as it plays).
-/// The rest — ghost, brightness, captions, dropout compensation — apply when
-/// the field is drawn, so changing them never needs the history re-run.
+/// tape decides where sync is lost; the heads collect dirt as it plays; the
+/// dropout compensator decides whether a flaw costs sync). The rest — ghost,
+/// brightness, captions — apply when the field is drawn, so changing them
+/// never needs the history re-run.
 pub fn is_timing(id: &str) -> bool {
     matches!(id, "signal_strength" | "vertical_hold" | "horizontal_hold" | "afc_speed" | "hum")
-        || param(id).is_some_and(|p| p.group != Group::Reception && p.id != "dropout_compensation")
+        || param(id).is_some_and(|p| p.group != Group::Reception)
 }
 
 /// A named condition for the VCR panel's Tape and Deck pickers.
@@ -354,18 +355,61 @@ impl GlitchSettings {
     /// A look's values as this version reads them, from a look saved as
     /// `look_version`: before version 3 (0.27.0 and earlier) Wear, Oxide
     /// flaws, Scratches and Edge damage followed straight lines above half
-    /// (tape::curve); each becomes the slider position that damages the tape
-    /// the same. Run before `migrated` (older looks' tape keys come out of
-    /// that already on the curves). Mac: GlitchSettings.upgraded.
+    /// (tape::curve); each becomes the slider position that damaged the tape
+    /// the same in 0.28 (tape::knob_in_028: Oxide flaws' curve has moved
+    /// since, and looks keep their place on the slider). Run before
+    /// `migrated` (older looks' tape keys come out of that already on the
+    /// curves).
+    ///
+    /// Before version 4 Back tension ran straight to its ends; above half it
+    /// now goes four times as far (TransportParams::TENSION_TOP_END), so an
+    /// older look's setting becomes the position that stretches the tape as
+    /// much as it did. Mac: GlitchSettings.upgraded.
     pub fn upgraded(values: &BTreeMap<String, f64>, look_version: i64) -> BTreeMap<String, f64> {
         let mut v = values.clone();
+        if look_version >= 4 {
+            return v;
+        }
+        if let Some(k) = v.get("back_tension").copied() {
+            let a = k.clamp(-1.0, 1.0);
+            let sign = if a < 0.0 { -1.0 } else { 1.0 };
+            v.insert("back_tension".into(), sign * super::tape::knob_for_amount_gain(a.abs(), super::transport::TransportParams::TENSION_TOP_END));
+        }
         if look_version < 3 {
             for key in super::tape::CURVE_KEYS {
                 if let Some(k) = v.get(key).copied() {
-                    v.insert(key.into(), super::tape::knob(key, super::tape::amount_in_027(key, k.clamp(0.0, 1.0))));
+                    v.insert(key.into(), super::tape::knob_in_028(key, super::tape::amount_in_027(key, k.clamp(0.0, 1.0))));
                 }
             }
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Older looks keep their Back tension: above half, the position that
+    /// stretches the tape as much as it did (the Mac's look version 4).
+    #[test]
+    fn older_looks_keep_their_back_tension() {
+        use crate::glitch::transport::TransportParams;
+        for k in [-1.0, -0.8, -0.5, -0.2, 0.0, 0.3, 0.5, 0.7709740990990992, 1.0] {
+            let old: BTreeMap<String, f64> = [("back_tension".to_string(), k)].into();
+            let new = GlitchSettings::upgraded(&old, 3);
+            let s = GlitchSettings::from_values(new.iter().map(|(k, v)| (k, *v)));
+            assert!((TransportParams::new(&s).tension - k).abs() < 1e-6, "{k}: {}", TransportParams::new(&s).tension);
+            // A version 4 look is read as it is.
+            assert_eq!(GlitchSettings::upgraded(&old, 4), old);
+        }
+    }
+
+    /// Dropout compensation decides whether a flaw costs sync, so it is a
+    /// timing knob now.
+    #[test]
+    fn dropout_compensation_reruns_the_history() {
+        assert!(is_timing("dropout_compensation"));
+        assert!(!is_timing("brightness") && !is_timing("ghost_level") && !is_timing("closed_captions"));
     }
 }

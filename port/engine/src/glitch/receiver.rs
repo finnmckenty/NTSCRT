@@ -213,6 +213,8 @@ struct Knobs {
     /// Copies the tape was dubbed through before this one (0: the original).
     generations: i64,
     head_switch: f64,
+    /// The deck's dropout compensator is on.
+    dropout_compensation: bool,
     captions: bool,
     gate_alpha: f64,
     chroma_alpha: f64,
@@ -257,6 +259,7 @@ impl Knobs {
             transport: TransportParams::new(settings),
             generations: (settings.get("tape_generation").round() as i64).clamp(0, 3),
             head_switch: settings.get("head_switch"),
+            dropout_compensation: settings.flag("dropout_compensation"),
             captions: settings.flag("closed_captions"),
             gate_alpha: 1.0 - (-1.0 / (6.0 * s)).exp(),
             chroma_alpha: 1.0 - (-1.0 / (4.0 * s)).exp(),
@@ -359,6 +362,8 @@ pub struct Simulator {
     transport: TransportSimulator,
     /// Creases each recent field's track crosses.
     fold_cache: std::cell::RefCell<Vec<(i64, Vec<Fold>)>>,
+    /// Each deck's drum shape (drum_lumps), by its seed.
+    lump_cache: std::cell::RefCell<Vec<(u64, [(f64, f64); 11])>>,
     /// Within-field line where a healthy, locked set's vertical oscillator fires.
     pub nominal_trigger: usize,
 }
@@ -404,6 +409,7 @@ impl Simulator {
             deck: DeckSimulator::new(&GlitchSettings::default()),
             transport: TransportSimulator::new(l, seed, &GlitchSettings::default()),
             fold_cache: Default::default(),
+            lump_cache: Default::default(),
             nominal_trigger: 0,
         }
     }
@@ -439,8 +445,15 @@ impl Simulator {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        self.snapshot_at(None)
+    }
+
+    /// `moment`: the time the set was advanced to, when the snapshot should
+    /// answer for it (an advance stops up to a line past its target, so the
+    /// set's own clock reads a little later).
+    pub fn snapshot_at(&self, moment: Option<f64>) -> Snapshot {
         Snapshot {
-            time: self.time(),
+            time: moment.unwrap_or_else(|| self.time()),
             r: self.r,
             theta: self.theta,
             integ: self.integ,
@@ -520,9 +533,19 @@ impl Simulator {
             _ => {
                 self.reset();
                 self.advance(0.0, &settings_at(0.0));
+                // The warmed-up set at time zero: what a looping clip comes
+                // back to on every pass.
+                if let Some(cb) = checkpoint.as_mut() {
+                    cb(self.snapshot_at(Some(0.0)));
+                }
             }
         }
         if time <= 0.0 || frame_duration <= 0.0 {
+            // (A snapshot doesn't hold the knobs: resumed where it stops,
+            // the set takes that moment's. No line is stepped.)
+            if resume_from.is_some() && frame_duration > 0.0 {
+                self.advance(time, &settings_at(time));
+            }
             return;
         }
         let mut next_checkpoint = (self.time() + 1.0).floor();
@@ -817,12 +840,10 @@ impl Simulator {
         e += self.drum_flutter(j, k.transport.flutter, seed);
         e += self.transport.line(j).tbe;
         let (field, along) = self.track_place(j, 0.0);
-        if k.transport.strain() != 0.0 {
-            // Stretched further than when recorded, the tape's lines arrive
-            // later the further along the track; the next head starts on its
-            // own track's start, and the picture jumps back: skew.
-            e += k.transport.strain() * along / TapeGeometry::line_length() * h;
-        }
+        // Stretched further than when recorded, the tape's lines arrive
+        // later the further along the track; the next head starts on its
+        // own track's start, and the picture jumps back: skew.
+        e += self.strain(j) * along / TapeGeometry::line_length() * h;
         if k.tape.creases > 0.0 {
             // A fold shortens the track: everything after it arrives early.
             for fold in self.folds(field).iter().filter(|f| f.shortening > 0.0) {
@@ -837,16 +858,77 @@ impl Simulator {
         e
     }
 
-    /// The drum's speed wavering, as time-base error (µs): a once-a-turn
-    /// wobble (29.97 Hz), the servo hunting, the motor's cogging and bearing
-    /// noise.
+    /// The tape's stretch against the recording as line j plays. Wrong back
+    /// tension isn't steady: the tension arm and its band brake hunt, far
+    /// more when the tape is slack (nothing holds the arm against the reel's
+    /// wobble) than when it is tight. So the jump at the head switch changes
+    /// from field to field, the TV starts each picture a different distance
+    /// out, and the top of the picture waves from side to side — the "flag
+    /// waving" repair notes give as the sign of low back tension. The share
+    /// that wanders (±60% slack, ±15% tight) and its rates are choices.
+    ///
+    /// Plus what a sticky patch is doing to the tape there (transport::sticky).
+    fn strain(&self, j: i64) -> f64 {
+        let tr = &self.knobs.transport;
+        let sticky = self.transport.line(j).strain;
+        if tr.strain() == 0.0 {
+            return sticky;
+        }
+        let t = self.field_time(j);
+        let hunt = if tr.tension < 0.0 { 0.6 } else { 0.15 };
+        sticky + tr.strain() * (1.0 + hunt * (0.65 * value(self.seed, 44, t * 2.3) + 0.35 * value(self.seed, 45, t * 7.1)))
+    }
+
+    /// The drum's speed wavering, as time-base error (µs).
+    ///
+    /// A drum is a flywheel: its speed can't change from one line to the
+    /// next, so the error is smooth — the picture's verticals bow and sway,
+    /// they don't go ragged. (Until 0.28 a third of this was noise at 180 Hz
+    /// and some of it noise from line to line; a TV follows everything
+    /// slower, so that noise was all that showed: every line displaced at
+    /// random, which read as a filter, and the same as a sticky tape's.)
+    ///
+    ///   - once a turn (29.97 Hz), the drum's eccentricity, and the servo
+    ///     hunting at a few Hz: the largest parts, and a TV's AFC follows
+    ///     nearly all of both;
+    ///   - the rest of what repeats every turn — motor cogging, a bearing's
+    ///     rough spot, the drum's own lumps — as the 2nd to 12th harmonics
+    ///     of the turn, each with its own size and a phase that drifts over
+    ///     seconds: this deck's own irregular shape, crawling and changing;
+    ///   - a little rumble, smooth noise up to ~150 Hz: it shimmers.
+    ///
+    /// The mix and the sizes are choices.
     fn drum_flutter(&self, j: i64, amount: f64, seed: u64) -> f64 {
         if amount <= 0.0 {
             return 0.0;
         }
         let t = self.field_time(j);
-        let turn = (2.0 * PI * (T::FIELD_RATE / 2.0) * t + 6.2832 * uni(seed, 40, 0)).sin();
-        amount * (0.8 * turn + 1.3 * value(seed, 41, t * 4.0) + 0.45 * value(seed, 42, t * 180.0) + 0.07 * gauss(seed, 43, j, 0))
+        let turn_hz = T::FIELD_RATE / 2.0;
+        let turn = (2.0 * PI * turn_hz * t + 6.2832 * uni(seed, 40, 0)).sin();
+        let mut lumps = 0.0;
+        for (i, (size, rest)) in self.drum_lumps(seed).iter().enumerate() {
+            let k = i + 2;
+            let phase = rest + 2.5 * value(seed, 50 + k as u64, t * (0.4 + 0.1 * k as f64));
+            lumps += size * (2.0 * PI * k as f64 * turn_hz * t + phase).sin();
+        }
+        amount * (0.8 * turn + 1.3 * value(seed, 41, t * 4.0) + 0.45 * lumps + 0.15 * value(seed, 42, t * 300.0))
+    }
+
+    /// A drum's own shape: the size and resting phase of the 2nd to 12th
+    /// harmonics of its turn. Fixed for a deck (this one's, and each earlier
+    /// generation's), and asked for on every line, so worked out once.
+    fn drum_lumps(&self, seed: u64) -> [(f64, f64); 11] {
+        if let Some((_, known)) = self.lump_cache.borrow().iter().find(|(s, _)| *s == seed) {
+            return *known;
+        }
+        let mut lumps = [(0.0, 0.0); 11];
+        for (i, lump) in lumps.iter_mut().enumerate() {
+            let k = i as i64 + 2;
+            let size = (0.4 + 0.6 * uni(seed, 48, k)) / (k as f64 / 4.0).powf(0.8) * if k % 2 == 0 { 1.0 } else { 0.35 };
+            *lump = (size, 6.2832 * uni(seed, 49, k));
+        }
+        self.lump_cache.borrow_mut().push((seed, lumps));
+        lumps
     }
 
     /// An earlier generation's deck, recorded into this copy: its heads'
@@ -891,7 +973,7 @@ impl Simulator {
     fn head_delta(&self, j: i64, along: f64, g: i64) -> f64 {
         let k = &self.knobs;
         let mut d = self.transport.line(j).delta + self.track_shape(along);
-        d += k.transport.strain() * along * TapeGeometry::angle().cos() / k.transport.format.advance_per_field();
+        d += self.strain(j) * along * TapeGeometry::angle().cos() / k.transport.format.advance_per_field();
         if k.transport.searching() {
             let (phase, rate) = self.transport.search(g);
             d += phase + rate * along / TapeGeometry::track_length();
@@ -911,25 +993,32 @@ impl Simulator {
 
     /// Spacing a slack tape adds where it doesn't hug the drum, at the two
     /// ends of the heads' sweep (µm).
+    ///
+    /// Up to tension −1 the lift grows (0.6 µm there: the start of the
+    /// sweep, where vertical sync is read, sits just above the FM threshold
+    /// on a good tape). Slacker than that it grows very little more — or
+    /// every slack tape would lose vertical hold and roll, which is the
+    /// Vertical hold knob's look, not this one's — and instead reaches
+    /// further into the sweep: the top of the picture sinks into noise over
+    /// a taller and taller band. Both are choices.
     fn slack_spacing(&self, along: f64) -> f64 {
         let slack = (-self.knobs.transport.tension).max(0.0);
         if slack <= 0.0 {
             return 0.0;
         }
+        // The tape lifts most where it wraps onto the drum — the start of
+        // the sweep, the top of the picture — and a little where it leaves.
         let l = TapeGeometry::track_length();
-        let end = smoothstep(22.0, 0.0, along as f32).max(0.6 * smoothstep((l - 10.0) as f32, l as f32, along as f32)) as f64;
-        0.6 * slack * end
+        let more = (slack - 1.0).max(0.0);
+        let reach = 22.0 * (1.0 + 0.5 * more);
+        let end = smoothstep(reach as f32, 0.0, along as f32).max(0.6 * smoothstep((l - 10.0 - 5.0 * more) as f32, l as f32, along as f32)) as f64;
+        (0.6 * slack.min(1.0) + 0.02 * more) * end
     }
 
     /// What the playing head sees at line j, u µs in, at `mhz`: the carrier
     /// it reads off tracks of its own azimuth, and the crosstalk off the
-    /// others.
-    pub(crate) fn carrier(&self, j: i64, u: f64, mhz: f64) -> (f64, f64) {
-        self.carrier_with(j, u, mhz, true)
-    }
-
-    /// `carrier`; `flakes: false` leaves the tape's flakes out (the burst the
-    /// deck's ACC holds through).
+    /// others. `flakes: false` leaves the tape's flakes out (the burst the
+    /// deck's ACC holds through, the sync the dropout compensator replays).
     pub(crate) fn carrier_with(&self, j: i64, u: f64, mhz: f64, flakes: bool) -> (f64, f64) {
         let (field, along) = self.track_place(j, u);
         let h = self.head(j) as usize;
@@ -938,7 +1027,8 @@ impl Simulator {
         let fmt = self.knobs.transport.format;
         let delta = self.head_delta(j, along, field);
         let p = tape_at_with(TapeGeometry::point(field, along, -delta * fmt.track_pitch(), fmt), &self.knobs.tape, false, flakes);
-        let d = (p.lift + dk.wear_spacing(h) + dk.baseline_dirt(h, self.knobs.tape.seed) + heads[h].debris + p.film.max(heads[h].grease)) as f64 + self.slack_spacing(along);
+        let seed = self.knobs.tape.seed;
+        let d = (p.lift + dk.wear_spacing_at(h, field, along, seed) + dk.baseline_dirt_at(h, seed, field) + heads[h].debris + p.film.max(heads[h].grease)) as f64 + self.slack_spacing(along);
         let mut a = (p.output * dk.efficiency(h)) as f64 * channel_gain(mhz, d, dk.gap(h) as f64);
         if mhz < 1.0 {
             a *= dk.color_boost(h, &self.knobs.tape) as f64;
@@ -962,11 +1052,18 @@ impl Simulator {
     /// neighbors' crosstalk is another FM carrier, not noise: it brings the
     /// threshold closer only where it beats the envelope down to own −
     /// crosstalk (the capture effect).
+    ///
+    /// A flake over the sync pulse doesn't cost it while the deck's dropout
+    /// compensation is on: what the compensator replays from its one-line
+    /// delay is the line before, sync pulse and all. (Without that, every
+    /// flaw kicked the TV's horizontal lock, and Oxide flaws read as bands
+    /// of torn picture, not as dropouts.) Anything longer — mold, a crease,
+    /// a clog — outlasts it.
     fn signal_loss(&self, j: i64) -> f64 {
         if !self.knobs.vcr {
             return 0.0;
         }
-        let (own, cross) = self.carrier(j, 2.0, SYNC_TIP_MHZ);
+        let (own, cross) = self.carrier_with(j, 2.0, SYNC_TIP_MHZ, !self.knobs.dropout_compensation);
         let noise = 10f64.powf(-carrier_to_noise_db() / 10.0) * self.knobs.transport.format.noise_scale().powi(2);
         let envelope = (own - cross).max(0.0);
         let cnr = 10.0 * ((envelope * envelope).max(1e-12) / noise).log10();
@@ -1008,13 +1105,14 @@ impl Simulator {
                     origin_base: origin.base,
                     origin_offset: origin.offset,
                     along0: along as f32,
-                    spacing: k.deck.wear_spacing(h) + k.deck.baseline_dirt(h, k.tape.seed) + heads[h].debris + self.slack_spacing(along) as f32,
+                    spacing: k.deck.wear_spacing_at(h, field, along, k.tape.seed) + k.deck.baseline_dirt_at(h, k.tape.seed, field) + heads[h].debris + self.slack_spacing(along) as f32,
                     grease: heads[h].grease,
                     gain: k.deck.efficiency(h),
                     head: h as u32,
                     delta0: d0 as f32,
                     delta_slope: (d1 - d0) as f32,
                     color_boost: k.deck.color_boost(h, &k.tape),
+                    color_noise: k.deck.color_noise(h),
                 }
             })
             .collect();

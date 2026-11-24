@@ -61,7 +61,7 @@ fn field_plans_match_the_mac() {
             assert_eq!(m.len(), lines.len(), "{name}: {what} lines");
             for (y, (m, l)) in m.iter().zip(lines).enumerate() {
                 let ours = [l.origin_base as f64, l.origin_offset as f64, l.along0 as f64, l.spacing as f64, l.grease as f64, l.gain as f64, l.head as f64,
-                            l.delta0 as f64, l.delta_slope as f64, l.color_boost as f64];
+                            l.delta0 as f64, l.delta_slope as f64, l.color_boost as f64, l.color_noise as f64];
                 assert_eq!(m.as_array().unwrap().len(), ours.len(), "{name}: {what} line {y}: fields");
                 for (i, (a, b)) in m.as_array().unwrap().iter().zip(ours).enumerate() {
                     // The head's offset is a difference of tape positions: f32 on both sides.

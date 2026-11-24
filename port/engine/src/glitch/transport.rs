@@ -6,10 +6,11 @@
 //! once a frame; the capstan's speed is corrected (a type-2 loop, ~1.4 Hz)
 //! to keep the pulse at the drum's phase plus the tracking control's delay.
 //! A pulse lost to a damaged edge leaves the capstan running at its last
-//! speed; a crinkle can fake one. Stick-slip: where the binder is gummy
-//! (sticky shed, mold) the tape sticks on the guides and springs loose —
-//! microns of lag, ragged picture edges. Picture search runs the tape n× as
-//! fast with the servo off.
+//! speed; a crinkle can fake one. A sticky tape (binder gone gummy: sticky
+//! shed, and mold a little) grabs and lets go (`sticky`): the tape runs
+//! clean, then at a gummy patch it sticks on the guides and drum, the
+//! capstan drags it on, the tension climbs, and it tears loose and springs
+//! back. Picture search runs the tape n× as fast with the servo off.
 //!
 //! Like the rest of the simulation it depends only on the knobs over time
 //! and the seed, so any moment can be reproduced by playing from the start.
@@ -23,7 +24,11 @@ use super::GlitchSettings;
 /// The transport knobs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransportParams {
-    /// Back tension against the recording deck's, −1…1.
+    /// Back tension against the recording deck's: the knob (−1…1) as it is
+    /// up to half, then on a straight line to ±(1 + TENSION_TOP_END) at its
+    /// ends (tape::top_end). Half a knob is a band brake out of adjustment;
+    /// the ends are a tape stretched by a deck that chewed it, or a supply
+    /// reel hardly braked at all.
     pub tension: f64,
     /// Worn drum motor, belts and pinch roller, 0…1.
     pub flutter: f64,
@@ -36,13 +41,19 @@ pub struct TransportParams {
 }
 
 impl TransportParams {
+    /// (At ±1 — the old full knob — the top of the picture barely hooked on
+    /// a TV with the default AFC, which rides out all but 4% of the jump
+    /// before the picture starts.)
+    pub const TENSION_TOP_END: f64 = 3.0;
+
     pub fn new(s: &GlitchSettings) -> Self {
         // The knob on a curve: its first half moves the heads three quarters
         // of the way off their tracks; the rest is where noise bands break
         // out and take over.
         let k = s.get("tracking_offset").clamp(-1.0, 1.0);
+        let bt = s.get("back_tension").clamp(-1.0, 1.0);
         Self {
-            tension: s.get("back_tension").clamp(-1.0, 1.0),
+            tension: if bt < 0.0 { -1.0 } else { 1.0 } * super::tape::top_end(bt.abs() as f32, Self::TENSION_TOP_END as f32) as f64,
             // On the damage knobs' curve (tape::top_end): realistic up to half,
             // then up to 5x (at its realistic most the TV's AFC rode out
             // nearly all of it).
@@ -54,13 +65,122 @@ impl TransportParams {
     }
 
     /// How much longer the tape is stretched than when it was recorded: a
-    /// 13 µs jump at the head switch at the knob's end.
+    /// 13 µs jump at the head switch at tension 1; 53 µs at the knob's end
+    /// (0.3% longer: a tape a deck has stretched). The steady part: the
+    /// tension arm hunts around it (Simulator::strain).
     pub fn strain(&self) -> f64 {
         8e-4 * self.tension
     }
 
     pub fn searching(&self) -> bool {
         self.search > 1.02
+    }
+}
+
+/// Where a sticky tape grabs: a port of the Mac's `StickyTape`.
+///
+/// Binder that has taken up moisture is gummy in patches along the tape.
+/// Sources describe what that does as squeal, the tape dragging and jerking
+/// through the path, and residue on the heads — not a jitter on every line.
+/// So: the tape plays clean until a patch reaches the guides and drum. There
+/// it holds; the capstan keeps pulling, so the tape between stretches
+/// (tension climbs: the picture skews, more each field), the capstan slips
+/// (the tracking sags) and the tape squeals (a tone, swelling). Then it
+/// tears loose: the tension is gone in a millisecond, the picture below that
+/// line lurches sideways, and the tape rings like the spring it is for a
+/// couple of fields.
+///
+/// A function of the place on the tape alone, so it is there again on every
+/// play, somewhere else on another cassette, and three times as long at EP's
+/// tape speed. How often, how long and how hard are choices: nothing here is
+/// measured from a tape.
+pub mod sticky {
+    use super::{uniform, TapeParams};
+    use std::f64::consts::PI;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Grab {
+        /// The tape's extra stretch (strain).
+        pub strain: f64,
+        /// How hard it is held, 0…1 (what the capstan slips against).
+        pub hold: f64,
+        /// The squeal: amplitude (µs) and pitch (Hz).
+        pub squeal: f64,
+        pub pitch: f64,
+    }
+
+    /// Patches are dealt one to a stretch of tape this long, mm (0.3 s at SP).
+    pub const STRETCH: f64 = 10.0;
+    /// The stretch a full-strength patch puts on the tape before it lets
+    /// go: 36 µs of skew over a field.
+    pub const STRAIN: f64 = 2.2e-3;
+    /// The capstan's slip against a full-strength hold, track pitches a field.
+    pub const SLIP: f64 = 0.4;
+    /// The squeal's size at full strength, µs.
+    pub const SQUEAL: f64 = 0.3;
+    /// Letting go takes this much tape, mm (0.75 ms at SP).
+    pub const RELEASE: f64 = 0.025;
+
+    /// How sticky the tape is overall, 0…1: Sticky shed, and a little from
+    /// mold (its colonies are tacky too).
+    pub fn stickiness(t: &TapeParams) -> f64 {
+        (t.sticky as f64 + 0.25 * t.mold as f64).min(1.0)
+    }
+
+    /// The patch in stretch `c`, if it has one: where it starts and ends
+    /// (mm), how hard it holds, and its squeal's pitch.
+    pub fn patch(c: i64, t: &TapeParams) -> Option<(f64, f64, f64, f64)> {
+        let st = stickiness(t);
+        if st <= 0.0 {
+            return None;
+        }
+        let seed = t.seed as u64;
+        // A few at a low setting (one every three seconds at a quarter, one
+        // a second at half), one in every stretch at full: three a second,
+        // the tape held two thirds of the time.
+        if uniform(seed, 101, c, 0) >= st.powf(1.6).min(1.0) {
+            return None;
+        }
+        let length = (2.0 + 7.0 * uniform(seed, 102, c, 0)) * (0.5 + 0.5 * st);
+        let start = (c as f64 + 0.9 * uniform(seed, 103, c, 0)) * STRETCH;
+        // (How hard a patch holds grows less with the knob than how many
+        // there are: a slightly sticky tape grabs rarely, but it does grab.)
+        let grip = (0.35 + 0.65 * st) * (0.5 + 0.5 * uniform(seed, 104, c, 0));
+        Some((start, start + length, grip, 950.0 + 800.0 * uniform(seed, 105, c, 0)))
+    }
+
+    pub fn at(x: f64, t: &TapeParams) -> Grab {
+        let mut g = Grab::default();
+        if !(t.sticky > 0.0 || t.mold > 0.0) {
+            return g;
+        }
+        let c = (x / STRETCH).floor() as i64;
+        // This stretch's patch and the one before's (still ringing, or
+        // running over the boundary).
+        for k in [c - 1, c] {
+            let Some((start, end, grip, pitch)) = patch(k, t) else { continue };
+            if x < start {
+                continue;
+            }
+            if x < end {
+                // Held: the tension climbs, slowly at first.
+                let q = (x - start) / (end - start);
+                g.strain += STRAIN * grip * q * q;
+                g.hold = g.hold.max(grip * (q * 4.0).min(1.0));
+                g.squeal = SQUEAL * grip * q;
+                g.pitch = pitch;
+            } else {
+                // Let go: the tension falls away and the tape rings.
+                let d = x - end;
+                if d >= 4.0 {
+                    continue;
+                }
+                let fall = 1.0 - (d / RELEASE).min(1.0);
+                let ring = -0.35 * (1.0 - fall) * (-d / 0.5).exp() * (2.0 * PI * d / 0.8).cos();
+                g.strain += STRAIN * grip * (fall * fall * (3.0 - 2.0 * fall) + ring);
+            }
+        }
+        g
     }
 }
 
@@ -84,6 +204,9 @@ pub struct Line {
     pub delta: f64,
     /// The time-base error that puts on the signal, µs.
     pub tbe: f64,
+    /// How much a sticky patch is stretching the tape here (strain, on top
+    /// of the back tension's).
+    pub strain: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -100,8 +223,6 @@ struct State {
     speed: f64,
     kick: f64,
     integ: f64,
-    lag: [f64; 3],
-    break_at: [f64; 3],
     phase: f64,
     rate: f64,
     lines: VecDeque<Line>,
@@ -116,8 +237,6 @@ impl Default for State {
             speed: 0.0,
             kick: 0.0,
             integ: 0.0,
-            lag: [0.0; 3],
-            break_at: [8.0, 6.0, 5.0],
             phase: 0.0,
             rate: 0.0,
             lines: VecDeque::new(),
@@ -221,47 +340,33 @@ impl TransportSimulator {
         let motor = 0.004 * (2.0 * uniform(seed, 69, 0, 0) - 1.0) + 0.006 * value(seed, 60, t / 3.0);
         let s = &mut self.s;
         s.delta += (motor + s.speed + s.kick) / (2 * l) as f64;
-        // A gummy tape drags: the capstan slips a little against it.
-        if self.tape.sticky > 0.0 {
-            let st = self.tape.sticky as f64;
-            let drag = st * st * 0.05 * (1.0 + value(seed, 61, t / 0.8));
-            s.delta -= drag / l as f64;
+        // A sticky patch under the guides: the tape is held back.
+        let x = f as f64 * advance + jf as f64 / l as f64 * advance; // tape position, mm
+        let grab = sticky::at(x, &self.tape);
+        // The capstan slips against the held tape, so the tape falls behind
+        // its place (the servo sees that, and pulls it back over the next
+        // half second: the tracking sags and recovers).
+        if grab.hold > 0.0 {
+            s.delta -= sticky::SLIP * grab.hold / l as f64;
         }
-
-        // Stick-slip at the guides, where the binder is gummy here.
-        let x = f as f64 * advance + jf as f64 / l as f64 * advance;
-        let tape_seed = self.tape.seed as u64;
-        let mold = self.tape.mold as f64 * value(tape_seed, 63, x / 9.0).max(0.0);
-        let mu = self.tape.sticky as f64 * (0.55 + 0.45 * value(tape_seed, 62, x / 25.0)) + 0.4 * mold;
-        let per_line = 33.35 / (p.format.speed + 1) as f64 * T::LINE * 1e-3;
-        for c in 0..3 {
-            let grip = mu * [1.0, 0.75, 0.55][c];
-            if grip < 0.1 {
-                s.lag[c] *= 0.8;
-                continue;
-            }
-            s.lag[c] += [0.3, 0.2, 0.15][c] * per_line;
-            if s.lag[c] >= s.break_at[c] {
-                // Torn loose: it springs forward past its place.
-                s.lag[c] = -0.3 * s.lag[c];
-                let u = uniform(seed, 64 + c as u64, j, 0);
-                s.break_at[c] = (1.5 + 7.0 * grip) * (1.0 + 0.35 * p.tension) * (0.4 + 1.4 * u * u);
-            }
-        }
-        let lag: f64 = s.lag.iter().sum();
 
         // The pinch roller's wobble, too fast for the servo (residual).
         let wobble = p.flutter * 0.03 * value(seed, 65, t * 3.5);
-        let delta = s.delta + wobble + lag / (advance * 1000.0);
+        let delta = s.delta + wobble;
         let alpha = p.format.track_offset_lines();
         // Soft-limited to under half a line, measured from the nearest track
         // of the heads' own azimuth.
-        let tbe = T::LINE * 0.45 * (alpha * wrap2(delta) / 0.45).tanh();
+        let mut tbe = T::LINE * 0.45 * (alpha * wrap2(delta) / 0.45).tanh();
+        // Held, the tape sings: the squeal, a steady tone that swells until
+        // it lets go. (Its pitch wavers: a stick-slip tone, not a tuning fork.)
+        if grab.squeal > 0.0 {
+            tbe += grab.squeal * (2.0 * std::f64::consts::PI * grab.pitch * t + 1.5 * value(seed, 106, t * 40.0)).sin();
+        }
         if s.lines.len() >= self.cap {
             let drop = s.lines.len() - self.cap + 1;
             s.lines.drain(..drop);
         }
-        s.lines.push_back(Line { delta, tbe });
+        s.lines.push_back(Line { delta, tbe, strain: grab.strain });
         s.line = j;
     }
 

@@ -210,7 +210,7 @@ impl App {
             let frames = self.timeline_frames();
             let frame = (self.playhead * frames.saturating_sub(1) as f64).round() as usize;
             let seconds = match self.video {
-                Some(v) => frame as f64 / v.timescale(),
+                Some(v) => v.seconds(frame),
                 None => self.playhead * self.timeline_seconds,
             };
             ui.monospace(format!("{:.2} s · frame {}/{}", seconds, frame + 1, frames));

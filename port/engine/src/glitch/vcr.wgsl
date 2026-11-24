@@ -21,10 +21,16 @@ struct VcrU {
     link: u32, lumaDelay: u32, nb0: f32, nb1: f32,
     nb2: f32, na1: f32, na2: f32, kb0: f32,
     kb1: f32, kb2: f32, ka1: f32, ka2: f32,
+    // The luma low-pass's second section (the first is lb…), the dropout
+    // detector's step, and the noise canceller: its clip level (IRE) and its
+    // high-pass's step per sample.
+    l2b0: f32, l2b1: f32, l2b2: f32, l2a1: f32,
+    l2a2: f32, docStep: f32, ncClip: f32, ncStep: f32,
 };
 struct VcrLine {
     originBase: i32, originOffset: f32, along0: f32, spacing: f32,
     grease: f32, gain: f32, head: u32, delta0: f32, deltaSlope: f32, colorBoost: f32,
+    colorNoise: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: VcrU;
@@ -156,24 +162,32 @@ fn tape_at(p: TPos) -> TPt {
         }
     }
     if (U.flake > 0.0) {
-        let c = tcell(p, 10);
-        let cy = i32(floor(y));
+        let c = tcell(p, 3);
+        let cy = i32(floor(y * 3.0));
+        let most = i32(ceil(U.flake));
         for (var j = -1; j <= 1; j++) {
             for (var i = -1; i <= 1; i++) {
                 let ci = c.c + i;
                 let cj = cy + j;
-                if (tuni(s, 21u, ci, cj) >= U.flake) { continue; }
-                let ddx = tdx(p, ci, 10, tuni(s, 22u, ci, cj)) * 0.1;
-                let ddy = f32(cj) + tuni(s, 23u, ci, cj) - y;
-                let u = tuni(s, 24u, ci, cj);
-                let r = 0.04 * pow(8.0, u * u) * (1.0 + 0.6 * max(0.0, U.dropouts - 1.0));
-                let e = 0.6 + 0.8 * tuni(s, 25u, ci, cj);
-                let d = sqrt((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e));
-                if (d < r * 1.5) { outp *= sstep(r * 0.8, r, d); }
+                for (var k = 0; k < most; k++) {
+                    let sk = s + u32(k) * 0x9E3779B9u;
+                    if (tuni(sk, 21u, ci, cj) >= U.flake - f32(k)) { continue; }
+                    let ddx = tdx(p, ci, 3, tuni(sk, 22u, ci, cj)) * 0.1;
+                    let ddy = (f32(cj) + tuni(sk, 23u, ci, cj)) * 0.33333334 - y;
+                    let u = tuni(sk, 24u, ci, cj);
+                    let r = 0.018 * pow(9.0, u * u);
+                    let e = 0.5 + 0.6 * tuni(sk, 25u, ci, cj);
+                    let d = sqrt((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e));
+                    if (d < r * 1.5) {
+                        let depth = min(1.0, 0.55 + 0.9 * tuni(sk, 26u, ci, cj));
+                        outp *= 1.0 - depth * (1.0 - sstep(r * 0.8, r, d));
+                    }
+                }
             }
         }
     }
     if (U.scratches > 0.0) {
+        let strong = min(1.0, U.scratches);
         let lane = i32(floor(y * 4.0));
         let sx = tcell(p, 3000);
         let c80 = tcell(p, 80);
@@ -190,15 +204,15 @@ fn tape_at(p: TPos) -> TPt {
             let weave = 0.03 * (2.0 * noise1(ss, 37u, c80.c, c80.f) - 1.0) + 0.012 * (2.0 * noise1(ss, 38u, c15.c, c15.f) - 1.0);
             let yc = (f32(li) + 0.15 + 0.7 * tuni(s, 34u, li, sx.c)) * 0.25 + weave;
             let su = tuni(s, 35u, li, sx.c);
-            let w = (0.006 + 0.074 * su * su * su) * (0.6 + 0.4 * U.scratches) * (0.5 + noise1(ss, 39u, c200.c, c200.f));
+            let w = (0.006 + 0.074 * pow(su, 3.0 - 0.6667 * (U.scratches - strong))) * (0.6 + 0.4 * strong + 0.15 * (U.scratches - strong)) * (0.5 + noise1(ss, 39u, c200.c, c200.f));
             let depth = sstep(0.3, 0.55, noise1(ss, 40u, c120.c, c120.f));
             if (depth <= 0.0) { continue; }
             let dy = abs(y - yc);
             if (dy < w * 0.5) {
                 outp *= 1.0 - 0.95 * depth;
-                lift += 0.15 * depth * U.scratches;
+                lift += 0.15 * depth * strong;
             } else if (dy < w * 1.5) {
-                lift += 0.35 * depth * U.scratches * (1.0 - (dy - w * 0.5) / w);
+                lift += 0.35 * depth * strong * (1.0 - (dy - w * 0.5) / w);
             }
         }
     }
@@ -530,7 +544,7 @@ fn vcr_line(@builtin(global_invocation_id) gid: vec3<u32>) {
         prev = c;
         let mhz = clamp(dphi / (TAU * U.dt), 1.0, 7.5);
         luma[row + i] = (mhz - 3.4) * 140.0 - 40.0;
-        env += 0.12 * (length(c) - env);
+        env += U.docStep * (length(c) - env);
         refl = select(refl * 0.99885, refl + 0.05 * (env - refl), env > refl);
         // Floors against the head's own noise (a narrow LP or EP head's
         // carrier and noise are both lower): below them it is noise.
@@ -541,33 +555,60 @@ fn vcr_line(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else if (env < on) { flagged = true; hold = 14; }
         chroma[row + i] = vec2<f32>(select(0.0, 1.0, flagged), 0.0);
     }
+    // Luma: zero-phase low-pass (two sections forward, then backward),
+    // de-emphasis, and the noise canceller.
     var s = vec4<f32>(luma[row]);
-    for (var i = 0u; i < N; i++) { luma[row + i] = biquad(&s, luma[row + i], U.lb0, U.lb1, U.lb2, U.la1, U.la2); }
+    var s2 = vec4<f32>(luma[row]);
+    for (var i = 0u; i < N; i++) {
+        luma[row + i] = biquad(&s2, biquad(&s, luma[row + i], U.lb0, U.lb1, U.lb2, U.la1, U.la2),
+                               U.l2b0, U.l2b1, U.l2b2, U.l2a1, U.l2a2);
+    }
     s = vec4<f32>(luma[row + N - 1u]);
-    for (var i = i32(N) - 1; i >= 0; i--) { luma[row + u32(i)] = biquad(&s, luma[row + u32(i)], U.lb0, U.lb1, U.lb2, U.la1, U.la2); }
+    s2 = s;
+    for (var i = i32(N) - 1; i >= 0; i--) {
+        luma[row + u32(i)] = biquad(&s2, biquad(&s, luma[row + u32(i)], U.lb0, U.lb1, U.lb2, U.la1, U.la2),
+                                    U.l2b0, U.l2b1, U.l2b2, U.l2a1, U.l2a2);
+    }
     var xp = luma[row];
     var yp = luma[row];
+    var low = luma[row];
     for (var i = 0u; i < N; i++) {
         let x = luma[row + i];
         let v = U.deB0 * x + U.deB1 * xp - U.deA1 * yp;
         xp = x;
         yp = v;
+        luma[row + i] = v;
+        // (The canceller's low-pass, forward; chroma.y is free here.)
+        low += U.ncStep * (v - low);
+        chroma[row + i] = vec2<f32>(chroma[row + i].x, low);
+    }
+    // The canceller: what lies above its corner, clipped, comes off. (Its
+    // low-pass runs both ways, as the luma filter does, so what it takes
+    // from an edge it takes evenly from both sides.)
+    low = chroma[row + N - 1u].y;
+    for (var i = i32(N) - 1; i >= 0; i--) {
+        low += U.ncStep * (chroma[row + u32(i)].y - low);
+        var v = luma[row + u32(i)];
+        v -= clamp(v - low, -U.ncClip, U.ncClip);
         // Flagged samples are stored as v + 10000 (decoded in vcr_out).
-        luma[row + i] = select(v, v + 10000.0, chroma[row + i].x > 0.5);
+        luma[row + u32(i)] = select(v, v + 10000.0, chroma[row + u32(i)].x > 0.5);
     }
     // Color-under: mix down, turning this line's phase back the way the
     // head's own track turned it, then zero-phase low-pass twice.
     // Tape and head wear don't fade the color (DeckParams::color_boost):
-    // the color path hears this line's playback as if the tape and head were
-    // new, against the same head noise (recomputed: the same samples vcr_play
-    // added). The picture keeps its worn signal.
+    // the color path hears this line's playback raised to what a new tape
+    // and head would give. The head's noise (recomputed: the same samples
+    // vcr_play added) comes up only by the head's own share (colorNoise), as
+    // under a deck's ACC: a worn head's color gets noisy, a worn tape's
+    // doesn't. The picture keeps its worn signal.
     let q = turns(select(-1, 1, lines[y].head == 0u), i32(y));
     let boost = lines[y].colorBoost;
+    let rise = lines[y].colorNoise;
     for (var i = 0u; i < N; i++) {
         let a = U.cuStep * f32(i);
         let cs = quarter(cos(a), sin(a), q);
         var x = pb[row + i];
-        if (boost != 1.0) { x = boost * x - (boost - 1.0) * U.noise * gaussn(U.seed ^ 0x51u, U.field, i32(i), i32(y)); }
+        if (boost != 1.0) { x = boost * x - (boost - rise) * U.noise * gaussn(U.seed ^ 0x51u, U.field, i32(i), i32(y)); }
         chroma[row + i] = x * vec2<f32>(cs.x, -cs.y);
     }
     for (var round = 0; round < 2; round++) {
@@ -622,6 +663,7 @@ fn vcr_acc(@builtin(global_invocation_id) gid: vec3<u32>) {
     var gain = 1.0;
     var phase = 0.0;
     var killer = 1.0;
+    var level = -1.0;
     var on = true;
     let b0 = u32((BURST_S + 0.3) / U.dt);
     let b1 = min(U.n, u32((BURST_E - 0.3) / U.dt) + 1u);
@@ -635,9 +677,20 @@ fn vcr_acc(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var i = b0; i < b1 && !lost; i++) {
             lost = luma[y * U.n + i] > 5000.0 || luma[prev * U.n + i] > 5000.0;
         }
+        let b = burst[y];
+        let m = length(b);
+        // Nor do they follow a burst that dips for a line or two (a shallow
+        // dropout or a scratch the detector didn't flag): the ACC detector's
+        // capacitor holds its level, and only a burst that stays down brings
+        // it down (about four lines). Following every dip, each small flaw
+        // over a burst left a few lines of oversaturated color behind it.
         if (!lost) {
-            let b = burst[y];
-            let m = length(b);
+            if (level < 0.0) { level = m; }
+            let dip = m < 0.6 * level;
+            level += select(0.5, 0.12, dip) * (m - level);
+            lost = dip;
+        }
+        if (!lost) {
             let err = atan2(refb.x * b.y - refb.y * b.x, refb.x * b.x + refb.y * b.y);
             if (m > 0.08 * nominal) { phase += 0.35 * (err - phase); }
             gain += 0.3 * (nominal / max(m, 0.05 * nominal) - gain);

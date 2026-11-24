@@ -24,7 +24,8 @@ let rows = plan.rows.map { r in
 func lines(_ p: VcrFieldPlan?) -> [[Double]] {
     (p?.lines ?? []).map {
         [Double($0.originBase), Double($0.originOffset), Double($0.along0), Double($0.spacing),
-         Double($0.grease), Double($0.gain), Double($0.head), Double($0.delta0), Double($0.deltaSlope), Double($0.colorBoost)]
+         Double($0.grease), Double($0.gain), Double($0.head), Double($0.delta0), Double($0.deltaSlope), Double($0.colorBoost),
+         Double($0.colorNoise)]
     }
 }
 let vcr = lines(plan.vcr)

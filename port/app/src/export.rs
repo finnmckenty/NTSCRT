@@ -255,10 +255,11 @@ pub fn run(job: Job, progress: Arc<Progress>) -> Result<String> {
             let gif_fps = job.gif_fps.max(1) as f64;
             let (frames, clip_frame): (usize, Box<dyn Fn(usize) -> usize>) = match info {
                 Some(v) => {
-                    let n = ((v.total_frames as f64 / v.timescale()) * gif_fps).round().max(1.0) as usize;
-                    let ts = v.timescale();
+                    // The clip's frame showing at each GIF frame's time (a
+                    // frame's time is its index × the frame length).
+                    let n = (v.seconds(v.total_frames) * gif_fps).round().max(1.0) as usize;
                     let last = v.total_frames.saturating_sub(1);
-                    (n, Box::new(move |i| ((i as f64 / gif_fps * ts).round() as usize).min(last)))
+                    (n, Box::new(move |i| v.frame_at(i as f64 / gif_fps).min(last)))
                 }
                 None => ((job.still_seconds * gif_fps).round().max(1.0) as usize, Box::new(|i| i)),
             };

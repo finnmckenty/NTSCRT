@@ -368,7 +368,7 @@ pub fn render(r: &Request) -> CliResult<Map<String, Value>> {
 /// Frames and frame rate the export writes (as `export::run` counts them).
 fn movie_frames(app: &App) -> (usize, f64) {
     match (app.export_format, app.video) {
-        (export::Format::Gif, Some(v)) => ((((v.total_frames as f64 / v.timescale()) * app.gif_fps as f64).round() as usize).max(1), app.gif_fps as f64),
+        (export::Format::Gif, Some(v)) => (((v.seconds(v.total_frames) * app.gif_fps as f64).round() as usize).max(1), app.gif_fps as f64),
         (export::Format::Gif, None) => (((app.timeline_seconds * app.gif_fps as f64).round() as usize).max(1), app.gif_fps as f64),
         (_, Some(v)) => (v.total_frames * app.export_loops.max(1), v.fps_rational.0 as f64 / v.fps_rational.1.max(1) as f64),
         (_, None) => (((app.timeline_seconds * app.timeline_fps as f64).round() as usize).max(1), app.timeline_fps as f64),

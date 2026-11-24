@@ -118,7 +118,7 @@ impl Reader {
         // A frame early, and inside the clip: Media Foundation's duration
         // doesn't include the start offset, and seeking past it fails. The
         // reader lands on the keyframe before anyway and decodes forward.
-        let frame = HNS / self.info.timescale();
+        let frame = HNS * self.info.frame_seconds();
         let end = (self.info.duration * HNS - frame).max(0.0) as i64;
         let t = (self.start + ((index as f64 - 1.0) * frame) as i64).clamp(0, end);
         let mut pos = PROPVARIANT::default();

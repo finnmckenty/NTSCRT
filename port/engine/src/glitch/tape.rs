@@ -203,8 +203,16 @@ impl TapeParams {
     pub fn pinhole_chance(&self) -> f32 {
         (0.05 + 6.0 * self.dropouts + 2.0 * self.wear) * 0.01
     }
+    /// Flakes of missing coating per 0.3 × 0.33 mm cell (up to three; the
+    /// fraction is the chance of the next one). The square of the knob's
+    /// amount up to the realistic worst, its cube above.
     pub fn flake_chance(&self) -> f32 {
-        0.001 + 0.6 * self.dropouts * self.dropouts + 0.06 * self.wear + 0.06 * self.mold
+        (0.0001 + 0.12 * self.dropouts * self.dropouts * self.dropouts.max(1.0) + 0.012 * self.wear + 0.012 * self.mold).min(3.0)
+    }
+    /// What one flake sheds. Evened out above one flake a cell, so the top
+    /// of the knob is more dropouts, not a deck that clogs at once.
+    pub fn flake_shed(&self) -> f32 {
+        1.2 / self.flake_chance().max(1.0)
     }
 }
 
@@ -226,7 +234,10 @@ pub fn top_end_gain(key: &str) -> f32 {
 pub fn curve(key: &str) -> Option<&'static [f32; 11]> {
     match key {
         "tape_wear" => Some(&[0.0, 0.259, 0.648, 0.955, 1.202, 1.391, 1.540, 1.640, 1.724, 1.785, 1.850]),
-        "tape_dropouts" => Some(&[0.0, 0.195, 0.473, 0.754, 0.931, 1.120, 1.322, 1.607, 2.124, 2.480, 3.0]),
+        // (Measured again when flaws became dropouts — dashes, not bands:
+        // their numbers grow as the amount squared, cubed past 1, so the
+        // realistic range is the first sixth of the travel.)
+        "tape_dropouts" => Some(&[0.0, 0.679, 1.13, 1.396, 1.631, 1.87, 2.108, 2.333, 2.51, 2.732, 3.0]),
         "tape_scratches" => Some(&[0.0, 0.759, 1.281, 1.822, 2.073, 2.289, 2.516, 2.777, 3.069, 3.430, 4.0]),
         "tape_edge_damage" => Some(&[0.0, 0.703, 0.743, 0.800, 0.888, 0.934, 0.987, 1.056, 1.190, 1.329, 1.45]),
         _ => None,
@@ -255,9 +266,32 @@ pub fn amount(key: &str, k: f32) -> f32 {
     c[i] + (c[i + 1] - c[i]) * (x - i as f32)
 }
 
+/// Oxide flaws' curve through 0.28: where its slider stood for a given
+/// amount then (Mac: TapeParams.curvesIn028).
+fn curve_in_028(key: &str) -> Option<&'static [f32; 11]> {
+    match key {
+        "tape_dropouts" => Some(&[0.0, 0.195, 0.473, 0.754, 0.931, 1.120, 1.322, 1.607, 2.124, 2.480, 3.0]),
+        _ => None,
+    }
+}
+
+/// Where the slider stood in 0.28 for `amount`: what the tape choices and
+/// looks from before the curves are given. For Oxide flaws that is no longer
+/// the same amount — the same flakes show far less now that they are
+/// dropouts the deck compensates, not bands that tear the picture — so a
+/// look keeps its place on the slider, its share of the control's full
+/// effect, instead. Mac: TapeParams.knobIn028.
+pub fn knob_in_028(key: &str, amount: f64) -> f64 {
+    knob_on(curve_in_028(key).or_else(|| curve(key)), key, amount)
+}
+
 /// The slider position that gives `amount` (the inverse of `amount`).
 pub fn knob(key: &str, amount: f64) -> f64 {
-    let Some(c) = curve(key) else { return knob_for_amount_gain(amount, top_end_gain(key) as f64) };
+    knob_on(curve(key), key, amount)
+}
+
+fn knob_on(curve: Option<&'static [f32; 11]>, key: &str, amount: f64) -> f64 {
+    let Some(c) = curve else { return knob_for_amount_gain(amount, top_end_gain(key) as f64) };
     let a = amount.clamp(0.0, c[10] as f64) as f32;
     for i in 0..10 {
         if a <= c[i + 1] {
@@ -284,7 +318,7 @@ pub fn amount_in_027(key: &str, k: f64) -> f64 {
 /// The knob setting that damages a tape as `amount` did before the curves
 /// (for the tape choices, the dub decks and migrated old looks). Mac: asBefore.
 pub fn as_before(key: &str, amount: f64) -> f64 {
-    knob(key, amount)
+    knob_in_028(key, amount)
 }
 
 /// What the head finds at one point of the tape.
@@ -344,13 +378,13 @@ fn dx(p: TapePosition, c: i32, q: i32, frac: f32) -> f32 {
     (c.wrapping_mul(q).wrapping_sub(p.base)) as f32 + frac * q as f32 - p.offset
 }
 
-fn noise1(s: u32, k: u32, i: i32, f: f32) -> f32 {
+pub(crate) fn noise1(s: u32, k: u32, i: i32, f: f32) -> f32 {
     let a = uni(s, k, i, 0);
     let b = uni(s, k, i.wrapping_add(1), 0);
     a + (b - a) * smooth(f)
 }
 
-fn noise2(s: u32, k: u32, i: i32, fi: f32, j: i32, fj: f32) -> f32 {
+pub(crate) fn noise2(s: u32, k: u32, i: i32, fi: f32, j: i32, fj: f32) -> f32 {
     let a = uni(s, k, i, j);
     let b = uni(s, k, i.wrapping_add(1), j);
     let c = uni(s, k, i, j.wrapping_add(1));
@@ -362,6 +396,11 @@ fn noise2(s: u32, k: u32, i: i32, fi: f32, j: i32, fj: f32) -> f32 {
 }
 
 const W: f32 = TapeGeometry::WIDTH as f32;
+
+/// What a new tape sheds (the same units as `TapePoint::shed`): enough that
+/// a deck never cleaned (Dirt buildup at full) clogs for a moment every half
+/// minute or so on any tape, and a cleaned one about never.
+pub const BASE_SHED: f32 = 0.018;
 
 /// The tape at `p`. `detail` includes flaws much smaller than a track
 /// (pinholes, scratches), which only matter to the picture.
@@ -377,9 +416,9 @@ pub fn tape_at_with(p: TapePosition, t: &TapeParams, detail: bool, flakes: bool)
     let mut lift = t.roughness();
     let mut out = t.remanence();
     let mut film = 0.0f32;
-    // Worn coating sheds a little everywhere; a hydrolyzed binder sheds
-    // gummy oxide all along the tape.
-    let mut shed = 0.02 * t.wear + 0.9 * t.sticky * t.sticky;
+    // Any tape sheds a trace as it runs; worn coating sheds a little more
+    // everywhere; a hydrolyzed binder sheds gummy oxide all along the tape.
+    let mut shed = BASE_SHED + 0.02 * t.wear + 0.9 * t.sticky * t.sticky;
 
     {
         let (cx, fx) = cell(p, 5);
@@ -410,27 +449,42 @@ pub fn tape_at_with(p: TapePosition, t: &TapeParams, detail: bool, flakes: bool)
         }
     }
 
+    // Flakes: bits of coating gone (or held off the head by a speck of
+    // debris), most of them about a track wide and a tenth of a line long,
+    // a few several tracks wide and most of a line long: each is a dropout,
+    // a short dash in the picture. Longer across the tape than along it, as
+    // the tent around a speck is. The knob's top end is more of them, not
+    // bigger ones (up to three to a cell a third of a millimeter square), so
+    // a wrecked tape is a blizzard of dashes, not bands.
     let flake = t.flake_chance();
     if flakes && flake > 0.0 {
-        let (cx, _) = cell(p, 10);
-        let cy = y.floor() as i32;
+        let (cx, _) = cell(p, 3);
+        let cy = (y * 3.0).floor() as i32;
+        let most = flake.ceil() as u32;
+        let flake_shed = t.flake_shed();
         for j in -1..=1 {
             for i in -1..=1 {
                 let (ci, cj) = (cx.wrapping_add(i), cy.wrapping_add(j));
-                if uni(s, 21, ci, cj) >= flake {
-                    continue;
-                }
-                let ddx = dx(p, ci, 10, uni(s, 22, ci, cj)) * 0.1;
-                let ddy = cj as f32 + uni(s, 23, ci, cj) - y;
-                let u = uni(s, 24, ci, cj);
-                // Past the realistic range (dropouts over 1: the top of the
-                // knob) the flakes grow, since a square holds one.
-                let r = 0.04 * 8f32.powf(u * u) * (1.0 + 0.6 * (t.dropouts - 1.0).max(0.0));
-                let e = 0.6 + 0.8 * uni(s, 25, ci, cj);
-                let d = ((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e)).sqrt();
-                if d < r * 1.5 {
-                    out *= smoothstep(r * 0.8, r, d);
-                    shed += 0.5 * (1.0 - smoothstep(r, r * 1.5, d));
+                for k in 0..most {
+                    // The cell's k-th flake (its own draws).
+                    let sk = s.wrapping_add(k.wrapping_mul(0x9E37_79B9));
+                    if uni(sk, 21, ci, cj) >= flake - k as f32 {
+                        continue;
+                    }
+                    let ddx = dx(p, ci, 3, uni(sk, 22, ci, cj)) * 0.1;
+                    let ddy = (cj as f32 + uni(sk, 23, ci, cj)) * 0.333_333_34 - y;
+                    let u = uni(sk, 24, ci, cj);
+                    let r = 0.018 * 9f32.powf(u * u);
+                    let e = 0.5 + 0.6 * uni(sk, 25, ci, cj);
+                    let d = ((ddx / e) * (ddx / e) + (ddy * e) * (ddy * e)).sqrt();
+                    if d < r * 1.5 {
+                        // Half are gone outright; the rest keep a little
+                        // signal (a dropout too shallow for the deck's
+                        // compensator: sparkles, where the signal is weak).
+                        let depth = (0.55 + 0.9 * uni(sk, 26, ci, cj)).min(1.0);
+                        out *= 1.0 - depth * (1.0 - smoothstep(r * 0.8, r, d));
+                        shed += flake_shed * depth * (1.0 - smoothstep(r, r * 1.5, d));
+                    }
                 }
             }
         }
@@ -440,7 +494,15 @@ pub fn tape_at_with(p: TapePosition, t: &TapeParams, detail: bool, flakes: bool)
     // are narrower than a track (6–80 µm); the debris thrown up either side
     // holds the head off a little. A scratch weaves sideways (tens of µm),
     // and its depth and width vary, with skips.
+    //
+    // Past the realistic worst (scratches over 1: most of the knob) there
+    // are more of them, up to one in every quarter-millimeter lane, and more
+    // of them wide enough to show — but a scratch stays a scratch, a line or
+    // three of the picture: the ridges of debris beside it stop growing
+    // (`strong`) and its width nearly does, or the top of the knob was bands
+    // of noise, like every other kind of damage.
     if detail && t.scratches > 0.0 {
+        let strong = t.scratches.min(1.0);
         let lane = (y * 4.0).floor() as i32;
         let (sx, fx) = cell(p, 3000);
         let ((c80, f80), (c15, f15)) = (cell(p, 80), cell(p, 15));
@@ -459,7 +521,9 @@ pub fn tape_at_with(p: TapePosition, t: &TapeParams, detail: bool, flakes: bool)
             let weave = 0.03 * (2.0 * noise1(ss, 37, c80, f80) - 1.0) + 0.012 * (2.0 * noise1(ss, 38, c15, f15) - 1.0);
             let yc = (li as f32 + 0.15 + 0.7 * uni(s, 34, li, sx)) * 0.25 + weave;
             let u = uni(s, 35, li, sx);
-            let w = (0.006 + 0.074 * u * u * u) * (0.6 + 0.4 * t.scratches) * (0.5 + noise1(ss, 39, c200, f200));
+            let w = (0.006 + 0.074 * u.powf(3.0 - 0.6667 * (t.scratches - strong)))
+                * (0.6 + 0.4 * strong + 0.15 * (t.scratches - strong))
+                * (0.5 + noise1(ss, 39, c200, f200));
             let depth = smoothstep(0.3, 0.55, noise1(ss, 40, c120, f120));
             if depth <= 0.0 {
                 continue;
@@ -467,9 +531,9 @@ pub fn tape_at_with(p: TapePosition, t: &TapeParams, detail: bool, flakes: bool)
             let dy = (y - yc).abs();
             if dy < w * 0.5 {
                 out *= 1.0 - 0.95 * depth;
-                lift += 0.15 * depth * t.scratches;
+                lift += 0.15 * depth * strong;
             } else if dy < w * 1.5 {
-                lift += 0.35 * depth * t.scratches * (1.0 - (dy - w * 0.5) / w);
+                lift += 0.35 * depth * strong * (1.0 - (dy - w * 0.5) / w);
             }
         }
     }

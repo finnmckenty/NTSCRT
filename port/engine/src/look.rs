@@ -265,7 +265,8 @@ pub fn write_look(base: Option<&Map<String, Value>>, s: &LookState) -> String {
     // the base, its keys are kept.
     // 3: Wear, Oxide flaws, Scratches and Edge damage on their measured
     // curves (older looks are converted on loading: GlitchSettings::upgraded).
-    look.insert("version".into(), Value::from(3));
+    // 4: Back tension's longer travel (the same).
+    look.insert("version".into(), Value::from(4));
     look.insert(
         "downscale".into(),
         serde_json::json!({
@@ -359,7 +360,7 @@ mod tests {
         );
         let back = Look::parse(&out).unwrap();
         assert_eq!(back.crop.map(|c| (c.ratio, c.x)), Some((Ratio::new(9, 16), 0.25)));
-        assert_eq!(back.version, 3);
+        assert_eq!(back.version, 4);
         assert_eq!(back.downscale_width, Some(320));
         assert_eq!(back.shader_params["x"], 2.0);
         assert_eq!(back.raw["glitch"], look.raw["glitch"], "kept");

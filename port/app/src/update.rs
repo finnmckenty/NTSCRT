@@ -274,6 +274,10 @@ impl Updates {
                             });
                         });
                     }
+                    // Who makes NTSCRT, with links (the Mac's prompt has the
+                    // same line under its notes).
+                    ui.add_space(6.0);
+                    crate::about::credit_line(ui);
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Download…").on_hover_text("Open the release page in your browser").clicked() {

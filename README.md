@@ -50,7 +50,7 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 - **Pick a tape and a deck**: Brand new, Used, Worn out, Moldy, Vaselined, Chewed, Sticky or Bootleg; Clean, Dirty or Worn heads, Worn transport, or Neglected. Then adjust the knobs under each.
 - **Nothing is drawn**: the picture is recorded as VHS records it (FM luminance, color-under) on the tape's slanted tracks, and read back through what the tape and heads are doing to it.
 - **The tape is a real surface**: flaws, scratches, creases, mold and Vaseline sit at places on it, so they come back in the same spot, sweep through the picture as the heads cross them, and differ between cassettes (**Another**).
-- **Each kind of damage has its own shape** (Mac for now): oxide flaws are dropouts, short dashes that start with a spark; scratches are thin lines at fixed heights; mold is bands of snow that tear the picture.
+- **Each kind of damage has its own shape**: oxide flaws are dropouts, short dashes that start with a spark; scratches are thin lines at fixed heights; mold is bands of snow that tear the picture.
 - **The heads have a history**: a shedding tape clogs an uncleaned deck as it plays; clogs knock loose; Vaseline rubs off onto the heads. Each head has its own dirt and wear, so alternate fields differ.
 - **Spacing hurts detail first**: anything holding the heads off the tape costs the picture far more than the color, so the picture breaks into noise while the color smears on.
 - **The tape moves for real**: a tracking servo follows the control track at the tape's bottom edge, so a chewed edge makes the tracking wander. Tension skews the top of the picture, a sticky tape grabs and lets go with a lurch, and a worn transport bends it into a slow wobble. Turning **Tracking** too far brings out noise bands, and **Search** sweeps the heads across the tracks.
@@ -83,7 +83,7 @@ Footage recorded digitally before it goes out as an analog signal. It runs real 
 - The **sparkles** button keeps tape noise and jitter moving. Leave it on for the real experience.
 - Zoom with the slider or ⌥-scroll; hold Space and drag to pan. Zoomed in, the picture fills the whole preview, not just its own frame.
 - Videos get a transport bar with play/pause and a frame-accurate scrubber. While a video is paused, the app renders ahead (the green line under the scrubber), so that stretch then plays back smoothly.
-- A video's sound plays along with it (Mac only for now). There are no controls: it follows play, pause, seeks and the loop at your Mac's volume, and goes quiet while playback runs slower than real time.
+- A video's sound plays along with it. There are no controls: it follows play, pause, seeks and the loop at your computer's volume, and goes quiet while playback runs slower than real time.
 - The palette fades when the mouse is idle; move the mouse to bring it back.
 
 ### Animating (timeline)

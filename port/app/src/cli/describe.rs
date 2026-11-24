@@ -266,7 +266,7 @@ fn glitch_control(p: &GlitchParam) -> Value {
     }
     let note = match p.id {
         "tracking_offset" => Some("Signed: ±1 is a whole track either way. Runs on a curve, so the picture holds over most of the travel and breaks up near the ends (|value| ≳ 0.6)."),
-        "back_tension" => Some("Signed: positive is tighter than the recording deck (skew, the top of the picture hooks sideways), negative is slacker (noise at the top and bottom). 0 matches it."),
+        "back_tension" => Some("Signed: positive is tighter than the recording deck (skew, the top of the picture hooks sideways), negative is slacker (the top of the picture waves from side to side and gets noisy). 0 matches it. Up to ±0.5 is a deck out of adjustment; beyond, the effect grows four times as fast (a stretched tape: strong hooking, noise bars on LP and EP)."),
         "search_speed" => Some("1 is normal play; 2–9 is fast-forward picture search."),
         _ => None,
     };

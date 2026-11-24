@@ -38,7 +38,9 @@ pub struct Writer {
     audio: Option<Audio>,
 }
 
-unsafe fn pcm_reader(path: &Path) -> Result<Option<(IMFSourceReader, IMFMediaType, i64)>> {
+/// The clip's first audio track as 16-bit PCM (None: it has no sound, or
+/// none that decodes), its media type and the clip's length (100 ns).
+pub(crate) unsafe fn pcm_reader(path: &Path) -> Result<Option<(IMFSourceReader, IMFMediaType, i64)>> {
     let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
     reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
     if reader.SetStreamSelection(AUDIO, true).is_err() {

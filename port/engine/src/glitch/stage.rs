@@ -75,6 +75,9 @@ pub struct Renderer {
     /// when to ask). Exports leave it off — every frame they draw is exact.
     pub background: bool,
     rerun: Option<Rerun>,
+    /// The time of the frame planned last, for telling how far playback
+    /// moved while a re-run is in flight.
+    last_time: Option<f64>,
 }
 
 impl Drop for Renderer {
@@ -120,6 +123,7 @@ impl Renderer {
         self.checkpoints.clear();
         self.key = None;
         self.last_settings = None;
+        self.last_time = None;
     }
 
     fn cancel_rerun(&mut self) {
@@ -178,10 +182,18 @@ impl Renderer {
             let span = time - resume_at.unwrap_or(-Simulator::WARMUP);
             if self.background && span > Self::BACKGROUND_ABOVE {
                 let on_its_way = self.rerun.as_ref().is_some_and(|r| r.key == key && r.raster == raster && r.time <= time + 2.0 * line_time);
-                // Already on its way to here, or to a moment before it
-                // (playing on, scrubbing forward): keep showing what we
-                // have; from where it lands, the rest is a short step.
-                if !on_its_way {
+                if on_its_way {
+                    // Already on its way to here, or to a moment before it
+                    // (playing on, scrubbing forward); from where it lands,
+                    // the rest is a short step. Until then the state we have
+                    // runs on by as much as the playhead moved, so a playing
+                    // picture doesn't stand still meanwhile.
+                    if let Some(last) = self.last_time.filter(|last| time > *last && time - *last <= Self::MAX_STEP) {
+                        let sim = self.sim.as_mut().expect("sim");
+                        let to = sim.time() + (time - last);
+                        sim.advance(to, settings);
+                    }
+                } else {
                     self.show_meanwhile(time, settings, retuned, fresh);
                     self.start_rerun(key, time, settings, h.cloned(), raster);
                 }
@@ -209,6 +221,7 @@ impl Renderer {
             }
         }
         self.last_settings = Some(settings.clone());
+        self.last_time = Some(time);
         self.sim.as_ref().expect("sim").plan()
     }
 
@@ -247,8 +260,12 @@ impl Renderer {
                 let mut keep = |snap: Snapshot| taken.push(snap);
                 sim.resimulate_unless(time, h.frame_duration, &move |t| settings_at(t), resume.as_ref(), Some(&mut keep), &cancelled);
             } else {
-                if let Some(r) = &resume {
-                    sim.restore(r);
+                match &resume {
+                    Some(r) => sim.restore(r),
+                    None => {
+                        sim.advance(0.0, &constant);
+                        taken.push(sim.snapshot_at(Some(0.0)));
+                    }
                 }
                 let mut next = (resume.as_ref().map_or(0.0, |r| r.time) + 1.0).floor().max(1.0);
                 while next < time && !cancelled() {
@@ -292,10 +309,18 @@ impl Renderer {
             return;
         }
         // Constant settings: the state at any moment is a function of time
-        // alone, so checkpoints can sit on whole seconds.
+        // alone, so checkpoints can sit on whole seconds — time zero among
+        // them, the warmed-up set a looping clip returns to on every pass
+        // (without it each loop re-ran the two-second warm-up).
         match &resume {
             Some(r) => sim.restore(r),
-            None => sim.reset(),
+            None => {
+                sim.reset();
+                sim.advance(0.0, settings);
+                if self.checkpoints.is_empty() {
+                    self.checkpoints.push(sim.snapshot_at(Some(0.0)));
+                }
+            }
         }
         let mut next = (resume.as_ref().map_or(0.0, |r| r.time) + 1.0).floor().max(1.0);
         while next < time {
@@ -535,6 +560,101 @@ mod tests {
         // Its checkpoints are good for seeking back, too.
         let back = frame(settings(&values), 3.5, None);
         same(&preview.plan(raster, &back), &Renderer::default().plan(raster, &back));
+    }
+
+    fn worn() -> GlitchSettings {
+        settings(&[("vcr", 1.0), ("tracking_offset", 0.3), ("back_tension", 0.2), ("tape_sticky", 0.5), ("dirt_buildup", 0.6), ("tape_mold", 0.4), ("signal_strength", 0.4)])
+    }
+
+    /// A looping clip comes back to its first frame every few seconds. The
+    /// preview has the warmed-up set of time zero on hand, so the frame is
+    /// exact at once: nothing to wait for. (Each loop used to re-run the
+    /// warm-up in the background and hold the last frame's picture until it
+    /// landed: the tape looked frozen for the clip's first second or two.)
+    #[test]
+    fn a_loop_back_to_the_start_is_exact_at_once() {
+        let raster = Raster::new(320, 240);
+        let step = 1.0 / 24.0;
+        let mut preview = Renderer::default();
+        preview.background = true;
+        settled(&mut preview, raster, &frame(worn(), 0.0, None));
+        for k in 0..=60 {
+            preview.plan(raster, &frame(worn(), k as f64 * step, None)); // plays on
+        }
+        let mut export = Renderer::default();
+        for k in 0..=3 {
+            // and loops
+            let f = frame(worn(), k as f64 * step, None);
+            let looped = preview.plan(raster, &f);
+            assert!(!preview.rerun_pending(), "frame {k} after the loop went to the background");
+            same(&looped, &export.plan(raster, &f));
+        }
+    }
+
+    /// The same with keyframed knobs.
+    #[test]
+    fn a_loop_back_to_the_start_is_exact_at_once_with_keyframes() {
+        let raster = Raster::new(320, 240);
+        let step = 1.0 / 24.0;
+        let history = GlitchHistory {
+            frame_duration: step,
+            id: 11,
+            settings_at: Arc::new(|t| settings(&[("vcr", 1.0), ("tracking_offset", (t / 5.0).min(0.6)), ("tape_sticky", (t / 3.0).min(1.0)), ("signal_strength", 0.4)])),
+        };
+        let at = |t: f64| frame((history.settings_at)(t), t, Some(history.clone()));
+        let mut preview = Renderer::default();
+        preview.background = true;
+        settled(&mut preview, raster, &at(0.0));
+        for k in 0..=60 {
+            preview.plan(raster, &at(k as f64 * step));
+        }
+        let mut export = Renderer::default();
+        for k in 0..=3 {
+            let f = at(k as f64 * step);
+            let looped = preview.plan(raster, &f);
+            assert!(!preview.rerun_pending(), "frame {k} after the loop went to the background");
+            same(&looped, &export.plan(raster, &f));
+        }
+    }
+
+    /// A finished background re-run is taken up by the next frame planned.
+    #[test]
+    fn a_finished_rerun_is_taken_up_by_the_next_frame() {
+        let raster = Raster::new(320, 240);
+        let f = frame(worn(), 6.0, None);
+        let exact = Renderer::default().plan(raster, &f);
+        let mut preview = Renderer::default();
+        preview.background = true;
+        let mut shown = preview.plan(raster, &f); // starts the re-run
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while shown.rows != exact.rows && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            shown = preview.plan(raster, &f);
+        }
+        same(&shown, &exact);
+    }
+
+    /// While a re-run is in flight a playing picture keeps moving: the state
+    /// on hand runs on by as much as the playhead did.
+    #[test]
+    fn a_playing_picture_keeps_moving_while_a_rerun_is_in_flight() {
+        let raster = Raster::new(320, 240);
+        let step = 1.0 / 24.0;
+        let mut preview = Renderer::default();
+        preview.background = true;
+        let mut last = preview.plan(raster, &frame(worn(), 40.0, None)); // a long re-run starts
+        for k in 1..=4 {
+            let next = preview.plan(raster, &frame(worn(), 40.0 + k as f64 * step, None));
+            assert_ne!(next.rows, last.rows, "frame {k} stood still");
+            last = next;
+        }
+        // Paused, it holds still.
+        let f = frame(worn(), 40.0 + 4.0 * step, None);
+        let held = preview.plan(raster, &f);
+        if held.rows != last.rows {
+            // (unless the re-run landed in between, which is exact)
+            same(&held, &Renderer::default().plan(raster, &f));
+        }
     }
 
     #[test]
