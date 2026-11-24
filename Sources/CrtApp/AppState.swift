@@ -78,6 +78,9 @@ final class AppState {
 
     private(set) var videoPlaying: Bool = false
     private var playbackTask: Task<Void, Never>?
+    /// The loaded video's sound (nil = it has none). It plays whenever the
+    /// video plays, following the frames as they are shown; no controls.
+    private var videoAudio: VideoAudio?
     static let playLog = ProcessInfo.processInfo.environment["CRT_PERF_LOG"] != nil
     /// CRT_FORCE_SEEK_DECODE=1: decode playback frames by seeking to each one
     /// (the pre-0.9 path, and what a rotated track still needs).
@@ -212,6 +215,7 @@ final class AppState {
         guard let source = videoSource, !exportInProgress else { return }
         videoPlaying = true
         playbackDropped = 0
+        playbackDisplayed = 0
         playbackLoops = 0
         playbackCacheHits = 0
         playbackActivity = ProcessInfo.processInfo.beginActivity(
@@ -250,6 +254,7 @@ final class AppState {
         pipe.start()
         pipelineScheduleBase = frame
         playbackClockStart = nil    // re-prime on the next display tick
+        videoAudio?.restart()       // the sound starts again with its first frame
     }
 
     /// Where the consumer's schedule (re)starts, in producer-absolute frames.
@@ -332,6 +337,7 @@ final class AppState {
         tickFrame()
         markChainDirty()
         playbackDisplayed += 1
+        videoAudio?.frameShown(mediaTime: out.mediaTime)
 
         if Self.playLog, playbackDisplayed % 48 == 0 {
             let span = playbackLogStart.duration(to: .now)
@@ -341,17 +347,53 @@ final class AppState {
                          48.0 / max(s, 0.001), playbackDropped, playbackCacheHits,
                          chainInputCache.count, chainInputCache.bytes >> 20,
                          pipe.takeStatsLine() as NSString), stderr)
+            logAudio(mediaTime: out.mediaTime)
             playbackLogStart = .now
         }
     }
 
+    /// CRT_PERF_LOG: where the sound is against the frame just shown.
+    private func logAudio(mediaTime: Double) {
+        guard let audio = videoAudio else { fputs("[audio] none\n", stderr); return }
+        if let off = audio.offset(fromMediaTime: mediaTime) {
+            fputs(String(format: "[audio] at %.2f s, %+.0f ms from the picture\n", mediaTime, off * 1000), stderr)
+        } else {
+            fputs(String(format: "[audio] at %.2f s, %@\n", mediaTime,
+                         audio.isSilenced ? "silent (picture slower than real time)" : "not playing"), stderr)
+        }
+    }
+
     /// Pre-pipeline path: seek + decode each frame via the image generator.
+    ///
+    /// Seek-decoding is usually slower than the clip's frame rate (10–14
+    /// fps measured on rotated 480p and 1080p clips), so this keeps to the
+    /// clock the way pipelined playback does: frames whose time has passed
+    /// are skipped, and the clip — and its sound — runs at its real speed.
+    /// The Digital video stage needs every frame in order, so with it on
+    /// every frame is shown and playback slows instead.
     private func legacyPlaybackTask(source vs: VideoSource) -> Task<Void, Never> {
         Task { @MainActor [weak self] in
+            let frameSeconds = 1.0 / Double(max(1, vs.frameRate))
+            let frameDuration = Duration.seconds(frameSeconds)
+            func seconds(_ d: Duration) -> Double {
+                Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+            }
+            // When the frame after the one on screen is due.
             var deadline = ContinuousClock.now
+            // How long a frame takes to arrive, so the one asked for is the
+            // one due when it does.
+            var decodeSeconds = 0.0
             while let self, self.videoPlaying, !Task.isCancelled {
                 guard !self.exportInProgress else { self.stopPlayback(); return }
-                let next = (self.currentFrameIndex + 1) % vs.totalFrames
+                let everyFrame = self.digitalEnabled
+                let asked = ContinuousClock.now
+                var skip = 0
+                if !everyFrame {
+                    skip = max(0, Int((seconds(deadline.duration(to: asked)) + decodeSeconds) / frameSeconds))
+                    deadline = deadline.advanced(by: frameDuration * skip)
+                    self.playbackDropped += skip
+                }
+                let next = (self.currentFrameIndex + 1 + skip) % max(1, vs.totalFrames)
                 self.suppressFrameReload = true
                 self.currentFrameIndex = next
                 self.suppressFrameReload = false
@@ -360,15 +402,20 @@ final class AppState {
                     self.applyTimeline(atFrame: next)
                     self.tickFrame()
                     self.markChainDirty()
+                    let mediaTime = vs.seconds(ofFrame: next)
+                    self.videoAudio?.frameShown(mediaTime: mediaTime)
+                    self.playbackDisplayed += 1
+                    if Self.playLog, self.playbackDisplayed % 48 == 0 { self.logAudio(mediaTime: mediaTime) }
                 } catch {
                     self.stopPlayback(); return
                 }
-                let frameDuration = Duration.seconds(1.0 / Double(max(1, vs.frameRate)))
-                deadline = deadline.advanced(by: frameDuration)
                 let now = ContinuousClock.now
+                let took = seconds(asked.duration(to: now))
+                decodeSeconds = decodeSeconds == 0 ? took : decodeSeconds * 0.8 + took * 0.2
+                deadline = deadline.advanced(by: frameDuration)
                 if deadline > now {
                     try? await Task.sleep(until: deadline, clock: .continuous)
-                } else if now - deadline > frameDuration {
+                } else if everyFrame, now - deadline > frameDuration {
                     deadline = now
                 }
             }
@@ -382,6 +429,7 @@ final class AppState {
         playbackPipeline?.stop()
         playbackPipeline = nil
         playbackClockStart = nil
+        videoAudio?.stop()
         if let activity = playbackActivity {
             ProcessInfo.processInfo.endActivity(activity)
             playbackActivity = nil
@@ -1929,6 +1977,7 @@ final class AppState {
         chainInputCache.invalidateAll()
         cachedRanges = []
         sourceKind = nil
+        videoAudio = nil
         sourceError = nil
         currentFrameIndex = 0
 
@@ -1942,6 +1991,8 @@ final class AppState {
                 sourceKind = .video(vs)
                 let tex = try await vs.frame(atIndex: 0, crop: activeCrop)
                 sourceTexture = tex
+                let audio = await VideoAudio.make(for: vs.asset)
+                if videoSource === vs { videoAudio = audio }
             } catch {
                 sourceError = error.localizedDescription
             }

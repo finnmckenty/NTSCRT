@@ -38,6 +38,8 @@ public final class PlaybackPipeline {
         public let frameIndex: Int
         /// Monotonic across loop wraps, for real-time scheduling.
         public let absoluteIndex: Int
+        /// The frame's time in the file (seconds) — what its sound follows.
+        public let mediaTime: Double
         public let generation: Int
         let retain: CVPixelBuffer
     }
@@ -401,6 +403,7 @@ public final class PlaybackPipeline {
                                  processed: slots[i]?.texture,
                                  frameIndex: p.frameIndex,
                                  absoluteIndex: p.absolute,
+                                 mediaTime: CMTimeGetSeconds(p.frame.presentationTime),
                                  generation: p.generation,
                                  retain: p.frame._retain)
                 if !queue.push(out) { return }

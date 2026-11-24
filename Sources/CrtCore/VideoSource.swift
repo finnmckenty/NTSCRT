@@ -19,6 +19,12 @@ public final class VideoSource {
     public let frameRate: Float
     public let pixelSize: CGSize
     public let totalFrames: Int
+    /// One frame's length in seconds: what a frame index is multiplied by
+    /// to get its time, everywhere (see `time(ofFrame:)`).
+    public let frameSeconds: Double
+    /// The same as an exact fraction (1001/30000 s at 29.97 fps), when the
+    /// track has one that fits (see `frameLength`).
+    private let exactFrameDuration: CMTime?
 
     private let device: MTLDevice
     private let textureCache: CVMetalTextureCache
@@ -49,15 +55,20 @@ public final class VideoSource {
         guard let track = tracks.first else { throw Error.noVideoTrack }
         self.videoTrack = track
 
-        let (duration, fps, size) = try await (
+        let (duration, fps, size, minFrame) = try await (
             asset.load(.duration),
             track.load(.nominalFrameRate),
-            track.load(.naturalSize)
+            track.load(.naturalSize),
+            track.load(.minFrameDuration)
         )
         self.durationSeconds = CMTimeGetSeconds(duration)
         self.frameRate = fps > 0 ? fps : 30
         self.pixelSize = size
         self.totalFrames = max(1, Int((self.durationSeconds * Double(self.frameRate)).rounded()))
+        let length = Self.frameLength(minFrameDuration: minFrame, nominalRate: Double(self.frameRate),
+                                      durationSeconds: self.durationSeconds, sampleSpan: Self.sampleSpan(of: track))
+        self.frameSeconds = length.seconds
+        self.exactFrameDuration = length.exact
 
         var cache: CVMetalTextureCache?
         let r = CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
@@ -101,9 +112,87 @@ public final class VideoSource {
         return try cgImageToTexture(cgImage)
     }
 
+    // MARK: - frame index ↔ time
+    //
+    // One rule for every path: frame i is shown from i × the frame's length.
+    // Playback and exports count decoded frames from the start, so they land
+    // on that time by themselves; anything that asks the decoder for frame i
+    // (scrubbing, a reader starting mid-clip) must ask for the same time.
+    // Through 0.28.1 those asked for i / round(fps): 0.1% early at 29.97 and
+    // 23.976 fps, so one frame early from frame 1 and 18 frames early ten
+    // minutes in, and the clip's last 0.1% couldn't be reached.
+
+    /// From the file's sample table: how many frames follow the first, and
+    /// how long after it the last one is shown. Nil when the file has no
+    /// table to step through. (Under 2 ms on an 11-minute clip.)
+    static func sampleSpan(of track: AVAssetTrack) -> (steps: Int, seconds: Double)? {
+        guard track.canProvideSampleCursors,
+              let cursor = track.makeSampleCursorAtFirstSampleInDecodeOrder() else { return nil }
+        let first = cursor.presentationTimeStamp
+        let steps = cursor.stepInPresentationOrder(byCount: Int64.max)
+        let seconds = CMTimeGetSeconds(CMTimeSubtract(cursor.presentationTimeStamp, first))
+        guard steps > 0, seconds.isFinite, seconds > 0 else { return nil }
+        return (Int(steps), seconds)
+    }
+
+    /// One frame's length. The spacing the sample table shows (last frame's
+    /// time ÷ frames after the first), as the track's own fraction when that
+    /// fraction puts the last frame within a quarter frame of where it is:
+    /// a constant-rate clip, whose frame times are then exact. The track's
+    /// `minFrameDuration` can't be taken on its own word: in a file that
+    /// keeps time in 1/600 s, 29.97 fps footage has frames of 20 and 21
+    /// units and a shortest frame of 1/30 s (AVAssetWriter's default, so
+    /// this app's own exports); a clip whose frames vary in length has a
+    /// shortest frame that says nothing about where frame i is. Without a
+    /// sample table: the track's fraction if the clip's length counted in
+    /// it is within a quarter frame of length × nominal rate, else
+    /// 1 / the nominal rate.
+    static func frameLength(minFrameDuration d: CMTime, nominalRate: Double, durationSeconds: Double,
+                            sampleSpan: (steps: Int, seconds: Double)?) -> (seconds: Double, exact: CMTime?) {
+        let trackSeconds = d.isNumeric && d.value > 0 ? CMTimeGetSeconds(d) : nil
+        if let span = sampleSpan, span.steps > 0, span.seconds > 0 {
+            if let trackSeconds, abs(Double(span.steps) * trackSeconds - span.seconds) <= trackSeconds / 4 {
+                return (trackSeconds, d)
+            }
+            return (span.seconds / Double(span.steps), nil)
+        }
+        let rate = nominalRate > 0 ? nominalRate : 30
+        if let trackSeconds, durationSeconds.isFinite,
+           abs(durationSeconds / trackSeconds - durationSeconds * rate) <= 0.25 {
+            return (trackSeconds, d)
+        }
+        return (1 / rate, nil)
+    }
+
+    /// When frame `index` goes on screen (its presentation time).
+    public func time(ofFrame index: Int) -> CMTime {
+        if let d = exactFrameDuration { return CMTimeMultiply(d, multiplier: Int32(clamping: index)) }
+        return CMTime(seconds: Double(index) * frameSeconds, preferredTimescale: Self.fineTimescale)
+    }
+
+    /// `time(ofFrame:)` in seconds.
+    public func seconds(ofFrame index: Int) -> Double {
+        exactFrameDuration == nil ? Double(index) * frameSeconds : CMTimeGetSeconds(time(ofFrame: index))
+    }
+
+    /// The time to ask a decoder for to get frame `index`: the middle of the
+    /// frame. Both decoders hand back the frame on screen at the time asked
+    /// for (measured: the image generator at zero tolerance, and an asset
+    /// reader's first frame), so half a frame of room either way absorbs
+    /// rounding and frames that sit slightly off the grid (a file whose
+    /// timescale can't hold 1001/30000 s, as AVAssetWriter's default can't).
+    func decodeTime(ofFrame index: Int) -> CMTime {
+        if let d = exactFrameDuration {
+            return CMTimeMultiplyByRatio(d, multiplier: Int32(clamping: 2 * index + 1), divisor: 2)
+        }
+        return CMTime(seconds: (Double(index) + 0.5) * frameSeconds, preferredTimescale: Self.fineTimescale)
+    }
+
+    private static let fineTimescale: CMTimeScale = 1_000_000
+
     /// A frame as a CGImage, whole (for showing what a crop leaves out).
     public func cgImage(atIndex index: Int) async throws -> CGImage {
-        let time = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(frameRate.rounded()))
+        let time = decodeTime(ofFrame: index)
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CGImage, Swift.Error>) in
             imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, result, error in
                 if let error {
@@ -118,8 +207,7 @@ public final class VideoSource {
     }
 
     public func frame(atIndex index: Int, crop: SourceCrop? = nil) async throws -> MTLTexture {
-        let t = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(frameRate.rounded()))
-        return try await frame(at: t, crop: crop)
+        try await frame(at: decodeTime(ofFrame: index), crop: crop)
     }
 
     private func cgImageToTexture(_ cg: CGImage) throws -> MTLTexture {
@@ -164,12 +252,18 @@ public final class VideoSource {
         /// the decoder's own buffers, zero-copy.
         let crop: SourceCrop?
         private let ring: CropRing?
+        /// A reader started mid-clip stamps its first frame with the time it
+        /// was started at (measured; the frame carries nothing saying how
+        /// far in that is), not the frame's own: this is the frame's own.
+        private var firstFrameTime: CMTime?
         /// More frames than any consumer holds at once (playback: queue +
         /// on screen + previous + the two being processed).
         public static let cropDepth = 12
 
         init(reader: AVAssetReader, output: AVAssetReaderTrackOutput,
-             device: MTLDevice, textureCache: CVMetalTextureCache, crop: SourceCrop?) {
+             device: MTLDevice, textureCache: CVMetalTextureCache, crop: SourceCrop?,
+             firstFrameTime: CMTime? = nil) {
+            self.firstFrameTime = firstFrameTime
             self.reader = reader
             self.output = output
             self.device = device
@@ -204,7 +298,8 @@ public final class VideoSource {
         public func nextFrame() -> Frame? {
             guard let sb = output.copyNextSampleBuffer(),
                   let pb = CMSampleBufferGetImageBuffer(sb) else { return nil }
-            let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+            let pts = firstFrameTime ?? CMSampleBufferGetPresentationTimeStamp(sb)
+            firstFrameTime = nil
             let w = CVPixelBufferGetWidth(pb)
             let h = CVPixelBufferGetHeight(pb)
             if let crop, let ring, crop.crops(width: w, height: h) {
@@ -260,8 +355,8 @@ public final class VideoSource {
         catch { throw Error.readerSetup("\(error)") }
         // Must be set before reading starts (SequentialReader's init starts it).
         if startFrame > 0 {
-            let start = CMTime(value: CMTimeValue(startFrame),
-                               timescale: CMTimeScale(frameRate.rounded()))
+            // The reader's first frame is the one on screen at this time.
+            let start = decodeTime(ofFrame: startFrame)
             reader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
         }
         let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: [
@@ -274,6 +369,7 @@ public final class VideoSource {
         }
         reader.add(output)
         return SequentialReader(reader: reader, output: output,
-                                device: device, textureCache: textureCache, crop: crop)
+                                device: device, textureCache: textureCache, crop: crop,
+                                firstFrameTime: startFrame > 0 ? time(ofFrame: startFrame) : nil)
     }
 }

@@ -1362,21 +1362,34 @@ struct ContentView: View {
                 guard a.count == b.count, !a.isEmpty else { return .infinity }
                 return zip(a, b).map { abs($0 - $1) }.reduce(0, +) / Double(a.count)
             }
+            // CRT_PLAY_FRAME_WINDOW=<k> compares against k frames either
+            // side (default 2); CRT_PLAY_FRAME_DUMP=<dir> writes the frame
+            // playback stopped on and the same index scrubbed to, as PNGs.
+            let window = max(1, env["CRT_PLAY_FRAME_WINDOW"].flatMap(Int.init) ?? 2)
+            let dumpDir = env["CRT_PLAY_FRAME_DUMP"].map { URL(fileURLWithPath: $0) }
+            func dump(_ name: String) {
+                guard let dumpDir, let t = state.sourceTexture, let cg = try? makeCGImage(from: t) else { return }
+                try? FileManager.default.createDirectory(at: dumpDir, withIntermediateDirectories: true)
+                try? writePNG(cg, to: dumpDir.appendingPathComponent(name))
+            }
             state.ntscEnabled = false
             state.togglePlayback()
             var spins = 0
-            while state.currentFrameIndex < target && spins < 400 {
+            // 20 ms a spin: time for the clip to get there in real time, and more.
+            while state.currentFrameIndex < target && spins < 400 + target * 4 {
                 try? await Task.sleep(for: .milliseconds(20)); spins += 1
             }
             state.stopPlayback()
             try? await Task.sleep(for: .milliseconds(150))
             let playedIndex = state.currentFrameIndex
             let played = signature()
+            dump("played-\(playedIndex).png")
 
             var best = (index: -1, dist: Double.infinity)
-            for candidate in (playedIndex - 2)...(playedIndex + 2) where candidate >= 0 {
+            for candidate in (playedIndex - window)...(playedIndex + window) where candidate >= 0 {
                 state.currentFrameIndex = candidate
                 try? await Task.sleep(for: .milliseconds(350))
+                if candidate == playedIndex { dump("scrubbed-\(playedIndex).png") }
                 let d = distance(played, signature())
                 print(String(format: "FRAMECHK   vs seeked frame %d: distance %.3f", candidate, d))
                 if d < best.dist { best = (candidate, d) }
