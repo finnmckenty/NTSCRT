@@ -712,6 +712,7 @@ impl Engine {
         let rendered = texture(&self.device, size, usage, "preview render");
         match &settings.shader {
             Some(shader) => {
+                let chain_input = self.shader_input(enc, &chain_input);
                 self.load_chain(shader)?;
                 let chain = &mut self.chain.as_mut().expect("loaded").chain;
                 let view = rendered.create_view(&Default::default());
@@ -744,11 +745,12 @@ impl Engine {
         Ok(shown)
     }
 
-    /// An exported frame at exactly `out`: the chain into `out`, or — when
-    /// lines would land on a fractional number of rows — at a whole multiple
-    /// of the chain input, box-filtered down (the Mac's SupersampledPass).
-    /// Without the CRT, the chain input enlarged with hard edges to the next
-    /// whole multiple and filtered down (the Mac's ShaderBypass).
+    /// An exported frame at exactly `out`: the chain at the size the preview
+    /// renders it (`export::render_size`), box-filtered to `out` as the
+    /// preview is to its window — so an export is the preview's picture (the
+    /// Mac's SupersampledPass). Without the CRT, the chain input enlarged
+    /// with hard edges to the next whole multiple and filtered down (the
+    /// Mac's ShaderBypass).
     pub fn render_export(&mut self, settings: &Settings, out: (u32, u32), earlier: Option<&mut FrameVisitor<'_>>) -> Result<Image> {
         let t = std::time::Instant::now();
         let input = self.prepare(settings, earlier)?;
@@ -763,16 +765,7 @@ impl Engine {
         self.howl_feed(&mut enc, &chain_input, settings)?;
         let (iw, ih) = (chain_input.width(), chain_input.height());
         let render_size = match &settings.shader {
-            Some(_) => {
-                let k = export::supersample_factor(ih, out.1);
-                if k > 1 {
-                    let h = ih * k;
-                    let w = (out.0 as f64 * h as f64 / out.1 as f64).round() as u32;
-                    if w > out.0 && h > out.1 { (w, h) } else { out }
-                } else {
-                    out
-                }
-            }
+            Some(_) => export::render_size((iw, ih), out),
             None => {
                 let k = out.1.div_ceil(ih).max(out.0.div_ceil(iw)).max(1);
                 if out.1 % ih == 0 && out.0 % iw == 0 { out } else { (iw * k, ih * k) }
@@ -785,6 +778,7 @@ impl Engine {
         let rendered = texture(&self.device, render_size, usage, "export render");
         match &settings.shader {
             Some(shader) => {
+                let chain_input = self.shader_input(&mut enc, &chain_input);
                 self.load_chain(shader)?;
                 let chain = &mut self.chain.as_mut().expect("loaded").chain;
                 let view = rendered.create_view(&Default::default());
@@ -880,6 +874,26 @@ impl Engine {
             }
         }
         dst
+    }
+
+    /// What the shader is given: the chain input, or — when that is too
+    /// large to render at two rows a line (the Downscale off on a large
+    /// picture) — the chain input integrated down to the largest size that
+    /// can be (`preview::shader_input`). Mac: Pipeline.shaderInput.
+    pub(crate) fn shader_input(&self, enc: &mut wgpu::CommandEncoder, chain_input: &wgpu::Texture) -> wgpu::Texture {
+        let from = (chain_input.width(), chain_input.height());
+        let size = preview::shader_input(from);
+        if size == from {
+            return chain_input.clone();
+        }
+        let out = texture(
+            &self.device,
+            size,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+            "shader input",
+        );
+        self.dispatch(enc, &self.area, chain_input, &out, &[from.0, from.1, size.0, size.1], size);
+        out
     }
 
     fn dispatch(&self, enc: &mut wgpu::CommandEncoder, pipeline: &wgpu::ComputePipeline, src: &wgpu::Texture, dst: &wgpu::Texture, uniform: &[u32], grid: (u32, u32)) {

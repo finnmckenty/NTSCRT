@@ -375,6 +375,12 @@ impl Engine {
     /// Draw this frame's TV picture (the chain input through the loop's copy
     /// of the CRT chain, or enlarged with hard edges without it) into the ring.
     pub(crate) fn howl_feed(&mut self, enc: &mut wgpu::CommandEncoder, chain_input: &wgpu::Texture, settings: &Settings) -> Result<()> {
+        if self.howl.is_none() {
+            return Ok(());
+        }
+        // (The shader's picture, as everywhere the chain renders.)
+        let given = if settings.shader.is_some() { self.shader_input(enc, chain_input) } else { chain_input.clone() };
+        let chain_input = &given;
         let Some(h) = self.howl.as_mut() else { return Ok(()) };
         let target = h.ring[h.write_slot()].clone();
         let size = h.feedback_size;

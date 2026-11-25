@@ -1,16 +1,19 @@
-//! How big the preview renders and how big it's shown: a port of the Mac's
-//! `PreviewScaler` (PreviewScaling.swift), same rules and the same tests.
+//! The size the CRT shader renders at, and how big the preview is shown: a
+//! port of the Mac's `PreviewScaler` (PreviewScaling.swift), same rules and
+//! the same tests.
 //!
-//! Two requirements pull against each other:
-//! 1. The look must not depend on the window. CRT shaders draw scanlines and
-//!    masks in output pixels, so the multiple they render at *is* the look;
-//!    below about 6 rows per line the glow shaders clip and scanlines vanish.
-//!    So the chain renders at a whole multiple of at least 6.
+//! 1. One picture, however it is looked at. CRT shaders draw scanlines and
+//!    masks in output pixels, so the multiple they render at *is* the look:
+//!    at 1 row a line there is no room for a scanline, and a mask's stripes
+//!    are twice as coarse against the picture at 3× as at 6×. So the shader
+//!    renders at one multiple that depends only on the picture going into it
+//!    (`render_multiple`): the same in any window, with integer scale and
+//!    without, and in every export (`export::render_size`). The preview and
+//!    an export are that one render scaled to the window or the file by the
+//!    same filter. (Through 0.29.1 the preview rendered at 6× and up, by
+//!    window size, and an export straight at its own size.)
 //! 2. Integer scale must snap: every line gets the same whole number of
 //!    screen rows, so the picture steps between sizes and is letterboxed.
-//!
-//! Both hold by rendering at a whole multiple that is itself a whole multiple
-//! of the displayed one, and box-filtering down to the display size.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewPlan {
@@ -36,7 +39,56 @@ impl PreviewPlan {
 /// Fewest output rows per line the chain may render at (the glow shaders
 /// clip 21% of the frame at 1, 6% at 2, 0.55% at 4, none at 6).
 pub const MIN_RENDER_MULTIPLE: u32 = 6;
+/// The largest render, on its long edge.
 pub const MAX_LONG_EDGE: u32 = 4096;
+/// The render's long edge is at least this, when the multiple allows it: a
+/// 1920 export (the default) of a small picture is then scaled down from
+/// the render, never up (256 wide renders at 8×, 160 at 12×).
+pub const MIN_RENDER_LONG_EDGE: u32 = 1920;
+
+/// The picture the CRT shader is given, for one this size coming out of the
+/// Downscale (or straight from the source, with the Downscale off): itself,
+/// unless it is too large to render at two rows a line within the budget —
+/// then the largest of its shape that can be (2048 on its long edge). A
+/// shader drawing scanlines needs at least two rows for each line it is
+/// given: at one it draws none, only its mask, and the aperture shader
+/// divides by the whole number of rows a line — black below one, and at
+/// exactly one for line counts whose reciprocal rounds down (2544). The
+/// engine scales the picture to this size on its way into the shader.
+pub fn shader_input(size: (u32, u32)) -> (u32, u32) {
+    shader_input_within(size, MAX_LONG_EDGE)
+}
+
+pub fn shader_input_within(size: (u32, u32), max_long_edge: u32) -> (u32, u32) {
+    let long = size.0.max(size.1);
+    if size.0 == 0 || size.1 == 0 || long * 2 <= max_long_edge {
+        return size;
+    }
+    let scale = (max_long_edge / 2) as f64 / long as f64;
+    (((size.0 as f64 * scale).round() as u32).max(1), ((size.1 as f64 * scale).round() as u32).max(1))
+}
+
+/// The multiple of the picture going into the CRT shader (`shader_input`)
+/// that the shader renders at, for the preview and exports alike: the
+/// smallest even one that reaches both floors, stepped down to fit the
+/// texture budget (a 1024-wide picture renders at 4×, a 1920-wide one at
+/// 2×) — never under 2. Even, because at odd multiples the glow shaders'
+/// half-texel scanline offset jitters line spacing.
+pub fn render_multiple(input: (u32, u32)) -> u32 {
+    render_multiple_within(input, MIN_RENDER_MULTIPLE, MAX_LONG_EDGE)
+}
+
+pub fn render_multiple_within(input: (u32, u32), min_render: u32, max_long_edge: u32) -> u32 {
+    let long = input.0.max(input.1).max(1);
+    let mut m = min_render.max(2).max(MIN_RENDER_LONG_EDGE.div_ceil(long));
+    if m % 2 == 1 {
+        m += 1;
+    }
+    while m > 2 && long * m > max_long_edge {
+        m -= 2;
+    }
+    m
+}
 
 pub fn plan(input: (u32, u32), drawable: (u32, u32), integer_scale: bool) -> PreviewPlan {
     plan_with(input, drawable, integer_scale, MIN_RENDER_MULTIPLE, MAX_LONG_EDGE)
@@ -59,14 +111,12 @@ pub fn plan_with(input: (u32, u32), drawable: (u32, u32), integer_scale: bool, m
     if iw == 0 || ih == 0 {
         return fill_at_drawable();
     }
+    // What the shader is given (the picture, or a smaller one when it is too
+    // large to render), and the one render multiple for it, whatever the
+    // window.
+    let (iw, ih) = shader_input_within((iw, ih), max_long_edge);
+    let rk = render_multiple_within((iw, ih), min_render, max_long_edge);
     if !integer_scale {
-        let mut rk = render_multiple(1, iw, ih, min_render, max_long_edge);
-        if rk > 1 && rk % 2 == 1 {
-            rk -= 1; // odd multiples jitter the glow shaders
-        }
-        if iw.max(ih) * rk > max_long_edge {
-            return fill_at_drawable();
-        }
         return PreviewPlan {
             render_width: iw * rk,
             render_height: ih * rk,
@@ -85,7 +135,6 @@ pub fn plan_with(input: (u32, u32), drawable: (u32, u32), integer_scale: bool, m
     if iw * k > dw || ih * k > dh {
         // Too small for one whole copy: fit instead, keeping the shader's rows.
         let scale = (dw as f64 / iw as f64).min(dh as f64 / ih as f64);
-        let rk = render_multiple(1, iw, ih, min_render, max_long_edge);
         return PreviewPlan {
             render_width: iw * rk,
             render_height: ih * rk,
@@ -95,7 +144,6 @@ pub fn plan_with(input: (u32, u32), drawable: (u32, u32), integer_scale: bool, m
             render_multiple: rk,
         };
     }
-    let rk = render_multiple(k, iw, ih, min_render, max_long_edge);
     PreviewPlan {
         render_width: iw * rk,
         render_height: ih * rk,
@@ -119,17 +167,6 @@ pub fn pan_limit(zoom: f32, view: f32, picture: f32) -> f32 {
     (0.5 - view / (2.0 * picture * zoom)).max(0.0)
 }
 
-/// Smallest whole multiple of `k_display` reaching the floor within the
-/// texture budget (so the downsample is an exact integer factor).
-fn render_multiple(k_display: u32, iw: u32, ih: u32, min_render: u32, max_long_edge: u32) -> u32 {
-    let long = iw.max(ih);
-    let mut factor = min_render.div_ceil(k_display).max(1);
-    while factor > 1 && long * k_display * factor > max_long_edge {
-        factor -= 1;
-    }
-    k_display * factor
-}
-
 #[cfg(test)]
 mod tests {
     //! The Mac's PreviewScalingTests, ported.
@@ -148,8 +185,6 @@ mod tests {
                 if p.display_multiple > 0 {
                     assert_eq!(p.display_width, i.0 * p.display_multiple);
                     assert_eq!(p.display_height, i.1 * p.display_multiple);
-                    assert_eq!(p.render_multiple % p.display_multiple, 0);
-                    assert_eq!(p.render_width % p.display_width, 0);
                 }
             }
         }
@@ -181,6 +216,62 @@ mod tests {
                 assert!(p.render_width.max(p.render_height) <= 4096, "{i:?} at {d:?}");
             }
         }
+    }
+
+    /// The multiple the shader renders at is the look, so it depends on the
+    /// picture alone: the same in every window, with integer scale and
+    /// without.
+    #[test]
+    fn the_render_depends_only_on_the_picture() {
+        for i in INPUTS.into_iter().chain([(256, 192), (640, 480), (1024, 768), (1920, 1080)]) {
+            let expected = render_multiple(i);
+            for d in DRAWABLES {
+                for integer in [true, false] {
+                    let p = plan(i, d, integer);
+                    assert_eq!(p.render_multiple, expected, "{i:?} in {d:?}, integer {integer}");
+                    assert_eq!((p.render_width, p.render_height), (i.0 * expected, i.1 * expected));
+                }
+            }
+        }
+        assert_eq!(render_multiple((320, 240)), 6);
+        assert_eq!(render_multiple((640, 480)), 6);
+        assert_eq!(render_multiple((256, 192)), 8);
+        assert_eq!(render_multiple((160, 120)), 12);
+        assert_eq!(render_multiple((1024, 768)), 4);
+        assert_eq!(render_multiple((1920, 1080)), 2);
+    }
+
+    /// An export renders the shader at the size the preview does, whatever
+    /// size the file is.
+    #[test]
+    fn exports_render_at_the_previews_size() {
+        for i in [(256u32, 192u32), (320, 240), (640, 480), (1024, 768), (1904, 2544)] {
+            let p = plan(i, (1500, 1100), true);
+            for long in [480u32, 1280, 1920, 3840] {
+                let target = if i.0 >= i.1 { (long, long * i.1 / i.0) } else { (long * i.0 / i.1, long) };
+                assert_eq!(crate::export::render_size(i, target), (p.render_width, p.render_height), "{i:?} into {target:?}");
+            }
+        }
+    }
+
+    /// A shader that draws scanlines needs at least two rows for each line
+    /// it is given: a picture too large for that within the budget reaches
+    /// the shader smaller.
+    #[test]
+    fn the_shader_always_gets_at_least_two_rows_a_line() {
+        for i in [(1904u32, 2544u32), (3840, 2160), (2049, 100), (6000, 4000), (4096, 4096)] {
+            let given = shader_input(i);
+            assert!(given.0.max(given.1) * 2 <= MAX_LONG_EDGE);
+            assert!((given.0 as f64 / given.1 as f64 - i.0 as f64 / i.1 as f64).abs() < 0.01);
+            for integer in [true, false] {
+                let p = plan(i, (1500, 1100), integer);
+                assert!(p.render_multiple >= 2 && p.render_multiple % 2 == 0);
+                assert_eq!(p.render_height, given.1 * p.render_multiple);
+                assert!(p.render_width.max(p.render_height) <= MAX_LONG_EDGE);
+            }
+        }
+        assert_eq!(shader_input((2048, 1536)), (2048, 1536));
+        assert_eq!(shader_input((640, 480)), (640, 480));
     }
 
     #[test]

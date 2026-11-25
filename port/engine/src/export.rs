@@ -1,31 +1,31 @@
-//! Export sizes and the scanline guard: ports of the Mac's `ScanlineGrid`,
+//! Export sizes: ports of the Mac's `ScanlineGrid`, `SupersampledPass`,
 //! `AppState.exportVideoSize` / `exportGifSize` / `exportBitrate`.
 //!
-//! CRT shaders draw scanlines in output pixels. When the output height isn't
-//! a whole multiple of the chain input's, lines land on alternately one and
-//! two rows and the pattern bands. Two ways out, as on the Mac: render at a
-//! whole multiple and integrate down (`supersample_factor`), or snap the size
-//! onto the grid (`snapped_size`).
+//! CRT shaders draw scanlines and masks in output pixels, so the size they
+//! render at is part of the look. Every export renders the shader at the
+//! size the preview does (`preview::render_multiple`: a whole even multiple
+//! of the picture going in, the same at any output size) and integrates
+//! that down — or, for an output larger than the render, up — to the size
+//! asked for, as the preview does to fit its window. So an export looks
+//! like the preview, and a line never lands on a fractional number of
+//! rendered rows. A size that is itself a whole multiple of the picture
+//! (`snapped_size`) scales every line and column alike.
 
-/// Multiple of the chain input to render at before box-filtering down to
-/// `target_height`; 1 = render straight to the target.
-pub fn supersample_factor(input_height: u32, target_height: u32) -> u32 {
-    if input_height == 0 || target_height == 0 || target_height % input_height == 0 {
-        return 1;
+/// The size the shader renders at for `chain_input` (width, scan lines):
+/// the preview's multiple of the picture. The picture's shape is the
+/// target's: with one field each line stands for two picture rows, and the
+/// render has whole lines either way. Mac: SupersampledPass.renderSize.
+pub fn render_size(chain_input: (u32, u32), target: (u32, u32)) -> (u32, u32) {
+    if chain_input.0 == 0 || chain_input.1 == 0 || target.0 == 0 || target.1 == 0 {
+        return target;
     }
-    // At 3+ rows per line the scanlines are already resolved.
-    if target_height as f64 / input_height as f64 >= 3.0 {
-        return 1;
-    }
-    // 4 rows per line, even, stepped down when it would be disproportionate.
-    let mut k = 4;
-    while k > 2 && (k * input_height > 4 * target_height || k * input_height > 4096) {
-        k -= 2;
-    }
-    if k * input_height > 4 * target_height || k * input_height > 4096 {
-        return 1;
-    }
-    k
+    let picture_height = chain_input.0 as f64 * target.1 as f64 / target.0 as f64;
+    let line_height = ((picture_height / chain_input.1 as f64).round() as u32).max(1);
+    // (The shader's picture: this one, or a smaller one when it is too
+    // large to render; the engine makes it.)
+    let lines = crate::preview::shader_input(chain_input);
+    let m = crate::preview::render_multiple((lines.0, lines.1 * line_height));
+    (lines.0 * m, lines.1 * line_height * m)
 }
 
 /// The nearest size whose height is a whole multiple of the input height
@@ -88,15 +88,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supersamples_only_below_three_rows_a_line() {
-        assert_eq!(supersample_factor(240, 960), 1, "an exact multiple is left alone");
-        assert_eq!(supersample_factor(240, 1080), 1, "4.5 rows a line resolves already");
-        assert_eq!(supersample_factor(416, 702), 4, "1.69 rows a line: render 4 per line");
-        // 4K with no downscale into a 540-row GIF is already minifying.
-        assert_eq!(supersample_factor(2160, 540), 1);
-        // Too big for the texture budget at 4 and 2.
-        assert_eq!(supersample_factor(1200, 2000), 2, "4× would pass 4096 rows; 2× fits");
-        assert_eq!(supersample_factor(2100, 2200), 1, "even 2× passes 4096 rows");
+    fn renders_at_the_previews_size_whatever_the_file() {
+        assert_eq!(render_size((320, 240), (1920, 1440)), (1920, 1440));
+        assert_eq!(render_size((320, 240), (480, 360)), (1920, 1440));
+        assert_eq!(render_size((640, 480), (1920, 1440)), (3840, 2880));
+        assert_eq!(render_size((256, 192), (1920, 1440)), (2048, 1536));
+        // One field: 300 lines, each two picture rows; whole lines.
+        assert_eq!(render_size((480, 300), (640, 800)), (2880, 3600));
+        // Too large to render at two rows a line: the shader gets it smaller.
+        assert_eq!(render_size((1904, 2544), (1436, 1920)), (3066, 4096));
     }
 
     #[test]

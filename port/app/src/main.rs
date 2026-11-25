@@ -1295,7 +1295,7 @@ impl App {
                 });
             }
             ui.checkbox(&mut self.export_snap, "Snap size to scanline grid")
-                .on_hover_text("Pick a nearby size where every scanline lands evenly. Without it, exports avoid banding by rendering larger and scaling down.");
+                .on_hover_text("Pick a nearby size where every scanline lands evenly. Either way the export is the picture in the preview, scaled to the file's size.");
             if let Some((w, h)) = self.export_size() {
                 let mut line = format!("{w} × {h}");
                 if self.export_format == Format::Gif {
