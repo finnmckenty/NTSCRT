@@ -2409,11 +2409,12 @@ struct ContentView: View {
             let bytes = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
             let bpf = Double(bytes ?? 0) / Double(w * h * frames)
             print("GIF_SELFTEST \(w)x\(h) frames=\(frames) fps=\(state.gifFPS) bytes=\(bytes ?? 0) bytesPerPxPerFrame=\(String(format: "%.3f", bpf))")
-            // Sanity-check the supersample rule across regimes.
+            // The export's render size and the snapped size across regimes.
             for (inH, tgtH) in [(240, 404), (416, 702), (240, 1080), (2160, 702), (1080, 540)] {
-                let k = ScanlineGrid.supersampleFactor(inputHeight: inH, targetHeight: tgtH)
-                let snap = ScanlineGrid.snappedSize(inputWidth: inH * 4 / 3, inputHeight: inH, targetHeight: tgtH)
-                print("SS input=\(inH) target=\(tgtH) -> k=\(k) renderH=\(k*inH) | snapped=\(snap.width)x\(snap.height) rows/line=\(String(format: "%.2f", Double(snap.height)/Double(inH)))")
+                let inW = inH * 4 / 3
+                let r = SupersampledPass.renderSize(chainInput: (inW, inH), target: (tgtH * 4 / 3, tgtH))
+                let snap = ScanlineGrid.snappedSize(inputWidth: inW, inputHeight: inH, targetHeight: tgtH)
+                print("SS input=\(inH) target=\(tgtH) -> render=\(r.map { "\($0.width)x\($0.height)" } ?? "at target") | snapped=\(snap.width)x\(snap.height) rows/line=\(String(format: "%.2f", Double(snap.height)/Double(inH)))")
             }
             exit(0)
         } catch {

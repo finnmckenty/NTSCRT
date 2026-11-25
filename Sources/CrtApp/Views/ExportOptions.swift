@@ -60,7 +60,7 @@ struct ExportVideoOptions: View {
             Toggle("Snap size to scanline grid", isOn: $state.snapExportToScanlineGrid)
                 .toggleStyle(.checkbox)
                 .font(.caption)
-                .tooltip("Round the output so every source line gets the same whole number of rows — the sizes where scanlines land perfectly even. Off, the exporter renders larger and averages down instead, which keeps your exact dimensions.")
+                .tooltip("Round the output so every source line gets the same whole number of rows — the sizes where scanlines land perfectly even. Off, you keep your exact dimensions. Either way the export is the picture in the preview, scaled to the file's size.")
 
             if state.exportFormat.isGIF {
                 gifControls

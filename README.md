@@ -106,7 +106,8 @@ Click **Export** (⌘E). Exports use the same switches as the preview, and the s
 - **Video**: H.264 or HEVC .mp4, or ProRes .mov, with audio. Scanlines are hard on codecs, so use High quality or above, or ProRes for editing.
 - **GIF**: its own width and frame rate. The panel estimates the file size and warns past about 10 MB (a 5-second, 480 px GIF is around 8 MB).
 - **Loop** repeats the content inside the file (3 turns a 6-second clip into 18 seconds), for places that don't loop video.
-- **Snap size to scanline grid** picks a nearby size where every scanline lands evenly. Without it, exports still avoid banding by rendering larger and scaling down.
+- **An export is the picture in the preview**: the CRT is drawn once, at a size set by the picture going into it, and scaled to the window or the file.
+- **Snap size to scanline grid** picks a nearby size where every scanline lands evenly.
 
 ### Screen Loop
 

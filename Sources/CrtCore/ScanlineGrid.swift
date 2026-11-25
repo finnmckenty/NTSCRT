@@ -2,48 +2,21 @@ import Foundation
 import Metal
 import CrtAppBridge
 
-/// CRT shaders draw their scanline and mask structure in *output* pixels.
-/// When the output height isn't a whole multiple of the chain input height,
-/// one source line covers a fractional number of rows (416 lines into 702
-/// rows = 1.69), so some lines land on two pixels and some on one and the
-/// phase drifts down the frame — visible as horizontal bands of scanlines.
-/// The preview avoids it by rendering large and integer-scaled; exports
-/// have to deal with it explicitly.
+/// CRT shaders draw their scanline and mask structure in *output* pixels,
+/// so the size they render at is part of the look. Every export renders the
+/// shader at the size the preview does (`PreviewScaler.renderMultiple`: a
+/// whole even multiple of the picture going in, the same at any output
+/// size) and integrates that down — or, for an output larger than the
+/// render, up — to the size asked for (`SupersampledPass`), as the preview
+/// does to fit its window. So an export looks like the preview, and a source
+/// line never lands on a fractional number of rendered rows (416 lines
+/// rendered straight into 702 rows gave some lines two rows and some one,
+/// and the scanlines banded).
 ///
-/// Two ways out, both offered:
-///  - render at a whole multiple and integrate down (`supersampleFactor`),
-///    which keeps the requested size;
-///  - snap the requested size onto the grid (`snappedSize`), which keeps
-///    the scanlines exact but changes the dimensions.
+/// An output size that is itself a whole multiple of the picture
+/// (`snappedSize`, the Export panel's "Snap size to scanline grid") scales
+/// every source line and column alike.
 public enum ScanlineGrid {
-
-    /// Multiple of the chain input to render at before downsampling to the
-    /// requested size. 1 = render straight to the target.
-    public static func supersampleFactor(inputHeight: Int, targetHeight: Int) -> Int {
-        guard inputHeight > 0, targetHeight > 0 else { return 1 }
-        // Already an exact multiple: the pattern is periodic, leave it alone
-        // (this is what snapping produces, and supersampling would only
-        // soften it).
-        if targetHeight % inputHeight == 0 { return 1 }
-
-        let rowsPerLine = Double(targetHeight) / Double(inputHeight)
-        // At 3+ rows per source line the scanlines are already well
-        // resolved; supersampling would only cost time.
-        guard rowsPerLine < 3 else { return 1 }
-
-        // Render 4 rows per source line — enough to resolve the scanline
-        // profile — using an even multiple (odd ones put the beam boundary
-        // exactly on a pixel edge in the glow shaders and reintroduce row
-        // jitter). Step down if that would be disproportionate: a large
-        // input with the downscale stage off (4K → a 540px GIF) is already
-        // minifying and must not be blown up to 8640 rows.
-        var k = 4
-        while k > 2 && (k * inputHeight > 4 * targetHeight || k * inputHeight > 4096) {
-            k -= 2
-        }
-        if k * inputHeight > 4 * targetHeight || k * inputHeight > 4096 { return 1 }
-        return k
-    }
 
     /// What the shader actually sees: the downscale output when enabled,
     /// otherwise the source itself.
@@ -75,11 +48,11 @@ public enum ScanlineGrid {
     }
 }
 
-/// Renders the chain at a whole multiple of its input and integrates the
-/// result down to the requested size, so each output pixel averages the
-/// true scanline profile instead of point-sampling an aliased one.
-/// `make` returns nil when no supersampling is needed — callers then encode
-/// straight into their target as before.
+/// Renders the chain at the preview's size for this picture and scales the
+/// result to the requested size with the filter the preview fits its window
+/// with, so the export is the picture the preview shows.
+/// `make` returns nil when the requested size is that size already —
+/// callers then encode straight into their target.
 public final class SupersampledPass {
     private let superTarget: MTLTexture
     private let downscaler: Downscaler
@@ -87,18 +60,28 @@ public final class SupersampledPass {
     public let renderWidth: Int
     public let renderHeight: Int
 
+    /// The size the shader renders at for `chainInput` (width, scan lines):
+    /// the preview's multiple of the picture. The picture's shape is the
+    /// target's: with one field each line stands for two picture rows, and
+    /// the render has whole lines either way. nil: nothing to render.
+    public static func renderSize(chainInput: (width: Int, height: Int),
+                                  target: (width: Int, height: Int)) -> (width: Int, height: Int)? {
+        guard chainInput.width > 0, chainInput.height > 0, target.width > 0, target.height > 0 else { return nil }
+        let pictureHeight = Double(chainInput.width) * Double(target.height) / Double(target.width)
+        let lineHeight = max(1, Int((pictureHeight / Double(chainInput.height)).rounded()))
+        // (The shader's picture: this one, or a smaller one when it is too
+        // large to render — Pipeline.encode makes it.)
+        let lines = PreviewScaler.shaderInput(width: chainInput.width, height: chainInput.height)
+        let m = PreviewScaler.renderMultiple(inputWidth: lines.width, inputHeight: lines.height * lineHeight)
+        return (lines.width * m, lines.height * lineHeight * m)
+    }
+
     public static func make(device: MTLDevice,
                             chainInput: (width: Int, height: Int),
                             target: (width: Int, height: Int)) -> SupersampledPass? {
-        let k = ScanlineGrid.supersampleFactor(inputHeight: chainInput.height,
-                                               targetHeight: target.height)
-        guard k > 1 else { return nil }
-        // Whole multiples of the lines; the width follows the target's shape
-        // (the picture's), which for one field isn't the lines' shape.
-        let h = chainInput.height * k
-        let w = Int((Double(target.width) * Double(h) / Double(target.height)).rounded())
-        guard w > target.width, h > target.height,
-              let tex = makeRenderTarget(device: device, width: w, height: h),
+        guard let size = renderSize(chainInput: chainInput, target: target),
+              size != target,
+              let tex = makeRenderTarget(device: device, width: size.width, height: size.height),
               let down = try? Downscaler(device: device) else { return nil }
         return SupersampledPass(superTarget: tex, downscaler: down)
     }
@@ -110,7 +93,7 @@ public final class SupersampledPass {
         self.renderHeight = superTarget.height
     }
 
-    /// Encode chain → oversized target → area-downsample into `output`.
+    /// Encode chain → the render → area-resample into `output`.
     public func encode(into commandBuffer: MTLCommandBuffer,
                        pipeline: Pipeline,
                        chain: LRShaderChain,

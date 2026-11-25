@@ -22,24 +22,30 @@ public struct PreviewScaling: Equatable {
     }
 }
 
-/// Decides the preview's render and display sizes.
+/// Decides the size the CRT shader renders at, and the preview's display
+/// size.
 ///
-/// Two requirements pull in opposite directions and this is where they are
-/// reconciled:
-///
-/// 1. **The look must not depend on the window.** CRT shaders draw scanlines
+/// 1. **One picture, however it is looked at.** CRT shaders draw scanlines
 ///    and masks in output pixels, so the multiple they render at *is* the
 ///    look — at 1 row per source line there is no room for a scanline at all
-///    and the glow clips ~21% of the frame. Hence a floor on the render
-///    multiple, independent of window size.
+///    and the glow clips ~21% of the frame, and a mask's stripes are twice
+///    as coarse against the picture at 3× as at 6×. So the shader renders at
+///    one multiple that depends only on the picture going into it
+///    (`renderMultiple`): the same in a small window and a large one, with
+///    integer scale and without, and in every export
+///    (`SupersampledPass`). The preview and an export are that one render
+///    scaled to the window or the file by the same filter, so they look the
+///    same. (Through 0.29.1 the preview rendered at 6× and up, by window
+///    size, and an export straight at its own size: a 640-wide picture was
+///    6× on screen and 3× in a 1920 file, and with Downscale off 2× and 1× —
+///    a mask shader's export showed only stripes where the preview showed a
+///    faint grid.)
 /// 2. **Integer scale must snap.** The point of it is that every source line
 ///    gets the same whole number of screen rows, so the image steps between
 ///    sizes as the window grows and is letterboxed, rather than being scaled
-///    to fit.
-///
-/// Both hold by rendering at a whole multiple that is itself a whole multiple
-/// of the displayed one: the shader always gets enough rows, and the step down
-/// to display size is an exact integer box filter (no resampling shimmer).
+///    to fit. The render and the display are both whole multiples of the
+///    picture, so every source line and column is scaled alike, with no
+///    pattern drifting across the picture.
 public enum PreviewScaler {
 
     /// Fewest output rows per source line the chain may render at. 6 is where
@@ -47,12 +53,55 @@ public enum PreviewScaler {
     /// k=2 6%, k=4 0.55%, k=6 none).
     public static let minRenderMultiple = 6
 
+    /// The render's long edge is at least this, when the multiple allows
+    /// it: a 1920 export (the default) of a small picture is then scaled
+    /// down from the render, never up (256 wide renders at 8×, 160 at 12×).
+    public static let minRenderLongEdge = 1920
+
+    /// The largest render, on its long edge.
+    public static let maxRenderLongEdge = 4096
+
+    /// The picture the CRT shader is given, for one this size coming out of
+    /// the Downscale (or straight from the source, with the Downscale off):
+    /// itself, unless it is too large to render at two rows a line within
+    /// the budget — then the largest of its shape that can be (2048 on its
+    /// long edge). A shader drawing scanlines needs at least two rows for
+    /// each line it is given. At one it draws none, only its mask; the
+    /// aperture shader divides by the whole number of rows a line and is
+    /// black below one — and at exactly one too, for line counts whose
+    /// reciprocal rounds down (2544). `Pipeline.encode` scales the picture
+    /// to this size on the way in.
+    public static func shaderInput(width: Int, height: Int,
+                                   maxLongEdge: Int = PreviewScaler.maxRenderLongEdge) -> (width: Int, height: Int) {
+        let longEdge = max(width, height)
+        guard width > 0, height > 0, longEdge * 2 > maxLongEdge else { return (width, height) }
+        let scale = Double(maxLongEdge / 2) / Double(longEdge)
+        return (max(1, Int((Double(width) * scale).rounded())), max(1, Int((Double(height) * scale).rounded())))
+    }
+
+    /// The multiple of the picture going into the CRT shader
+    /// (`shaderInput`) that the shader renders at, for the preview and
+    /// exports alike: the smallest even one that reaches both floors,
+    /// stepped down to fit the texture budget (a 1024-wide picture renders
+    /// at 4×, a 1920-wide one at 2×) — never under 2.
+    /// Even, because at odd multiples the glow shaders' half-texel scanline
+    /// offset lands beam boundaries on pixel edges and line spacing jitters.
+    public static func renderMultiple(inputWidth: Int, inputHeight: Int,
+                                      minRenderMultiple: Int = PreviewScaler.minRenderMultiple,
+                                      maxLongEdge: Int = PreviewScaler.maxRenderLongEdge) -> Int {
+        let longEdge = max(1, inputWidth, inputHeight)
+        var m = max(2, minRenderMultiple, Int(ceil(Double(minRenderLongEdge) / Double(longEdge))))
+        if m % 2 == 1 { m += 1 }
+        while m > 2 && longEdge * m > maxLongEdge { m -= 2 }
+        return m
+    }
+
     public static func plan(inputWidth: Int, inputHeight: Int,
                             drawableWidth: Int, drawableHeight: Int,
                             integerScale: Bool,
                             margin: Int = 0,
                             minRenderMultiple: Int = PreviewScaler.minRenderMultiple,
-                            maxLongEdge: Int = 4096) -> PreviewScaling {
+                            maxLongEdge: Int = PreviewScaler.maxRenderLongEdge) -> PreviewScaling {
         // The picture fits inside the drawable less `margin` on every side:
         // the drawable is the whole preview area (a zoomed-in picture fills
         // it), and at zoom 1 the picture keeps clear of its edges.
@@ -79,17 +128,18 @@ public enum PreviewScaler {
         }
         guard inputWidth > 0, inputHeight > 0 else { return renderAtFit() }
 
-        // Not integer-scaled: the image is fitted to the drawable — but it
-        // is still rendered at the scanline floor and box-filtered down to
-        // size. The look stays window-independent, and a fractional
-        // rows-per-line ratio never reaches the shader: rendering straight
-        // into the drawable gave some source lines 2 rows and others 3,
-        // which banded.
+        // What the shader is given (the picture, or a smaller one when it
+        // is too large to render), and the one render multiple for it,
+        // whatever the window.
+        let (inputWidth, inputHeight) = shaderInput(width: inputWidth, height: inputHeight, maxLongEdge: maxLongEdge)
+        let rk = renderMultiple(inputWidth: inputWidth, inputHeight: inputHeight,
+                                minRenderMultiple: minRenderMultiple, maxLongEdge: maxLongEdge)
+
+        // Not integer-scaled: the image is fitted to the drawable, the
+        // render box-filtered to that size. A fractional rows-per-line
+        // ratio never reaches the shader: rendering straight into the
+        // drawable gave some source lines 2 rows and others 3, which banded.
         guard integerScale else {
-            var rk = renderMultiple(forDisplay: 1, inputWidth: inputWidth, inputHeight: inputHeight,
-                                    minRenderMultiple: minRenderMultiple, maxLongEdge: maxLongEdge)
-            if rk > 1 && rk % 2 == 1 { rk -= 1 }     // odd multiples jitter glow shaders
-            guard max(inputWidth, inputHeight) * rk <= maxLongEdge else { return renderAtFit() }
             let (fw, fh) = fitSize()
             return PreviewScaling(renderWidth: inputWidth * rk, renderHeight: inputHeight * rk,
                                   displayWidth: fw, displayHeight: fh,
@@ -108,39 +158,16 @@ public enum PreviewScaler {
         // fit instead so the image stays visible.
         if inputWidth * kDisplay > dw || inputHeight * kDisplay > dh {
             let (fitW, fitH) = fitSize()
-            let rk = renderMultiple(forDisplay: 1, inputWidth: inputWidth,
-                                    inputHeight: inputHeight,
-                                    minRenderMultiple: minRenderMultiple,
-                                    maxLongEdge: maxLongEdge)
             return PreviewScaling(renderWidth: inputWidth * rk, renderHeight: inputHeight * rk,
                                   displayWidth: fitW, displayHeight: fitH,
                                   displayMultiple: 0, renderMultiple: rk)
         }
 
-        let kRender = renderMultiple(forDisplay: kDisplay,
-                                     inputWidth: inputWidth, inputHeight: inputHeight,
-                                     minRenderMultiple: minRenderMultiple,
-                                     maxLongEdge: maxLongEdge)
-        return PreviewScaling(renderWidth: inputWidth * kRender,
-                              renderHeight: inputHeight * kRender,
+        return PreviewScaling(renderWidth: inputWidth * rk,
+                              renderHeight: inputHeight * rk,
                               displayWidth: inputWidth * kDisplay,
                               displayHeight: inputHeight * kDisplay,
                               displayMultiple: kDisplay,
-                              renderMultiple: kRender)
-    }
-
-    /// Smallest whole multiple of `kDisplay` that reaches the render floor and
-    /// still fits the texture budget. Keeping it a multiple of the displayed
-    /// one makes the downsample an exact integer factor.
-    private static func renderMultiple(forDisplay kDisplay: Int,
-                                       inputWidth: Int, inputHeight: Int,
-                                       minRenderMultiple: Int,
-                                       maxLongEdge: Int) -> Int {
-        let longEdge = max(inputWidth, inputHeight)
-        var factor = max(1, Int(ceil(Double(minRenderMultiple) / Double(kDisplay))))
-        while factor > 1 && longEdge * kDisplay * factor > maxLongEdge {
-            factor -= 1
-        }
-        return kDisplay * factor
+                              renderMultiple: rk)
     }
 }

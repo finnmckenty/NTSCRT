@@ -34,6 +34,8 @@ public final class Pipeline {
 
     public let context: MetalContext
     private var downscaleCache: (spec: DownscaleSpec, texture: MTLTexture)?
+    /// The picture scaled to what the shader can be given (`shaderInput`).
+    private var shaderInputCache: MTLTexture?
 
     public init(context: MetalContext) {
         self.context = context
@@ -60,6 +62,7 @@ public final class Pipeline {
         } else {
             chainInput = inputTexture
         }
+        let shaderInput = self.shaderInput(for: chainInput, into: commandBuffer)
 
         let viewport = MTLViewport(
             originX: 0, originY: 0,
@@ -67,12 +70,32 @@ public final class Pipeline {
             height: Double(outputTexture.height),
             znear: 0, zfar: 1
         )
-        try chain.renderInputTexture(chainInput,
+        try chain.renderInputTexture(shaderInput,
                                      outputTexture: outputTexture,
                                      viewport: viewport,
                                      frameCount: UInt(frameCount),
                                      commandBuffer: commandBuffer)
         return outputTexture
+    }
+
+    /// What the shader is given: the chain input, or — when that is too
+    /// large to render at two rows a line (the Downscale off on a large
+    /// picture) — the chain input integrated down to the largest size that
+    /// can be (`PreviewScaler.shaderInput`).
+    private func shaderInput(for chainInput: MTLTexture, into commandBuffer: MTLCommandBuffer) -> MTLTexture {
+        let size = PreviewScaler.shaderInput(width: chainInput.width, height: chainInput.height)
+        guard size.width != chainInput.width || size.height != chainInput.height else { return chainInput }
+        if shaderInputCache?.width != size.width || shaderInputCache?.height != size.height
+            || shaderInputCache?.pixelFormat != chainInput.pixelFormat {
+            let d = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: chainInput.pixelFormat, width: size.width, height: size.height, mipmapped: false)
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            shaderInputCache = context.device.makeTexture(descriptor: d)
+        }
+        guard let scratch = shaderInputCache else { return chainInput }
+        context.downscaler.encode(into: commandBuffer, source: chainInput, destination: scratch, method: .area)
+        return scratch
     }
 
     /// Synchronously produce the chain input for a frame that needs the

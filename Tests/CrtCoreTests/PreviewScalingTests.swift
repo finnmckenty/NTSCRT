@@ -87,21 +87,71 @@ final class PreviewScalingTests: XCTestCase {
         }
     }
 
-    /// The step from render to display has to be an exact integer factor, or
-    /// the downsample resamples the scanline pattern and it shimmers.
-    func testRenderIsAWholeMultipleOfDisplay() {
-        for (iw, ih) in inputs {
+    /// The multiple the shader renders at is the look (scanline rows, the
+    /// mask's size against the picture), so it depends on the picture alone:
+    /// the same in every window, with integer scale and without.
+    func testTheRenderDependsOnlyOnThePicture() {
+        for (iw, ih) in inputs + [(256, 192), (640, 480), (1024, 768), (1920, 1080)] {
+            let expected = PreviewScaler.renderMultiple(inputWidth: iw, inputHeight: ih)
             for (dw, dh) in drawables {
-                let plan = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
-                                              drawableWidth: dw, drawableHeight: dh,
-                                              integerScale: true)
-                guard plan.displayMultiple > 0 else { continue }
-                XCTAssertEqual(plan.renderMultiple % plan.displayMultiple, 0,
-                               "render x\(plan.renderMultiple) / display x\(plan.displayMultiple) is not a whole factor")
-                XCTAssertEqual(plan.renderWidth % plan.displayWidth, 0)
-                XCTAssertEqual(plan.renderHeight % plan.displayHeight, 0)
+                for integer in [true, false] {
+                    let plan = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
+                                                  drawableWidth: dw, drawableHeight: dh,
+                                                  integerScale: integer)
+                    XCTAssertEqual(plan.renderMultiple, expected, "\(iw)x\(ih) in \(dw)x\(dh), integer \(integer)")
+                    XCTAssertEqual(plan.renderWidth, iw * expected)
+                    XCTAssertEqual(plan.renderHeight, ih * expected)
+                }
             }
         }
+        // Six rows a line, more for a small picture (so a 1920 export is
+        // scaled down from the render, not up), fewer for a large one.
+        XCTAssertEqual(PreviewScaler.renderMultiple(inputWidth: 320, inputHeight: 240), 6)
+        XCTAssertEqual(PreviewScaler.renderMultiple(inputWidth: 640, inputHeight: 480), 6)
+        XCTAssertEqual(PreviewScaler.renderMultiple(inputWidth: 256, inputHeight: 192), 8)
+        XCTAssertEqual(PreviewScaler.renderMultiple(inputWidth: 160, inputHeight: 120), 12)
+        XCTAssertEqual(PreviewScaler.renderMultiple(inputWidth: 1024, inputHeight: 768), 4)
+        XCTAssertEqual(PreviewScaler.renderMultiple(inputWidth: 1920, inputHeight: 1080), 2)
+    }
+
+    /// An export renders the shader at the size the preview does, whatever
+    /// size the file is. (Through 0.29.1 it rendered at the file's size: a
+    /// 640-wide picture was 6× in the preview and 3× in a 1920 export.)
+    func testExportsRenderAtThePreviewsSize() {
+        for (iw, ih) in [(256, 192), (320, 240), (640, 480), (1024, 768), (1904, 2544)] {
+            let plan = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
+                                          drawableWidth: 1500, drawableHeight: 1100, integerScale: true)
+            for long in [480, 1280, 1920, 3840] {
+                let target = iw >= ih ? (long, long * ih / iw) : (long * iw / ih, long)
+                let size = SupersampledPass.renderSize(chainInput: (iw, ih), target: target)
+                XCTAssertEqual(size?.width, plan.renderWidth, "\(iw)x\(ih) into \(target)")
+                XCTAssertEqual(size?.height, plan.renderHeight, "\(iw)x\(ih) into \(target)")
+            }
+        }
+    }
+
+    /// A shader that draws scanlines needs at least two rows for each line
+    /// it is given. A picture too large for that within the texture budget
+    /// (the Downscale off on a big still) reaches the shader smaller.
+    /// (At one row a line — or fewer, in an export smaller than the picture
+    /// — the aperture shader was black.)
+    func testTheShaderAlwaysGetsAtLeastTwoRowsALine() {
+        for (iw, ih) in [(1904, 2544), (3840, 2160), (2049, 100), (6000, 4000), (4096, 4096)] {
+            let given = PreviewScaler.shaderInput(width: iw, height: ih)
+            XCTAssertLessThanOrEqual(max(given.width, given.height) * 2, PreviewScaler.maxRenderLongEdge)
+            XCTAssertEqual(Double(given.width) / Double(given.height), Double(iw) / Double(ih), accuracy: 0.01)
+            for integer in [true, false] {
+                let plan = PreviewScaler.plan(inputWidth: iw, inputHeight: ih,
+                                              drawableWidth: 1500, drawableHeight: 1100, integerScale: integer)
+                XCTAssertGreaterThanOrEqual(plan.renderMultiple, 2)
+                XCTAssertEqual(plan.renderMultiple % 2, 0)
+                XCTAssertEqual(plan.renderHeight, given.height * plan.renderMultiple)
+                XCTAssertLessThanOrEqual(max(plan.renderWidth, plan.renderHeight), PreviewScaler.maxRenderLongEdge)
+            }
+        }
+        // One that fits is given as it is.
+        XCTAssertTrue(PreviewScaler.shaderInput(width: 2048, height: 1536) == (2048, 1536))
+        XCTAssertTrue(PreviewScaler.shaderInput(width: 640, height: 480) == (640, 480))
     }
 
     func testRenderStaysWithinTheTextureBudget() {
