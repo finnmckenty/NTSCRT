@@ -94,6 +94,254 @@ final class GlitchStageTests: XCTestCase {
         }
     }
 
+    // MARK: - the picture as a composite signal (RF input)
+
+    /// Color strength (0…) and luma at a pixel.
+    private func color(_ px: [UInt8], _ x: Int, _ y: Int) -> Double {
+        let (_, i, q) = yiq(px, x, y); return (i * i + q * q).squareRoot()
+    }
+    private func luma(_ px: [UInt8], _ x: Int, _ y: Int) -> Double { yiq(px, x, y).0 }
+    /// Luma of every pixel of a row, and how much a list varies.
+    private func row(_ px: [UInt8], _ y: Int) -> [Double] { (0..<W).map { yiq(px, $0, y).0 } }
+    private func spread(_ v: [Double]) -> Double {
+        let m = v.reduce(0, +) / Double(v.count)
+        return (v.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(v.count)).squareRoot()
+    }
+
+    /// With RF input off, its knobs do nothing: the picture is the input
+    /// exactly.
+    func testWithRFOffThePictureIsUntouched() throws {
+        let input = texture { x, y in (Float(x % 17) / 17, Float(y % 11) / 11, 0.4) }
+        XCTAssertEqual(try render(input, ["rf_crawl": 0.8, "rf_color": 3]), readback(input))
+    }
+
+    /// A flat color comes back from the signal as itself, and a flat gray
+    /// with no color at all. (Averaged down the picture: the tuner's noise
+    /// is in it.)
+    func testAFlatColorSurvivesTheSignal() throws {
+        for (r, g, b) in [(0.85, 0.2, 0.25), (0.2, 0.3, 0.8), (0.5, 0.5, 0.5)] as [(Float, Float, Float)] {
+            let input = texture { _, _ in (r, g, b) }
+            let cable = try render(input, time: 2.0)
+            let rf = try render(input, time: 2.0, ["rf": 1])
+            func mean(_ px: [UInt8], _ x: Int) -> (Double, Double, Double) {
+                var s = (0.0, 0.0, 0.0)
+                for y in 40..<200 { let v = yiq(px, x, y); s.0 += v.0; s.1 += v.1; s.2 += v.2 }
+                return (s.0 / 160, s.1 / 160, s.2 / 160)
+            }
+            for x in [60, 160, 250] {
+                let a = mean(cable, x), c = mean(rf, x)
+                XCTAssertEqual(c.0, a.0, accuracy: 0.02); XCTAssertEqual(c.1, a.1, accuracy: 0.02)
+                XCTAssertEqual(c.2, a.2, accuracy: 0.02)
+            }
+        }
+    }
+
+    /// White bars on black have no color; through the signal their edges
+    /// do — fringes, which differ from line to line and change from field
+    /// to field — while the middle of a wide bar and of the black between
+    /// stay colorless. The picture's finest detail (a pixel on, a pixel
+    /// off) is mostly gone. (The pattern repeats every three lines, so
+    /// each measure is averaged over the lines of one phase, which leaves
+    /// the tuner's noise out.)
+    func testEdgesGetFringesThatDifferByLineAndCrawl() throws {
+        // Bars 24 wide at x = 40…63, 120…143, 200…223; fine stripes on the
+        // right.
+        let input = texture { x, _ in
+            let on = x >= 280 ? x % 2 == 0 : (x >= 40 && (x - 40) % 80 < 24)
+            return on ? (1, 1, 1) : (0, 0, 0)
+        }
+        let cable = try render(input, time: 2.0)
+        let a = try render(input, time: 2.0, ["rf": 1])
+        let b = try render(input, time: 2.0 + 1 / NTSCTiming.fieldRate, ["rf": 1])
+        /// (Y, I, Q) at x, over the lines y, y + 3, y + 6, …
+        func at(_ px: [UInt8], _ x: Int, _ y: Int) -> (Double, Double, Double) {
+            var s = (0.0, 0.0, 0.0), n = 0.0
+            for r in stride(from: y, to: 220, by: 3) { let v = yiq(px, x, r); s.0 += v.0; s.1 += v.1; s.2 += v.2; n += 1 }
+            return (s.0 / n, s.1 / n, s.2 / n)
+        }
+        func strength(_ v: (Double, Double, Double)) -> Double { (v.1 * v.1 + v.2 * v.2).squareRoot() }
+        func fringe(_ px: [UInt8], _ y: Int) -> Double { (36..<44).map { strength(at(px, $0, y)) }.max()! }
+        XCTAssertLessThan(fringe(cable, 100), 0.01)
+        XCTAssertGreaterThan(fringe(a, 100), 0.06, "a colored fringe at the edge")
+        XCTAssertLessThan(strength(at(a, 52, 100)), 0.02, "none in the middle of the bar")
+        XCTAssertLessThan(strength(at(a, 90, 100)), 0.02, "none in the black between")
+        // The fringe's color at one place: three lines running differ, and
+        // the same line a field later differs.
+        func apart(_ p: (Double, Double, Double), _ q: (Double, Double, Double)) -> Double {
+            ((p.1 - q.1) * (p.1 - q.1) + (p.2 - q.2) * (p.2 - q.2)).squareRoot()
+        }
+        XCTAssertGreaterThan(apart(at(a, 40, 100), at(a, 40, 101)), 0.04, "line to line")
+        XCTAssertGreaterThan(apart(at(a, 40, 101), at(a, 40, 102)), 0.04)
+        XCTAssertGreaterThan(apart(at(a, 40, 100), at(b, 40, 100)), 0.04, "field to field: they crawl")
+        XCTAssertLessThan(apart(at(a, 40, 100), at(a, 40, 103)), 0.02, "the pattern is three lines tall")
+        // Fine stripes: full contrast on a cable, a fraction through the
+        // set's brightness filter.
+        func contrast(_ px: [UInt8]) -> Double { abs(at(px, 290, 100).0 - at(px, 291, 100).0) }
+        XCTAssertGreaterThan(contrast(cable), 0.95)
+        XCTAssertLessThan(contrast(a), 0.35)
+        // A wide bar keeps its level.
+        XCTAssertEqual(at(a, 52, 100).0, 1, accuracy: 0.03)
+
+        // Edge crawl: stronger fringes, a harder edge (the bar's first
+        // pixel overshoots). Color: no change to either.
+        // (On gray bars: a white-on-black edge overshoots past what the
+        // screen can show, and its fringe's color goes with it.)
+        let gray = texture { x, _ in x >= 40 && (x - 40) % 80 < 24 ? (0.65, 0.65, 0.65) : (0.35, 0.35, 0.35) }
+        let plain = try render(gray, time: 2.0, ["rf": 1])
+        let crawl = try render(gray, time: 2.0, ["rf": 1, "rf_crawl": 1])
+        XCTAssertGreaterThan(fringe(crawl, 100), 1.5 * fringe(plain, 100), "Edge crawl strengthens the fringes")
+        XCTAssertLessThan(fringe(crawl, 100), 2.6 * fringe(plain, 100), "but not four times, as it once did")
+        let peak = (40..<46).map { at(crawl, $0, 100).0 }.max()!
+        XCTAssertGreaterThan(peak, 0.70, "and hardens the edge: a light line inside it")
+        XCTAssertLessThan((40..<46).map { at(plain, $0, 100).0 }.max()!, 0.67)
+        let vivid = try render(gray, time: 2.0, ["rf": 1, "rf_color": 3])
+        XCTAssertEqual(fringe(vivid, 100), fringe(plain, 100), accuracy: 0.25 * fringe(plain, 100), "Color leaves the fringes")
+    }
+
+    /// Through the tuner there is grain even on a strong signal. A flat
+    /// color follows the Color knob — none at 0, three times at 300% — and
+    /// not Edge crawl, which makes the noise rougher instead.
+    func testTheTunersNoiseAndTheTwoKnobs() throws {
+        let gray = texture { _, _ in (0.5, 0.5, 0.5) }
+        // (Clear of the picture's own edges, which are edges like any other.)
+        func middle(_ px: [UInt8]) -> [Double] { Array(row(px, 120)[40..<280]) }
+        let quiet = spread(middle(try render(gray, time: 2.0)))
+        let grain = spread(middle(try render(gray, time: 2.0, ["rf": 1])))
+        XCTAssertLessThan(quiet, 0.002, "nothing, directly")
+        XCTAssertGreaterThan(grain, 0.004, "the tuner's noise")
+        XCTAssertLessThan(grain, 0.03, "a trace, on a strong signal")
+        let rough = try render(gray, time: 2.0, ["rf": 1, "rf_crawl": 0.8])
+        // Colored noise: color where the gray has none.
+        func speckle(_ px: [UInt8]) -> Double { (40..<280).map { color(px, $0, 120) }.reduce(0, +) / 240 }
+        XCTAssertGreaterThan(speckle(rough), 1.4 * speckle(try render(gray, time: 2.0, ["rf": 1])), "rougher, more colored")
+        XCTAssertGreaterThan(spread(middle(rough)), 1.5 * grain, "and grainier")
+
+        let red = texture { _, _ in (0.6, 0.4, 0.4) }
+        func strength(_ px: [UInt8]) -> Double {
+            // The mean color, not the mean of strengths (the noise would add to those).
+            var i = 0.0, q = 0.0, n = 0.0
+            for y in stride(from: 40, to: 200, by: 3) { for x in stride(from: 40, to: 280, by: 5) {
+                let v = yiq(px, x, y); i += v.1; q += v.2; n += 1
+            } }
+            return ((i / n) * (i / n) + (q / n) * (q / n)).squareRoot()
+        }
+        let asSent = strength(try render(red, time: 2.0, ["rf": 1]))
+        XCTAssertEqual(strength(try render(red, time: 2.0, ["rf": 1, "rf_crawl": 0.8])), asSent, accuracy: 0.12 * asSent,
+                       "Edge crawl leaves the picture's color")
+        XCTAssertEqual(strength(try render(red, time: 2.0, ["rf": 1, "rf_color": 3])), 3 * asSent, accuracy: 0.3 * asSent,
+                       "Color: three times")
+        XCTAssertEqual(strength(try render(red, time: 2.0, ["rf": 1, "rf_color": 3, "rf_crawl": 0.8])), 3 * asSent,
+                       accuracy: 0.35 * asSent, "whatever Edge crawl says")
+        XCTAssertLessThan(strength(try render(red, time: 2.0, ["rf": 1, "rf_color": 0])), 0.08 * asSent, "black and white")
+    }
+
+    /// Where one color meets another of the same brightness there is no
+    /// edge in brightness; through the tuner there are dots beside it —
+    /// brightness, different on each of three lines running — which Edge
+    /// crawl about doubles, and none out in the flat color either side.
+    func testEdgeCrawlPutsDotsBesideAChangeOfColor() throws {
+        // Two colors of equal luma (0.5): a red and a green.
+        let input = texture { x, _ in x < 160 ? (0.80, 0.35, 0.50) : (0.25, 0.65, 0.40) }
+        /// Luma at x over the lines y, y + 3, y + 6, … (one phase of the
+        /// pattern; the tuner's noise averages out).
+        func at(_ px: [UInt8], _ x: Int, _ y: Int) -> Double {
+            var s = 0.0, n = 0.0
+            for r in stride(from: y, to: 220, by: 3) { s += luma(px, x, r); n += 1 }
+            return s / n
+        }
+        /// How far apart three lines running are, at their most, near x.
+        func dots(_ px: [UInt8], _ xs: Range<Int>) -> Double {
+            xs.map { x -> Double in
+                let v = [at(px, x, 60), at(px, x, 61), at(px, x, 62)]
+                return v.max()! - v.min()!
+            }.max()!
+        }
+        let plain = try render(input, time: 2.0, ["rf": 1])
+        let crawl = try render(input, time: 2.0, ["rf": 1, "rf_crawl": 1])
+        XCTAssertGreaterThan(dots(plain, 156..<165), 0.08, "dots beside the edge")
+        XCTAssertGreaterThan(dots(crawl, 156..<165), 1.7 * dots(plain, 156..<165), "more with Edge crawl")
+        XCTAssertLessThan(dots(plain, 60..<100), 0.03, "none in the flat color")
+        XCTAssertLessThan(dots(crawl, 60..<100), 0.03, "none in the flat color")
+        XCTAssertLessThan(dots(crawl, 220..<260), 0.03)
+    }
+
+    /// Mean (Y, I, Q) at x down the picture: the three-line pattern and the
+    /// tuner's noise average out.
+    private func mean(_ px: [UInt8], _ x: Int) -> (y: Double, c: Double) {
+        var s = (0.0, 0.0, 0.0)
+        for r in 40..<202 { let v = yiq(px, x, r); s.0 += v.0; s.1 += v.1; s.2 += v.2 }
+        return (s.0 / 162, ((s.1 / 162) * (s.1 / 162) + (s.2 / 162) * (s.2 / 162)).squareRoot())
+    }
+
+    /// Tuner smear: a colored bar's color trails past its right edge and is
+    /// thin just inside its left one; its brightness stays where it was.
+    func testTunerSmearTrailsTheColorToTheRight() throws {
+        // A red bar at x = 100…139 on gray of the same brightness.
+        let input = texture { x, _ in x >= 100 && x < 140 ? (0.80, 0.35, 0.50) : (0.5, 0.5, 0.5) }
+        let plain = try render(input, time: 2.0, ["rf": 1])
+        let smear = try render(input, time: 2.0, ["rf": 1, "rf_smear": 1])
+        let full = mean(plain, 125).c
+        XCTAssertGreaterThan(full, 0.1)
+        XCTAssertLessThan(mean(plain, 148).c, 0.12 * full, "plain: no color 8 pixels past the bar")
+        XCTAssertGreaterThan(mean(smear, 148).c, 0.22 * full, "smeared: it trails")
+        XCTAssertGreaterThan(mean(plain, 103).c, 0.8 * full, "plain: all there 3 pixels in")
+        XCTAssertLessThan(mean(smear, 103).c, 0.55 * full, "smeared: thin inside the left edge")
+        XCTAssertLessThan(mean(smear, 80).c, 0.05 * full, "nothing ahead of the bar: it only trails")
+        // Half way along the knob: between.
+        let half = try render(input, time: 2.0, ["rf": 1, "rf_smear": 0.5])
+        XCTAssertGreaterThan(mean(half, 103).c, mean(smear, 103).c + 0.1 * full)
+        XCTAssertLessThan(mean(half, 103).c, mean(plain, 103).c - 0.1 * full)
+        for x in [103, 125, 148] { XCTAssertEqual(mean(smear, x).y, mean(plain, x).y, accuracy: 0.02, "brightness at \(x)") }
+    }
+
+    /// Softness blurs the brightness's detail and leaves a flat color;
+    /// Tuner offset lowers detail's contrast, weakens the color part way
+    /// along and loses it (the set's color killer) at the end.
+    func testSoftnessAndTunerOffset() throws {
+        // Stripes two pixels wide (1.5 MHz at this width) over a flat red.
+        let stripes = texture { x, _ in x % 4 < 2 ? (0.8, 0.8, 0.8) : (0.2, 0.2, 0.2) }
+        let red = texture { _, _ in (0.6, 0.4, 0.4) }
+        func contrast(_ v: [String: Double]) throws -> Double {
+            let px = try render(stripes, time: 3.0, v)
+            return abs(mean(px, 160).y + mean(px, 161).y - mean(px, 162).y - mean(px, 163).y) / 2
+        }
+        func color(_ v: [String: Double]) throws -> Double { mean(try render(red, time: 3.0, v), 160).c }
+        func level(_ v: [String: Double]) throws -> Double { mean(try render(red, time: 3.0, v), 160).y }
+        let c0 = try contrast(["rf": 1]), k0 = try color(["rf": 1]), y0 = try level(["rf": 1])
+        XCTAssertGreaterThan(c0, 0.35)
+
+        XCTAssertLessThan(try contrast(["rf": 1, "rf_soft": 0.5]), 0.75 * c0)
+        XCTAssertLessThan(try contrast(["rf": 1, "rf_soft": 1]), 0.15 * c0, "the stripes merge")
+        XCTAssertEqual(try color(["rf": 1, "rf_soft": 1]), k0, accuracy: 0.1 * k0, "Softness leaves the color")
+        XCTAssertEqual(try level(["rf": 1, "rf_soft": 1]), y0, accuracy: 0.02)
+
+        let hazy = try contrast(["rf": 1, "rf_offset": 1])
+        XCTAssertLessThan(hazy, 0.6 * c0, "Tuner offset: lower contrast")
+        XCTAssertGreaterThan(hazy, 0.2 * c0, "but the stripes are still there")
+        XCTAssertEqual(try level(["rf": 1, "rf_offset": 1]), y0, accuracy: 0.02)
+        let part = try color(["rf": 1, "rf_offset": 0.4])
+        XCTAssertLessThan(part, 0.95 * k0, "weaker color part way")
+        XCTAssertGreaterThan(part, 0.55 * k0, "the set's gain control making up for the burst")
+        XCTAssertLessThan(try color(["rf": 1, "rf_offset": 1]), 0.1 * k0, "black and white at the end")
+    }
+
+    /// The ghost is in the signal: a copy of a white bar the delay later,
+    /// at the ghost's level.
+    func testTheGhostIsInTheCompositeSignal() throws {
+        let input = texture { x, _ in x >= 100 && x < 124 ? (1, 1, 1) : (0, 0, 0) }
+        let delay = 6.0                                    // µs: well clear of the bar
+        let shift = Int((delay / (NTSCTiming.activeLength / Double(W))).rounded())
+        let px = try render(input, time: 2.0, ["rf": 1, "ghost_level": 0.3, "ghost_delay": delay])
+        let plainPx = try render(input, time: 2.0, ["rf": 1])
+        func mean(_ p: [UInt8], _ x: Int) -> Double { (60..<180).map { luma(p, x, $0) }.reduce(0, +) / 120 }
+        // (A ghost adds the signal's height above blanking, so black's
+        // setup lifts the whole picture a little; the bar's ghost is what
+        // stands above that.)
+        let lift = mean(px, 112 + shift + 40) - mean(plainPx, 112 + shift + 40)
+        XCTAssertEqual(lift, 0.3 * 7.5 / 92.5, accuracy: 0.01)
+        XCTAssertEqual(mean(px, 112 + shift) - mean(plainPx, 112 + shift) - lift, 0.3, accuracy: 0.05)
+    }
+
     func testRollingPictureShowsTheBlankingBar() throws {
         let input = texture { _, _ in (0.6, 0.6, 0.6) }
         let V = ReceiverRaster(width: W, activeLines: A).vbiLines

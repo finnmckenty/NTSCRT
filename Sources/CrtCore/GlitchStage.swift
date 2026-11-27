@@ -56,12 +56,22 @@ public final class GlitchStage {
     private struct Uniforms {
         var width: UInt32, activeLines: UInt32, vbiLines: UInt32, totalLines: UInt32
         var preEqEnd: UInt32, vsyncEnd: UInt32, postEqEnd: UInt32, ccEnabled: UInt32
-        var ccBits: UInt32, fieldIndex: UInt32, seed: UInt32, pad0: UInt32
-        var pad1: UInt32, tapsI: UInt32, tapsQ: UInt32, colorOnInit: UInt32
+        // tvInput: 1 when the picture arrives as a signal through the
+        // antenna socket (CompositeSignal); fieldNumber: fields since the
+        // start, for the subcarrier's phase.
+        var ccBits: UInt32, fieldIndex: UInt32, seed: UInt32, tvInput: UInt32
+        var fieldNumber: UInt32, tapsI: UInt32, tapsQ: UInt32, colorOnInit: UInt32
         var usPerPixel: Float, lineUS: Float, ghostLevel: Float, ghostDelay: Float
         var ghostCos: Float, ghostSin: Float, brightness: Float, pictureGain: Float
         var burstAmp: Float, chromaAlpha: Float, accGamma: Float, killerKappa: Float
         var phaseInit: Float, gainInit: Float, killerInit: Float, gateNoise: Float
+        // The composite signal: a sample's length (µs), a sample's noise
+        // for each IRE of noise in the video band, the color's strength
+        // going into it, what the tuner leaves of everything at the
+        // subcarrier, and how many samples before the pixel the filter
+        // table is in use.
+        var sampleUS: Float, sigNoise: Float, sigColor: Float, sigBurst: Float
+        var sigBefore: Float, sigPad0: Float, sigPad1: Float, sigPad2: Float
     }
 
     public func encode(into cb: MTLCommandBuffer,
@@ -80,13 +90,20 @@ public final class GlitchStage {
         let ghostAngle = -2 * Double.pi * NTSCTiming.subcarrierMHz * ghostDelay
         func snap(_ v: Float, to target: Float) -> Float { abs(v - target) < 1e-6 ? target : v }
 
+        // The picture as a composite signal: the set's two decode filters
+        // (brightness, then color), the fine tuning folded in.
+        let signal = CompositeSignal(s)
+        let sigTaps = signal.signalTaps
+
         var u = Uniforms(
             width: UInt32(input.width), activeLines: UInt32(raster.activeLines),
             vbiLines: UInt32(raster.vbiLines), totalLines: UInt32(raster.totalLines),
             preEqEnd: UInt32(raster.preEqEnd), vsyncEnd: UInt32(raster.vsyncEnd),
             postEqEnd: UInt32(raster.postEqEnd), ccEnabled: s.flag("closed_captions") ? 1 : 0,
             ccBits: plan.ccBits, fieldIndex: plan.fieldIndex, seed: 0x9E3779B9,
-            pad0: 0, pad1: 0,
+            tvInput: signal.on ? 1 : 0,
+            // (The plan's field index is the TV line its scan started on.)
+            fieldNumber: UInt32((Double(plan.fieldIndex) / Double(max(1, raster.totalLines))).rounded()),
             // Decoder chroma bandwidths: I ≈ 1.3 MHz, Q ≈ 0.6 MHz.
             tapsI: UInt32(max(1, Int((0.38 / usPerPixel).rounded()))),
             tapsQ: UInt32(max(1, Int((0.83 / usPerPixel).rounded()))),
@@ -100,13 +117,18 @@ public final class GlitchStage {
             chromaAlpha: Float(knobs.chromaAlpha), accGamma: Float(knobs.accGamma),
             killerKappa: Float(knobs.killerKappa),
             phaseInit: snap(plan.chromaPhase, to: 0), gainInit: snap(plan.chromaGain, to: 1),
-            killerInit: snap(plan.killer, to: 1), gateNoise: 0.45)
+            killerInit: snap(plan.killer, to: 1), gateNoise: 0.45,
+            sampleUS: Float(CompositeSignal.sampleUS), sigNoise: Float(CompositeSignal.noisePerSample),
+            sigColor: Float(signal.colorInSignal), sigBurst: Float(signal.burstGain),
+            sigBefore: Float(signal.tapsBefore), sigPad0: 0, sigPad1: 0, sigPad2: 0)
 
         let rowBytes = rows.count * MemoryLayout<GlitchRow>.stride
         guard let rowBuf = rows.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: rowBytes,
                                                                     options: .storageModeShared) }),
               let gateBuf = device.makeBuffer(length: rows.count * 8, options: .storageModePrivate),
-              let colorBuf = device.makeBuffer(length: rows.count * 16, options: .storageModePrivate)
+              let colorBuf = device.makeBuffer(length: rows.count * 16, options: .storageModePrivate),
+              let tapBuf = sigTaps.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count,
+                                                                       options: .storageModeShared) })
         else { return }
         // The VCR plays the picture from tape first; the TV receives that.
         var picture = input
@@ -138,6 +160,7 @@ public final class GlitchStage {
         enc.setBuffer(rowBuf, offset: 0, index: 0)
         enc.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         enc.setBuffer(colorBuf, offset: 0, index: 2)
+        enc.setBuffer(tapBuf, offset: 0, index: 3)
         enc.setTexture(picture, index: 0)
         enc.setTexture(output, index: 1)
         let w = composePipeline.threadExecutionWidth
@@ -164,12 +187,14 @@ public final class GlitchStage {
     struct GlitchU {
         uint width, activeLines, vbiLines, totalLines;
         uint preEqEnd, vsyncEnd, postEqEnd, ccEnabled;
-        uint ccBits, fieldIndex, seed, pad0;
-        uint pad1, tapsI, tapsQ, colorOnInit;
+        uint ccBits, fieldIndex, seed, tvInput;
+        uint fieldNumber, tapsI, tapsQ, colorOnInit;
         float usPerPixel, lineUS, ghostLevel, ghostDelay;
         float ghostCos, ghostSin, brightness, pictureGain;
         float burstAmp, chromaAlpha, accGamma, killerKappa;
         float phaseInit, gainInit, killerInit, gateNoise;
+        float sampleUS, sigNoise, sigColor, sigBurst;
+        float sigBefore, sigPad0, sigPad1, sigPad2;
     };
     struct Row {
         float u0; int fieldLine; float lenPrev; float lenCur; float lenNext;
@@ -288,6 +313,71 @@ public final class GlitchStage {
         return s;
     }
 
+    // ---- the picture as a composite signal (CompositeSignal.swift) ----
+    constant int SIG_AFTER = \(CompositeSignal.tapRadius);      // the filter table's reach after the pixel
+    constant int SIG_LEFT = \(CompositeSignal.tapLeft);         // and before it, at its longest
+    constant int SIG_SPAN = \(CompositeSignal.tapSpan);
+    constant int SIG_CYCLE = \(CompositeSignal.samplesPerCycle); // samples in a subcarrier cycle
+
+    // The signal at time t (µs) on a line, in its two parts: the
+    // brightness there, and the color (at the Color knob's strength) on
+    // the subcarrier, whose phase there is cs (cos, sin). A pixel is a
+    // hard-edged bar of video — the whole of it is its center's value.
+    inline float2 compositeAt(texture2d<float, access::read> src, constant GlitchU& U,
+                              int line, float t, float2 cs) {
+        float xs = (t - ACT_S) / U.usPerPixel;
+        if (xs >= 0.0 && xs < float(U.width)) t = ACT_S + (floor(xs) + 0.5) * U.usPerPixel;
+        Sig g = signalAt(src, U, line, t);
+        return float2(g.yiq.x, U.sigColor * (g.yiq.y * cs.x + g.yiq.z * cs.y));
+    }
+
+    // What the set makes of the signal around time u on a line: brightness
+    // is the signal low-passed under the subcarrier, color the signal
+    // against the subcarrier's two phases, low-passed. The table gives each
+    // sample's four weights (CompositeSignal.signalTaps): the signal's
+    // color part has the tuner's smear in its two. `noise` is the tuner's
+    // and the antenna's, per sample; the ghost is the same signal again,
+    // later (its subcarrier that much behind). Off its channel the tuner
+    // passes less of everything at the subcarrier (U.sigBurst) — the color,
+    // and the part of the brightness the set takes for color — but not of
+    // the noise that comes after it.
+    inline float3 decodeComposite(texture2d<float, access::read> src, constant GlitchU& U,
+                                  device const float* taps, float noise, int line, float u) {
+        int n0 = int(floor(u / U.sampleUS));
+        // The subcarrier steps a third of a cycle a line and a field.
+        float base = 6.2831853 * float((line + int(U.fieldNumber % 3u)) % 3) / 3.0;
+        float2 phase[6];
+        for (int k = 0; k < SIG_CYCLE; k++) {
+            float a = base + 6.2831853 * float(k) / float(SIG_CYCLE);
+            phase[k] = float2(cos(a), sin(a));
+        }
+        int L = int(U.totalLines);
+        float3 sum = float3(0.0);
+        for (int m = -int(U.sigBefore); m <= SIG_AFTER; m++) {
+            int n = n0 + m;
+            float t = (float(n) + 0.5) * U.sampleUS;
+            float2 cs = phase[((n % SIG_CYCLE) + SIG_CYCLE) % SIG_CYCLE];
+            float2 c = compositeAt(src, U, line, t, cs);
+            if (U.ghostLevel != 0.0) {
+                float tg = t - U.ghostDelay;
+                int gl = line;
+                if (tg < 0.0) { tg += U.lineUS; gl = (gl - 1 + L) % L; }
+                float2 gcs = float2(cs.x * U.ghostCos - cs.y * U.ghostSin,
+                                    cs.y * U.ghostCos + cs.x * U.ghostSin);
+                // The ghost adds the signal's variation about blanking.
+                float2 g = compositeAt(src, U, gl, tg, gcs);
+                c += U.ghostLevel * float2(g.x - ire2y(0.0), g.y);
+            }
+            float nz = noise > 0.0 ? noise * gauss(U.seed ^ 0x51ab3u, U.fieldIndex, uint(n), uint(line)) : 0.0;
+            int i = m + SIG_LEFT;
+            float lumaY = taps[i], chromaY = taps[i + SIG_SPAN];
+            float lumaC = taps[i + 2 * SIG_SPAN], chromaC = taps[i + 3 * SIG_SPAN];
+            sum.x += (c.x + nz) * lumaY + U.sigBurst * c.y * lumaC;
+            sum.yz += 2.0 * cs * (U.sigBurst * (c.x * chromaY + c.y * chromaC) + nz * chromaY);
+        }
+        return sum;
+    }
+
     // ---- pass 1: the burst gate ----
     kernel void glitch_gate(device const Row* rows [[buffer(0)]],
                             constant GlitchU& U [[buffer(1)]],
@@ -354,6 +444,7 @@ public final class GlitchStage {
     kernel void glitch_compose(device const Row* rows [[buffer(0)]],
                                constant GlitchU& U [[buffer(1)]],
                                device const float4* color [[buffer(2)]],
+                               device const float* sigTaps [[buffer(3)]],
                                texture2d<float, access::read> src [[texture(0)]],
                                texture2d<float, access::write> dst [[texture(1)]],
                                uint2 gid [[thread_position_in_grid]])
@@ -365,7 +456,7 @@ public final class GlitchStage {
         Loc l = locate(rw, u, U.totalLines);
 
         Sig s = signalAt(src, U, l.line, l.u);
-        bool plain = s.picture && s.exact
+        bool plain = s.picture && s.exact && U.tvInput == 0u
             && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0
             && U.pictureGain == 1.0 && U.brightness == 0.0
             && rc.x == 1.0 && rc.y == 0.0 && rc.z == 1.0;
@@ -373,8 +464,16 @@ public final class GlitchStage {
 
         float3 yiq = s.yiq;
 
+        // The picture as a composite signal, decoded as the set would:
+        // the ghost and the snow are in the signal, so they are not added
+        // again below. (Sync and blanking carry no color: they stay as
+        // they are.)
+        bool composite = U.tvInput != 0u && s.picture;
+        if (composite)
+            yiq = decodeComposite(src, U, sigTaps, rw.noiseIRE / 92.5 * U.sigNoise, l.line, l.u);
+
         // Multipath: the same signal again, later, possibly inverted.
-        if (U.ghostLevel != 0.0) {
+        if (U.ghostLevel != 0.0 && !composite) {
             float ug = l.u - U.ghostDelay;
             int gl = l.line;
             if (ug < 0.0) { ug += U.lineUS; gl = (gl - 1 + int(U.totalLines)) % int(U.totalLines); }
@@ -397,7 +496,7 @@ public final class GlitchStage {
 
         // Snow with the decoder's spectrum: luma near-white, chroma
         // low-passed to the I and Q bandwidths.
-        if (rw.noiseIRE > 0.0) {
+        if (rw.noiseIRE > 0.0 && !composite) {
             float n = rw.noiseIRE / 92.5;
             yiq.x += gauss(U.seed, U.fieldIndex, gid.x, gid.y * 3u) * n;
             float ni = 0.0, nq = 0.0;

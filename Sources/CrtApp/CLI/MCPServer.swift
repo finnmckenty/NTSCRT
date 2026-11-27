@@ -80,6 +80,7 @@ enum MCPServer {
         - Softness, color bleeding sideways, composite noise, dot crawl: the ntsc stage (on by default with a mild house setting).
         - Old TV, CRT, scanlines, arcade, retro game: the crt stage. glow_gauss is the default; royale shows a detailed shadow mask; hyllian and easymode are sharper, for games. "crt": "off" for footage that should look like a digitized tape rather than a screen.
         - Broadcast, antenna, bad reception, snow, rolling, picture slipping sideways, ghosting, hum bars: the glitch stage (signal_strength, vertical_hold, horizontal_hold, ghost_level, hum).
+        - A game console's picture: composite video, RF, "channel 3", an RF switch box, color fringes on text and edges, dot crawl, rainbow artifacts: the glitch stage's rf switch (with rf_crawl for crawling dots and harder edges, rf_color for the color's strength, rf_smear for color trailing to the right, rf_soft for a softer picture, rf_offset for a mistuned set) and a low Downscale (256 or 320 wide) so the fringes are bold. `describe glitch` gives typical and rough RF values on the rf control. This is separate from the ntsc stage, which works at the source's resolution before the Downscale.
         - Webcam, video call, camcorder, MiniDV, skate video, early internet video, streaming, CD-ROM, compression, blocks, datamosh: the digital stage; start from a format or a look.
         """),
         ("digital", "Digital video", """

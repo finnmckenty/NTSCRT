@@ -30,8 +30,37 @@ struct GlitchPanel: View {
                         Button("Reset") { state.resetGlitch() }
                             .buttonStyle(.borderless)
                     }
-                    ForEach(GlitchParam.controls(in: .reception)) { param in
+                    // How the picture reaches the set: directly, or through
+                    // the antenna socket in some state of repair. A starting
+                    // point for the knobs below, as the VCR's Tape and Deck.
+                    HStack(spacing: 4) {
+                        Text("Connection").font(.callout).bold().lineLimit(1)
+                        Spacer(minLength: 8)
+                        Menu {
+                            ForEach(VcrCondition.connections) { c in
+                                Button(c.name) { state.applyVcrCondition(c, keys: VcrCondition.connectionKeys) }
+                                    .help(c.help)
+                            }
+                        } label: {
+                            Text(connection?.name ?? "Custom").lineLimit(1)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("How the picture reaches the TV: directly, or through its antenna socket (RF) on a good day or a bad one. Sets RF input and its five knobs, Signal strength, Ghost and Hum; adjust them below.")
+                    }
+                    .padding(.leading, 12)
+                    let params = GlitchParam.controls(in: .reception)
+                    ForEach(Array(params.enumerated()), id: \.element.id) { i, param in
+                        if let section = param.section, i == 0 || params[i - 1].section != section {
+                            Text(section)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .padding(.leading, 12).padding(.top, 4)
+                        }
+                        // The tuner's knobs act only with the picture
+                        // coming in through it.
+                        let idle = param.id.hasPrefix("rf_") && !state.glitchSettings.flag("rf")
                         GlitchControl(param: param)
+                            .opacity(idle ? 0.4 : 1)
                     }
                 }
                 .opacity(state.glitchEnabled ? 1 : 0.4)
@@ -39,6 +68,11 @@ struct GlitchPanel: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var connection: VcrCondition? {
+        VcrCondition.matching(VcrCondition.connections, keys: VcrCondition.connectionKeys,
+                              in: state.glitchSettings.values)
     }
 }
 

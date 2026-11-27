@@ -43,6 +43,10 @@ The sidebar runs top to bottom in signal order. A section's checkbox or switch t
 - **NTSC (TV)**: the analog signal, with composite noise, chroma bleed and about fifty more settings. They're ntsc-rs's own, so presets paste both ways with the [ntsc-rs app](https://github.com/ntsc-rs/ntsc-rs/releases). (Its VHS settings are retired: the VCR replaces them. Older looks that use them still render the same.)
 - **VCR** (off by default): the picture recorded onto a simulated VHS tape and played back by a simulated deck. See [VCR](#vcr) below.
 - **Glitch**: a simulated TV, for dramatic failures like rolling, tearing, bending and snow. The circuits themselves are simulated, so glitches combine the way real ones did. With every knob healthy, the picture is untouched.
+  - **RF input** (Mac for now) sends the picture through the TV's antenna socket as a game console's signal, at the picture's own pixel scale: colored fringes on hard edges that crawl, and the tuner's noise.
+  - **Edge crawl** adds crawling dots and harder outlines. **Color** sets the picture's own color, from black and white to garish.
+  - **Tuner smear** trails the color to the right of what it colors. **Softness** blurs fine detail. **Tuner offset** mistunes the set: hazy, with color that weakens, wanders and drops out.
+  - **Connection** picks a starting point: Direct, or RF clean, typical or rough. RF is boldest on a low Downscale (256 or 320 wide), as a console's picture was.
 - **CRT**: seven RetroArch CRT shaders (crt-royale, crt-hyllian, crt-aperture, crt-easymode, two crtglow variants, crtsim) with every parameter exposed. A grayed-out control shows which switch turns it on.
 
 ### VCR

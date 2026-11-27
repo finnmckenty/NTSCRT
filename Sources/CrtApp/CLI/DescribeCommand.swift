@@ -188,6 +188,18 @@ enum DescribeCommand {
             c["note"] = "Signed: positive is tighter than the recording deck (skew, the top of the picture hooks sideways), negative is slacker (the top of the picture waves from side to side and gets noisy). 0 matches it. Up to ±0.5 is a deck out of adjustment; beyond, the effect grows four times as fast (a stretched tape: strong hooking, noise bars on LP and EP)."
         case "search_speed":
             c["note"] = "1 is normal play; 2–9 is fast-forward picture search."
+        case "rf":
+            c["note"] = "On: the picture reaches the TV as a game console's signal on channel 3 through the antenna socket — colored fringes on hard edges that crawl, fine detail softened, the tuner's noise; signal_strength and ghost_level act on that signal. Best on a low Downscale (256 or 320 wide). A typical console-on-RF look: rf on, signal_strength 0.82, ghost_level 0.14, ghost_delay 0.4, hum 0.04, rf_crawl 0.25, rf_color 1.75. Rough: signal_strength 0.72, ghost_level 0.24, ghost_delay 0.5, hum 0.1, rf_crawl 0.55, rf_color 2.65."
+        case "rf_crawl":
+            c["note"] = "Needs rf on. Dots crawling beside changes of color, harder outlines, somewhat stronger fringes, a crisper and grainier picture; little added color, and the picture's own color is not changed (that is rf_color). 0.25 typical, 0.55 rough, 1 extreme."
+        case "rf_smear":
+            c["note"] = "Needs rf on. The color trails to the right of what it colors and is thin inside left edges; brightness stays put. 0.25 slight, 0.5 typical RF, 1 heavy (about 4 pixels late at 256 wide)."
+        case "rf_soft":
+            c["note"] = "Needs rf on. Blurs the brightness's detail (small text merges); color and levels untouched. 0.2 typical RF."
+        case "rf_offset":
+            c["note"] = "Needs rf on. The set tuned off the channel: detail loses contrast with a halo round shapes, color weakens and gets noisy and unsteady, then drops to black and white from about 0.85. 0.3 is a set not quite on the channel."
+        case "rf_color":
+            c["note"] = "Needs rf on. The picture's own color: 0 black and white, 1 as sent, up to 4 (garish). 1.3 to 1.75 is how RF usually looked; fringes and noise are rf_crawl's."
         default: break
         }
         return c

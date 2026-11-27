@@ -502,7 +502,7 @@ public final class ReceiverSimulator {
                 lenNext: Float(H + timebaseError(j + 2) - timebaseError(j + 1)),
                 noiseIRE: Float(k.sigma),
                 humIRE: Float(hum(atSignalTime: tau)),
-                burstScale: Float(burstSurviving(j)),
+                burstScale: Float(burstSurviving(j) * k.burstGain),
                 gateShift: Float(loggedGate(tvLine))))
         }
 
@@ -527,7 +527,7 @@ public final class ReceiverSimulator {
                 let lo = max(g0 + NTSCTiming.gateStart, NTSCTiming.burstStart)
                 let hi = min(g0 + NTSCTiming.gateEnd, NTSCTiming.burstEnd)
                 let overlap = max(0, hi - lo) / (NTSCTiming.burstEnd - NTSCTiming.burstStart)
-                let amp = NTSCTiming.burstAmplitude * overlap * k.agc * burstSurviving(j)
+                let amp = NTSCTiming.burstAmplitude * overlap * k.agc * burstSurviving(j) * k.burstGain
                 gi = amp * NTSCTiming.burstI
                 gq = amp * NTSCTiming.burstQ
             }
@@ -985,6 +985,8 @@ struct Knobs {
     /// noise ratio of 0–60 dB: snow shows below ~45 dB, color fails below
     /// ~20, sync below ~12, as on real sets.
     let sigma: Double
+    /// What the tuner leaves of the color burst (CompositeSignal.burstGain).
+    let burstGain: Double
     /// Picture amplitude once the AGC runs out of gain (very weak signals).
     let agc: Double
     /// Vertical oscillator's free-running detuning (fraction of a field).
@@ -1030,7 +1032,16 @@ struct Knobs {
         // below 100%, heavy by 50%, color and sync failing below ~30%,
         // nothing but snow at 0. The last term takes the residual noise at
         // 100% to exactly zero.
-        sigma = max(0, 100 * pow(10, -1.9 * strength) - 1.26 * pow(strength, 4))
+        let antenna = max(0, 100 * pow(10, -1.9 * strength) - 1.26 * pow(strength, 4))
+        // Through the antenna socket the tuner's own noise is in the signal
+        // too (see CompositeSignal).
+        let rf = CompositeSignal(settings)
+        sigma = rf.on
+            ? (antenna * antenna + CompositeSignal.tunerNoiseIRE * CompositeSignal.tunerNoiseIRE).squareRoot()
+            : antenna
+        // Tuned off its channel, the tuner passes less of the burst (the
+        // color circuits make up for it, while they can).
+        burstGain = rf.burstGain
         agc = min(1, strength / 0.45)
         // Knob → detuning on a power curve, so the travel spreads over the
         // range where things happen: the picture slides from the first few

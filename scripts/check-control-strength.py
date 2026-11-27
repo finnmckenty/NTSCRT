@@ -92,6 +92,12 @@ def mad(a, b):
 # the reference render too, so only the control itself is measured).
 REQUIRES = {
     'glitch.ghost_delay': {'glitch': {'values': {'ghost_level': 0.5}}},
+    # (The tuner's knobs act with the picture coming in as RF.)
+    'glitch.rf_crawl': {'glitch': {'values': {'rf': 1}}},
+    'glitch.rf_color': {'glitch': {'values': {'rf': 1}}},
+    'glitch.rf_smear': {'glitch': {'values': {'rf': 1}}},
+    'glitch.rf_soft': {'glitch': {'values': {'rf': 1}}},
+    'glitch.rf_offset': {'glitch': {'values': {'rf': 1}}},
     'ntsc.snow_anisotropy': {'ntsc': {'settings': {'snow_intensity': 0.5}}},
     'ntsc.tracking_noise_snow_anisotropy': {'ntsc': {'settings': {'tracking_noise_snow_intensity': 0.5}}},
     'digital.low_light_noise': {'digital': {'values': {'sensor_noise': 0.5}}},
