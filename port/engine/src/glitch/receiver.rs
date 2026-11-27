@@ -195,6 +195,8 @@ pub fn floordiv(a: i64, m: i64) -> i64 {
 struct Knobs {
     settings: GlitchSettings,
     sigma: f64,
+    /// What the tuner leaves of the color burst (CompositeSignal::burst_gain).
+    burst_gain: f64,
     agc: f64,
     v_total: f64,
     v_lock: f64,
@@ -227,7 +229,12 @@ impl Knobs {
         let s = raster.scale();
         let strength = settings.get("signal_strength").clamp(0.0, 1.0);
         // Carrier-to-noise falls linearly from 38 dB to 0 across the knob.
-        let sigma = (100.0 * 10f64.powf(-1.9 * strength) - 1.26 * strength.powi(4)).max(0.0);
+        let antenna = (100.0 * 10f64.powf(-1.9 * strength) - 1.26 * strength.powi(4)).max(0.0);
+        // Through the antenna socket the tuner's own noise is in the signal
+        // too, and off its channel it passes less of the burst (composite.rs).
+        let rf = super::composite::CompositeSignal::new(settings);
+        let sigma = if rf.on { (antenna * antenna + super::composite::TUNER_NOISE_IRE * super::composite::TUNER_NOISE_IRE).sqrt() } else { antenna };
+        let burst_gain = rf.burst_gain();
         let agc = (strength / 0.45).min(1.0);
         let v_lock = 0.015;
         let v_knob = settings.get("vertical_hold");
@@ -243,6 +250,7 @@ impl Knobs {
         Self {
             settings: settings.clone(),
             sigma,
+            burst_gain,
             agc,
             v_total,
             v_lock,
@@ -712,7 +720,7 @@ impl Simulator {
                     len_next: (h + self.timebase_error(j + 2) - self.timebase_error(j + 1)) as f32,
                     noise_ire: k.sigma as f32,
                     hum_ire: self.hum(tau) as f32,
-                    burst_scale: self.burst_surviving(j) as f32,
+                    burst_scale: (self.burst_surviving(j) * k.burst_gain) as f32,
                     pad0: 0.0,
                     gate_shift: self.logged_gate(tv_line) as f32,
                     pad1: 0.0,
@@ -738,7 +746,7 @@ impl Simulator {
                 let lo = (g0 + T::GATE_START).max(T::BURST_START);
                 let hi = (g0 + T::GATE_END).min(T::BURST_END);
                 let overlap = (hi - lo).max(0.0) / (T::BURST_END - T::BURST_START);
-                let amp = T::BURST_AMPLITUDE * overlap * k.agc * self.burst_surviving(j);
+                let amp = T::BURST_AMPLITUDE * overlap * k.agc * self.burst_surviving(j) * k.burst_gain;
                 gi = amp * T::BURST_I;
                 gq = amp * T::BURST_Q;
             }

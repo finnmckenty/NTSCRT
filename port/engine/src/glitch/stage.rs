@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::params::GlitchSettings;
+use super::composite::{self, CompositeSignal};
 use super::receiver::{draw_constants, timing as T, FieldPlan, Raster, Simulator, Snapshot};
 use super::vcr::VcrGpu;
 
@@ -363,6 +364,7 @@ impl Gpu {
                 buffer(1, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer(2, wgpu::BufferBindingType::Storage { read_only: false }),
                 buffer(3, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer(4, wgpu::BufferBindingType::Storage { read_only: true }),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -408,6 +410,7 @@ impl Gpu {
         }
         let s = &plan.settings;
         let k = draw_constants(s, &raster);
+        let signal = CompositeSignal::new(s);
         let width = input.width();
         let us_per_pixel = T::ACTIVE_LENGTH / width as f64;
         let ghost_delay = s.get("ghost_delay");
@@ -445,13 +448,17 @@ impl Gpu {
             plan.cc_bits,
             plan.field_index,
             0x9E3779B9,
-            0,
-            0,
+            // 1 when the picture arrives as a signal through the antenna
+            // socket; then the fields since the start, for the subcarrier's
+            // phase (the plan's field index is the TV line its scan started
+            // on).
+            signal.on as u32,
+            (plan.field_index as f64 / (raster.total_lines() as f64).max(1.0)).round() as u32,
             ((0.38 / us_per_pixel).round() as u32).max(1),
             ((0.83 / us_per_pixel).round() as u32).max(1),
             plan.color_on as u32,
         ];
-        let f32s: [f32; 16] = [
+        let f32s: [f32; 24] = [
             us_per_pixel as f32,
             T::LINE as f32,
             s.get("ghost_level") as f32,
@@ -468,8 +475,20 @@ impl Gpu {
             snap(plan.chroma_gain, 1.0),
             snap(plan.killer, 1.0),
             0.45,
+            // The composite signal: a sample's length (µs), a sample's noise
+            // for each IRE in the video band, the color's strength going in,
+            // what the tuner leaves at the subcarrier, how many samples
+            // before the pixel the filter table is in use.
+            composite::SAMPLE_US as f32,
+            composite::noise_per_sample() as f32,
+            signal.color_in_signal() as f32,
+            signal.burst_gain() as f32,
+            signal.taps_before() as f32,
+            0.0,
+            0.0,
+            0.0,
         ];
-        let mut uniform: Vec<u8> = Vec::with_capacity(128);
+        let mut uniform: Vec<u8> = Vec::with_capacity(160);
         u32s.iter().for_each(|v| uniform.extend_from_slice(&v.to_le_bytes()));
         f32s.iter().for_each(|v| uniform.extend_from_slice(&v.to_le_bytes()));
         let buffer = |data: &[u8], usage: wgpu::BufferUsages| {
@@ -479,6 +498,7 @@ impl Gpu {
         };
         let ubuf = buffer(&uniform, wgpu::BufferUsages::UNIFORM);
         let rbuf = buffer(bytemuck::cast_slice(rows), wgpu::BufferUsages::STORAGE);
+        let tbuf = buffer(bytemuck::cast_slice(&signal.signal_taps()), wgpu::BufferUsages::STORAGE);
         let gate = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: rows.len() as u64 * 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let color = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: rows.len() as u64 * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -489,6 +509,7 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 1, resource: rbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gate.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: color.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: tbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&picture.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&output.create_view(&Default::default())) },
             ],

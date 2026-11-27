@@ -10,12 +10,14 @@
 struct GlitchU {
     width: u32, activeLines: u32, vbiLines: u32, totalLines: u32,
     preEqEnd: u32, vsyncEnd: u32, postEqEnd: u32, ccEnabled: u32,
-    ccBits: u32, fieldIndex: u32, seed: u32, pad0: u32,
-    pad1: u32, tapsI: u32, tapsQ: u32, colorOnInit: u32,
+    ccBits: u32, fieldIndex: u32, seed: u32, tvInput: u32,
+    fieldNumber: u32, tapsI: u32, tapsQ: u32, colorOnInit: u32,
     usPerPixel: f32, lineUS: f32, ghostLevel: f32, ghostDelay: f32,
     ghostCos: f32, ghostSin: f32, brightness: f32, pictureGain: f32,
     burstAmp: f32, chromaAlpha: f32, accGamma: f32, killerKappa: f32,
     phaseInit: f32, gainInit: f32, killerInit: f32, gateNoise: f32,
+    sampleUS: f32, sigNoise: f32, sigColor: f32, sigBurst: f32,
+    sigBefore: f32, sigPad0: f32, sigPad1: f32, sigPad2: f32,
 };
 struct Row {
     u0: f32, fieldLine: i32, lenPrev: f32, lenCur: f32, lenNext: f32,
@@ -38,6 +40,7 @@ const BURST_DIR: vec2<f32> = vec2<f32>(0.5446390350, -0.8386705679);
 @group(0) @binding(1) var<storage, read> rows: array<Row>;
 @group(0) @binding(2) var<storage, read_write> gate: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read_write> color: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> sigTaps: array<f32>;
 @group(0) @binding(5) var src: texture_2d<f32>;
 @group(0) @binding(6) var dst: texture_storage_2d<rgba8unorm, write>;
 
@@ -146,6 +149,74 @@ fn signalAt(line: i32, u: f32) -> Sig {
     return s;
 }
 
+// ---- the picture as a composite signal (composite.rs) ----
+// (composite.rs's TAP_RADIUS, TAP_LEFT, TAP_SPAN and SAMPLES_PER_CYCLE: a
+// test there holds these to them.)
+const SIG_AFTER: i32 = 27;   // the filter table's reach after the pixel
+const SIG_LEFT: i32 = 75;    // and before it, at its longest
+const SIG_SPAN: i32 = 103;
+const SIG_CYCLE: i32 = 6;    // samples in a subcarrier cycle
+
+// The signal at time t (µs) on a line, in its two parts: the brightness
+// there, and the color (at the Color knob's strength) on the subcarrier,
+// whose phase there is cs (cos, sin). A pixel is a hard-edged bar of video —
+// the whole of it is its center's value.
+fn compositeAt(line: i32, t_in: f32, cs: vec2<f32>) -> vec2<f32> {
+    var t = t_in;
+    let xs = (t - ACT_S) / U.usPerPixel;
+    if (xs >= 0.0 && xs < f32(U.width)) { t = ACT_S + (floor(xs) + 0.5) * U.usPerPixel; }
+    let g = signalAt(line, t);
+    return vec2<f32>(g.yiq.x, U.sigColor * (g.yiq.y * cs.x + g.yiq.z * cs.y));
+}
+
+// What the set makes of the signal around time u on a line: brightness is
+// the signal low-passed under the subcarrier, color the signal against the
+// subcarrier's two phases, low-passed. The table gives each sample's four
+// weights (CompositeSignal::signal_taps): the signal's color part has the
+// tuner's smear in its two. `noise` is the tuner's and the antenna's, per
+// sample; the ghost is the same signal again, later. Off its channel the
+// tuner passes less of everything at the subcarrier (U.sigBurst), but not of
+// the noise that comes after it.
+fn decodeComposite(noise: f32, line: i32, u: f32) -> vec3<f32> {
+    let n0 = i32(floor(u / U.sampleUS));
+    // The subcarrier steps a third of a cycle a line and a field.
+    let base = 6.2831853 * f32((line + i32(U.fieldNumber % 3u)) % 3) / 3.0;
+    var phase: array<vec2<f32>, 6>;
+    for (var k = 0; k < SIG_CYCLE; k++) {
+        let a = base + 6.2831853 * f32(k) / f32(SIG_CYCLE);
+        phase[k] = vec2<f32>(cos(a), sin(a));
+    }
+    let L = i32(U.totalLines);
+    var sum = vec3<f32>(0.0);
+    for (var m = -i32(U.sigBefore); m <= SIG_AFTER; m++) {
+        let n = n0 + m;
+        let t = (f32(n) + 0.5) * U.sampleUS;
+        let cs = phase[((n % SIG_CYCLE) + SIG_CYCLE) % SIG_CYCLE];
+        var c = compositeAt(line, t, cs);
+        if (U.ghostLevel != 0.0) {
+            var tg = t - U.ghostDelay;
+            var ghostLine = line;
+            if (tg < 0.0) { tg += U.lineUS; ghostLine = (ghostLine - 1 + L) % L; }
+            let gcs = vec2<f32>(cs.x * U.ghostCos - cs.y * U.ghostSin,
+                                cs.y * U.ghostCos + cs.x * U.ghostSin);
+            // The ghost adds the signal's variation about blanking.
+            let g = compositeAt(ghostLine, tg, gcs);
+            c += U.ghostLevel * vec2<f32>(g.x - ire2y(0.0), g.y);
+        }
+        var nz = 0.0;
+        if (noise > 0.0) { nz = noise * gauss(U.seed ^ 0x51ab3u, U.fieldIndex, u32(n), u32(line)); }
+        let i = m + SIG_LEFT;
+        let lumaY = sigTaps[i];
+        let chromaY = sigTaps[i + SIG_SPAN];
+        let lumaC = sigTaps[i + 2 * SIG_SPAN];
+        let chromaC = sigTaps[i + 3 * SIG_SPAN];
+        sum.x += (c.x + nz) * lumaY + U.sigBurst * c.y * lumaC;
+        let col = 2.0 * cs * (U.sigBurst * (c.x * chromaY + c.y * chromaC) + nz * chromaY);
+        sum = vec3<f32>(sum.x, sum.yz + col);
+    }
+    return sum;
+}
+
 // ---- pass 1: the burst gate ----
 @compute @workgroup_size(64)
 fn glitch_gate(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -220,7 +291,7 @@ fn glitch_compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let l = locate(rw, u, U.totalLines);
 
     let s = signalAt(l.line, l.u);
-    let plain = s.picture && s.exact
+    let plain = s.picture && s.exact && U.tvInput == 0u
         && U.ghostLevel == 0.0 && rw.noiseIRE == 0.0 && rw.humIRE == 0.0
         && U.pictureGain == 1.0 && U.brightness == 0.0
         && rc.x == 1.0 && rc.y == 0.0 && rc.z == 1.0;
@@ -228,12 +299,18 @@ fn glitch_compose(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var yiq = s.yiq;
 
+    // The picture as a composite signal, decoded as the set would: the
+    // ghost and the snow are in the signal, so they are not added again
+    // below. (Sync and blanking carry no color: they stay as they are.)
+    let composite = U.tvInput != 0u && s.picture;
+    if (composite) { yiq = decodeComposite(rw.noiseIRE / 92.5 * U.sigNoise, l.line, l.u); }
+
     // Multipath: the same signal again, later, possibly inverted.
-    if (U.ghostLevel != 0.0) {
+    if (U.ghostLevel != 0.0 && !composite) {
         var ug = l.u - U.ghostDelay;
-        var gl = l.line;
-        if (ug < 0.0) { ug += U.lineUS; gl = (gl - 1 + i32(U.totalLines)) % i32(U.totalLines); }
-        let g = signalAt(gl, ug);
+        var ghostLine = l.line;
+        if (ug < 0.0) { ug += U.lineUS; ghostLine = (ghostLine - 1 + i32(U.totalLines)) % i32(U.totalLines); }
+        let g = signalAt(ghostLine, ug);
         let iq = vec2<f32>(g.yiq.y * U.ghostCos - g.yiq.z * U.ghostSin,
                            g.yiq.y * U.ghostSin + g.yiq.z * U.ghostCos);
         yiq.x += U.ghostLevel * (g.yiq.x - ire2y(0.0));
@@ -250,7 +327,7 @@ fn glitch_compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     yiq.x += rw.humIRE / 92.5;
 
     // Snow with the decoder's spectrum.
-    if (rw.noiseIRE > 0.0) {
+    if (rw.noiseIRE > 0.0 && !composite) {
         let n = rw.noiseIRE / 92.5;
         yiq.x += gauss(U.seed, U.fieldIndex, gid.x, gid.y * 3u) * n;
         var ni = 0.0;

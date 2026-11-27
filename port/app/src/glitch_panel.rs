@@ -3,15 +3,43 @@
 //! with the VCR panel (vcr_panel.rs).
 
 use eframe::egui;
-use ntscrt_engine::glitch::{controls as group_controls, GlitchParam, GlitchSettings, Group, Kind};
+use ntscrt_engine::glitch::{controls as group_controls, GlitchParam, GlitchSettings, Group, Kind, VcrCondition, CONNECTIONS, CONNECTION_KEYS};
 
 use crate::ntsc_panel::edited;
 
 /// Returns true when a knob changed.
 pub fn controls(ui: &mut egui::Ui, values: &mut GlitchSettings) -> bool {
     let mut changed = false;
+    // How the picture reaches the set: directly, or through the antenna
+    // socket in some state of repair. A starting point for the knobs below,
+    // as the VCR's Tape and Deck (the Mac's Connection picker).
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Connection").strong());
+        let current = VcrCondition::matching(&CONNECTIONS, &CONNECTION_KEYS, values).map_or("Custom", |c| c.name);
+        egui::ComboBox::from_id_salt("connection picker")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for c in &CONNECTIONS {
+                    if ui.selectable_label(c.name == current, c.name).on_hover_text(c.help).clicked() {
+                        c.apply(&CONNECTION_KEYS, values);
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How the picture reaches the TV: directly, or through its antenna socket (RF) on a good day or a bad one. Sets RF input and its five knobs, Signal strength, Ghost and Hum; adjust them below.");
+    });
+    let mut section = None;
     for p in group_controls(Group::Reception) {
-        changed |= control(ui, p, values);
+        // A heading where the controls' section changes.
+        if p.section.is_some() && p.section != section {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(p.section.unwrap_or_default()).small().weak());
+        }
+        section = p.section;
+        // The tuner's knobs act only with the picture coming in through it.
+        let idle = p.id.starts_with("rf_") && !values.flag("rf");
+        changed |= ui.add_enabled_ui(!idle, |ui| control(ui, p, values)).inner;
     }
     changed
 }

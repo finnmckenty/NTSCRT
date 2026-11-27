@@ -70,25 +70,38 @@ const fn slider(min: f64, max: f64, percent: bool, unit: &'static str) -> Kind {
     Kind::Slider { min, max, percent, unit }
 }
 
-pub const PARAMS: [GlitchParam; 31] = [
+pub const PARAMS: [GlitchParam; 37] = [
+    // The antenna socket (composite.rs).
+    GlitchParam { id: "rf", label: "RF input", group: Group::Reception, kind: Kind::Toggle, default: 0.0,
+        help: "The picture reaches the TV on channel 3 through its antenna socket, as a game console or VCR sent it: one signal carrying brightness and color together, through the tuner, which the set has to pull apart again. Hard edges get colored fringes that differ from line to line and crawl, the finest detail goes, and the tuner's noise is in it. Signal strength, Ghost and Hum below act on that signal: the snow comes out colored and ragged, the ghost in whatever color its delay gives it. Boldest on a low Downscale (256 or 320 wide).", section: Some("Antenna socket") },
+    GlitchParam { id: "rf_crawl", label: "Edge crawl", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.0,
+        help: "How much the set makes of the signal's fast changes: dots crawling beside every change of color, harder outlines, somewhat stronger fringes, and a crisper, grainier picture. It adds little color of its own, and the picture's own color stays where Color puts it. Needs RF input.", section: Some("Antenna socket") },
+    GlitchParam { id: "rf_color", label: "Color", group: Group::Reception, kind: slider(0.0, 4.0, true, ""), default: 1.0,
+        help: "The picture's own color: black and white at 0, as sent at 100%, garish above. Fringes and noise are Edge crawl's. Needs RF input.", section: Some("Antenna socket") },
+    GlitchParam { id: "rf_smear", label: "Tuner smear", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.0,
+        help: "The color arrives late and takes a while to arrive: it trails to the right of everything it colors and is thin just inside each left edge. The brightness stays where it is. Needs RF input.", section: Some("Antenna socket") },
+    GlitchParam { id: "rf_soft", label: "Softness", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.0,
+        help: "The set passes less of the picture's detail: edges blur, small text merges. Color and levels are untouched. Needs RF input.", section: Some("Antenna socket") },
+    GlitchParam { id: "rf_offset", label: "Tuner offset", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.0,
+        help: "The set tuned off the channel. The picture goes hazy — detail loses contrast, with a soft halo round large shapes — and the color starves: noisier, its hue wandering from line to line, then flickering out to black and white near the end. Needs RF input.", section: Some("Antenna socket") },
     GlitchParam { id: "signal_strength", label: "Signal strength", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 1.0,
-        help: "Antenna signal level. Lowering it brings snow first, then flickering and lost color as the color burst drowns, then broken sync as the sync pulses do — the order a real set fails in.", section: None },
+        help: "Antenna signal level. Lowering it brings snow first, then flickering and lost color as the color burst drowns, then broken sync as the sync pulses do — the order a real set fails in.", section: Some("Reception") },
     GlitchParam { id: "vertical_hold", label: "Vertical hold", group: Group::Reception, kind: slider(-1.0, 1.0, true, ""), default: 0.0,
-        help: "The vertical oscillator's free-running speed. Near the center the sync pulses pull it into lock; past the lock range the picture rolls, with the blanking bar crossing the screen.", section: None },
+        help: "The vertical oscillator's free-running speed. Near the center the sync pulses pull it into lock; past the lock range the picture rolls, with the blanking bar crossing the screen.", section: Some("Reception") },
     GlitchParam { id: "horizontal_hold", label: "Horizontal hold", group: Group::Reception, kind: slider(-1.0, 1.0, true, ""), default: 0.0,
-        help: "The horizontal oscillator's free-running speed. Off center the picture slides sideways as the AFC strains to hold it; further and lock breaks — the picture tears into diagonal bands and the color goes wild.", section: None },
+        help: "The horizontal oscillator's free-running speed. Off center the picture slides sideways as the AFC strains to hold it; further and lock breaks — the picture tears into diagonal bands and the color goes wild.", section: Some("Reception") },
     GlitchParam { id: "afc_speed", label: "AFC response", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.5,
-        help: "How quickly the TV's horizontal AFC follows timing changes. Slow sets ride out noise but bend at the top of the picture on VCR playback (flagging); fast ones track tape timing but jitter in noise.", section: None },
+        help: "How quickly the TV's horizontal AFC follows timing changes. Slow sets ride out noise but bend at the top of the picture on VCR playback (flagging); fast ones track tape timing but jitter in noise.", section: Some("Reception") },
     GlitchParam { id: "brightness", label: "Brightness", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "Raises the picture tube's black level, as turning up a TV's brightness did. The blanking intervals and sync pulses become visible when the picture rolls or tears.", section: None },
+        help: "Raises the picture tube's black level, as turning up a TV's brightness did. The blanking intervals and sync pulses become visible when the picture rolls or tears.", section: Some("Reception") },
     GlitchParam { id: "ghost_level", label: "Ghost", group: Group::Reception, kind: slider(-1.0, 1.0, true, ""), default: 0.0,
-        help: "A reflected copy of the signal arriving late (multipath). Negative values invert it, as reflections often did. Its color shifts with the delay, because the delayed color carrier arrives at a different phase.", section: None },
+        help: "A reflected copy of the signal arriving late (multipath). Negative values invert it, as reflections often did. Its color shifts with the delay, because the delayed color carrier arrives at a different phase.", section: Some("Reception") },
     GlitchParam { id: "ghost_delay", label: "Ghost delay", group: Group::Reception, kind: slider(0.2, 12.0, false, "µs"), default: 2.0,
-        help: "How late the reflection arrives. 1 µs is about 2% of the picture width — a reflection path roughly 300 m longer than the direct one.", section: None },
+        help: "How late the reflection arrives. 1 µs is about 2% of the picture width — a reflection path roughly 300 m longer than the direct one.", section: Some("Reception") },
     GlitchParam { id: "hum", label: "Hum", group: Group::Reception, kind: slider(0.0, 1.0, true, ""), default: 0.0,
-        help: "Mains hum leaking into the video: light and dark bars that drift slowly up the picture (60 Hz hum against the 59.94 Hz color field rate), bending the picture where the sync separator is pulled off.", section: None },
+        help: "Mains hum leaking into the video: light and dark bars that drift slowly up the picture (60 Hz hum against the 59.94 Hz color field rate), bending the picture where the sync separator is pulled off.", section: Some("Reception") },
     GlitchParam { id: "closed_captions", label: "Caption data", group: Group::Reception, kind: Kind::Toggle, default: 1.0,
-        help: "Line 21 carries closed-caption data — the row of dashes visible in the blanking bar when the picture rolls.", section: None },
+        help: "Line 21 carries closed-caption data — the row of dashes visible in the blanking bar when the picture rolls.", section: Some("Reception") },
     GlitchParam { id: "vcr", label: "VCR", group: Group::Deck, kind: Kind::Toggle, default: 0.0,
         help: "Play the picture from a simulated VHS tape: it is recorded as an FM signal on the tape's slanted tracks and read back by the deck's two spinning heads, through everything the tape and heads are doing to it.", section: None },
     GlitchParam { id: "tape_seed", label: "Cassette", group: Group::Tape, kind: Kind::Seed, default: 1.0,
@@ -152,7 +165,7 @@ pub fn controls(group: Group) -> impl Iterator<Item = &'static GlitchParam> {
 /// brightness, captions — apply when the field is drawn, so changing them
 /// never needs the history re-run.
 pub fn is_timing(id: &str) -> bool {
-    matches!(id, "signal_strength" | "vertical_hold" | "horizontal_hold" | "afc_speed" | "hum")
+    matches!(id, "signal_strength" | "vertical_hold" | "horizontal_hold" | "afc_speed" | "hum" | "rf" | "rf_offset")
         || param(id).is_some_and(|p| p.group != Group::Reception)
 }
 
@@ -213,6 +226,30 @@ pub const DECKS: [VcrCondition; 5] = [
         name: "Neglected",
         help: "Worn, filthy, and still in use.",
         values: &[("head_wear", 0.5), ("head_dirt", 0.55), ("dirt_buildup", 0.8), ("head_mismatch", 0.5), ("head_switch", 2.5), ("back_tension", -0.35), ("transport_flutter", 0.45)],
+    },
+];
+
+/// How the picture reaches the TV: starting points for the RF controls and
+/// the knobs that go with a connection (the Glitch panel's Connection
+/// picker; Mac: VcrCondition.connections).
+pub const CONNECTION_KEYS: [&str; 10] = ["rf", "rf_crawl", "rf_color", "rf_smear", "rf_soft", "rf_offset", "signal_strength", "ghost_level", "ghost_delay", "hum"];
+
+pub const CONNECTIONS: [VcrCondition; 4] = [
+    VcrCondition { name: "Direct", help: "Brightness and color arrive apart: nothing in the way.", values: &[] },
+    VcrCondition {
+        name: "RF, clean",
+        help: "Channel 3 through the antenna socket, everything screwed down tight: fringes on edges, the color trailing a little, a little grain, a faint echo after edges.",
+        values: &[("rf", 1.0), ("signal_strength", 0.9), ("ghost_level", 0.08), ("ghost_delay", 0.35), ("rf_crawl", 0.1), ("rf_color", 1.3), ("rf_smear", 0.25)],
+    },
+    VcrCondition {
+        name: "RF, typical",
+        help: "A console through a switch box: grain, ragged fringes, color trailing to the right, a close ghost, a little soft.",
+        values: &[("rf", 1.0), ("signal_strength", 0.82), ("ghost_level", 0.14), ("ghost_delay", 0.4), ("hum", 0.04), ("rf_crawl", 0.25), ("rf_color", 1.75), ("rf_smear", 0.5), ("rf_soft", 0.2)],
+    },
+    VcrCondition {
+        name: "RF, rough",
+        help: "A loose switch box on an old set, not quite on the channel: snow, a strong ghost, hum, hard crawling edges, smeared and unsteady color.",
+        values: &[("rf", 1.0), ("signal_strength", 0.72), ("ghost_level", 0.24), ("ghost_delay", 0.5), ("hum", 0.1), ("rf_crawl", 0.55), ("rf_color", 2.65), ("rf_smear", 0.75), ("rf_soft", 0.35), ("rf_offset", 0.3)],
     },
 ];
 
@@ -402,6 +439,30 @@ mod tests {
             assert!((TransportParams::new(&s).tension - k).abs() < 1e-6, "{k}: {}", TransportParams::new(&s).tension);
             // A version 4 look is read as it is.
             assert_eq!(GlitchSettings::upgraded(&old, 4), old);
+        }
+    }
+
+    /// The Connection picker: each condition is found again from its values,
+    /// Direct is every knob at rest, and the RF ones run rougher.
+    #[test]
+    fn the_connections_run_from_direct_to_a_rough_socket() {
+        let base = GlitchSettings::default();
+        let mut direct = base.clone();
+        direct.values.insert("rf".into(), 1.0);
+        direct.values.insert("hum".into(), 0.9);
+        CONNECTIONS[0].apply(&CONNECTION_KEYS, &mut direct);
+        assert_eq!(direct, base);
+        let (mut strength, mut ghost, mut crawl, mut smear) = (1.01, -0.01, -0.01, -0.01);
+        for c in &CONNECTIONS {
+            let mut s = base.clone();
+            s.values.insert("rf_color".into(), 3.9);
+            c.apply(&CONNECTION_KEYS, &mut s);
+            assert_eq!(VcrCondition::matching(&CONNECTIONS, &CONNECTION_KEYS, &s).map(|m| m.name), Some(c.name));
+            if !s.flag("rf") {
+                continue;
+            }
+            assert!(s.get("signal_strength") < strength && s.get("ghost_level") > ghost && s.get("rf_crawl") > crawl && s.get("rf_smear") > smear, "{}", c.name);
+            (strength, ghost, crawl, smear) = (s.get("signal_strength"), s.get("ghost_level"), s.get("rf_crawl"), s.get("rf_smear"));
         }
     }
 

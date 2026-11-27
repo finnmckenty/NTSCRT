@@ -487,7 +487,7 @@ The Glitch section is a TV receiver simulated scan line by scan line — glitche
 - Wiring: `ExportFrame.encode(glitch:)` and `Mp4Exporter.Settings.glitch` / `GifExporter.Settings.glitch` are **required** (nil = off); the app builds them only through `AppState.mp4ExportSettings` / `gifExportSettings` / `exportPNG` (PNG reuses the preview's renderer so a still matches the screen). Keyframes carry `glitchValues` (sliders interpolate, toggles hold); presets store `"glitch": {enabled, values}`, and presets without it load with the stage off.
 - Tests (release gate): `ReceiverSimulatorTests` (identity at several raster sizes, lock/roll both ways, slide-then-tear, flagging vs AFC speed, sync breakup, snow, clog at 24/30/60 fps, search bars, tracking band, determinism), `GlitchStageTests` (exact identity on GPU, blanking bar, diagonal blanking, ghost offset + hue rotation by 2π·fsc·τ, color killer, DOC, captions, brightness), `GlitchCheckpointTests` (checkpointed seeks equal full re-runs, constant and keyframed), `ExportGlitchTests` (MP4/GIF apply the stage, healthy = unchanged, keyframes reach it).
 
-### RF input: the picture as a composite signal (Mac only so far)
+### RF input: the picture as a composite signal
 
 The picture reaching the set on channel 3 through the antenna socket, as a game console sends it (2026-11-26; Finn: the difference between a NES on RF and on composite cables). `CrtCore/CompositeSignal.swift`, `decodeComposite` in `GlitchStage.swift`.
 
@@ -509,7 +509,7 @@ The picture reaching the set on channel 3 through the antenna socket, as a game 
 - **Not modeled:** the tuner's IF curve, sound and its beat with the color, interference from another transmitter (drawn in the first tuner build; Finn: "looks awful"), a comb filter, the burst passing through the same path (the color reference is the receiver's as before), a plain composite cable (the signal without the tuner: removed, see above).
 - **Cost:** 55 samples a pixel (103 with Tuner smear), twice that with a ghost: not measurable at 256 wide; about 4 ms a frame at 720 wide with a ghost and no smear.
 - **Tests:** `CompositeSignalTests` (the switch, the filters' pass and stop bands, Edge crawl's gains with the color held, Color, the connections), `GlitchStageTests` (off: exact; a flat color comes back as itself; white bars get fringes that differ on three lines running and a field later, none in flat areas, fine stripes softened; the tuner's noise; Edge crawl strengthens fringes by under 2.6 times, hardens edges, roughens the noise, doubles the dots beside a change of color and leaves a flat color; Color scales a flat color and not the fringes; the ghost at its level and delay).
-- **Next, not done:** Windows.
+- **Windows:** `port/engine/src/glitch/composite.rs` (the model and its tests, line for line), `decodeComposite` in `glitch.wgsl` (the filter table is a storage buffer at binding 4; its sizes are constants in the shader, held to composite.rs by a test), the receiver's noise and burst in `receiver.rs`, the Connection picker and section headings in `app/src/glitch_panel.rs`. `port/scripts/make-glitch-refs.sh` has RF cases for the receiver (exact) and the rendered field (CI: within a level of the Mac's).
 
 ### Sliders and Space
 
